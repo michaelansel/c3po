@@ -194,7 +194,11 @@ All success criteria met:
 
 ## CURRENT TASKS: Production Readiness
 
-### TASK 1: Clean Room Validation in Fresh Containers
+**STATUS: INCOMPLETE** - The following tasks have NOT been done yet.
+
+---
+
+### TASK 1: Clean Room Validation in Fresh Containers [NOT STARTED]
 
 Test the entire setup from scratch in two fresh finch containers to ensure all dependencies are documented and setup steps are complete.
 
@@ -226,9 +230,11 @@ Test the entire setup from scratch in two fresh finch containers to ensure all d
 
 ---
 
-### TASK 2: Comprehensive Test Plan
+### TASK 2: Comprehensive Test Plan [NOT STARTED]
 
-Create `tests/TEST_PLAN.md` documenting all test cases.
+**REQUIRED DELIVERABLE:** Create file `tests/TEST_PLAN.md`
+
+This file does NOT exist yet. Create it.
 
 **Test Categories:**
 
@@ -262,7 +268,14 @@ Create `tests/TEST_PLAN.md` documenting all test cases.
 
 ---
 
-### TASK 3: Plugin-Based Enrollment
+### TASK 3: Plugin-Based Enrollment [NOT STARTED]
+
+**REQUIRED DELIVERABLES:**
+1. Create file `plugin/setup.py` - setup script that configures MCP
+2. Update `plugin/.claude-plugin/plugin.json` - add Setup hook
+3. Create/update `plugin/skills/setup/SKILL.md` - `/coordinate setup` skill
+
+These files do NOT exist yet or need modification. Create them.
 
 **Goal:** Plugin installation IS the enrollment. No separate scripts needed.
 
@@ -329,9 +342,11 @@ On install, the plugin should:
 
 ---
 
-### TASK 4: Documentation Polish
+### TASK 4: Documentation Polish [NOT STARTED]
 
-Update all documentation for production readiness.
+**REQUIRED:** Update documentation to reflect plugin-based enrollment.
+
+Current docs reference manual `claude mcp add` commands. Update them to show plugin install flow.
 
 **README.md** - Quick start:
 ```markdown
