@@ -12,8 +12,8 @@
 - [x] **Step 8**: Plugin skeleton and MCP configuration
 - [x] **Step 9**: Stop hook implementation
 - [x] **Step 10**: SessionStart hook for registration
-- [ ] **Step 11**: End-to-end two-agent test
-- [ ] **Step 12**: Error handling and graceful degradation
+- [x] **Step 11**: End-to-end two-agent test
+- [x] **Step 12**: Error handling and graceful degradation
 - [ ] **Step 13**: /coordinate skill and documentation
 
 ---

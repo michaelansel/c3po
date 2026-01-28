@@ -12,6 +12,12 @@ class MessageManager:
     """Manages message queues using Redis."""
 
     INBOX_PREFIX = "c3po:inbox:"
+    RATE_LIMIT_PREFIX = "c3po:rate:"
+
+    # Configuration
+    RATE_LIMIT_REQUESTS = 10  # Max requests per window
+    RATE_LIMIT_WINDOW_SECONDS = 60  # Window size in seconds
+    MESSAGE_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 
     def __init__(self, redis_client: redis.Redis):
         """Initialize with Redis client.
@@ -39,6 +45,47 @@ class MessageManager:
         """
         unique = uuid.uuid4().hex[:8]
         return f"{from_agent}{self.REQUEST_ID_DELIMITER}{to_agent}{self.REQUEST_ID_DELIMITER}{unique}"
+
+    def check_rate_limit(self, agent_id: str) -> tuple[bool, int]:
+        """Check if an agent has exceeded rate limit.
+
+        Uses a sliding window counter in Redis.
+
+        Args:
+            agent_id: The agent to check
+
+        Returns:
+            Tuple of (is_allowed, current_count)
+        """
+        rate_key = f"{self.RATE_LIMIT_PREFIX}{agent_id}"
+        now = datetime.now(timezone.utc).timestamp()
+        window_start = now - self.RATE_LIMIT_WINDOW_SECONDS
+
+        # Remove old entries outside the window
+        self.redis.zremrangebyscore(rate_key, "-inf", window_start)
+
+        # Count current requests in window
+        current_count = self.redis.zcard(rate_key)
+
+        if current_count >= self.RATE_LIMIT_REQUESTS:
+            return False, current_count
+
+        return True, current_count
+
+    def record_request(self, agent_id: str) -> None:
+        """Record a request for rate limiting.
+
+        Args:
+            agent_id: The agent making the request
+        """
+        rate_key = f"{self.RATE_LIMIT_PREFIX}{agent_id}"
+        now = datetime.now(timezone.utc).timestamp()
+
+        # Add this request to the sorted set (score = timestamp)
+        self.redis.zadd(rate_key, {f"{now}": now})
+
+        # Set expiry on the rate limit key
+        self.redis.expire(rate_key, self.RATE_LIMIT_WINDOW_SECONDS * 2)
 
     def send_request(
         self,
@@ -75,18 +122,54 @@ class MessageManager:
         inbox_key = f"{self.INBOX_PREFIX}{to_agent}"
         self.redis.rpush(inbox_key, json.dumps(request_data))
 
+        # Set TTL on inbox key (24h default) - prevents stale messages accumulating
+        self.redis.expire(inbox_key, self.MESSAGE_TTL_SECONDS)
+
         return request_data
+
+    def _is_message_expired(self, message: dict) -> bool:
+        """Check if a message has expired based on its timestamp.
+
+        Args:
+            message: Message dict with timestamp field
+
+        Returns:
+            True if message is expired, False otherwise
+        """
+        timestamp_str = message.get("timestamp")
+        if not timestamp_str:
+            return False  # No timestamp, assume not expired
+
+        try:
+            msg_time = datetime.fromisoformat(timestamp_str)
+            now = datetime.now(timezone.utc)
+            age_seconds = (now - msg_time).total_seconds()
+            return age_seconds > self.MESSAGE_TTL_SECONDS
+        except (ValueError, TypeError):
+            return False  # Invalid timestamp, assume not expired
+
+    def _filter_expired_messages(self, messages: list[dict]) -> list[dict]:
+        """Filter out expired messages from a list.
+
+        Args:
+            messages: List of message dicts
+
+        Returns:
+            List with expired messages removed
+        """
+        return [m for m in messages if not self._is_message_expired(m)]
 
     def get_pending_requests(self, agent_id: str) -> list[dict]:
         """Get and consume all pending requests for an agent.
 
         This removes the requests from the inbox (they are consumed).
+        Expired messages are automatically filtered out.
 
         Args:
             agent_id: The agent whose inbox to check
 
         Returns:
-            List of request dicts, oldest first (FIFO)
+            List of request dicts, oldest first (FIFO), excluding expired
         """
         inbox_key = f"{self.INBOX_PREFIX}{agent_id}"
         requests = []
@@ -100,7 +183,10 @@ class MessageManager:
             if isinstance(data, bytes):
                 data = data.decode()
 
-            requests.append(json.loads(data))
+            message = json.loads(data)
+            # Skip expired messages
+            if not self._is_message_expired(message):
+                requests.append(message)
 
         return requests
 
@@ -108,12 +194,13 @@ class MessageManager:
         """Peek at pending requests without consuming them.
 
         Used by REST API for hooks to check status.
+        Expired messages are automatically filtered out.
 
         Args:
             agent_id: The agent whose inbox to check
 
         Returns:
-            List of request dicts, oldest first (FIFO)
+            List of request dicts, oldest first (FIFO), excluding expired
         """
         inbox_key = f"{self.INBOX_PREFIX}{agent_id}"
 
@@ -124,7 +211,10 @@ class MessageManager:
         for data in raw_items:
             if isinstance(data, bytes):
                 data = data.decode()
-            requests.append(json.loads(data))
+            message = json.loads(data)
+            # Skip expired messages
+            if not self._is_message_expired(message):
+                requests.append(message)
 
         return requests
 

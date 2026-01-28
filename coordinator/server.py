@@ -1,6 +1,7 @@
 """C3PO Coordinator - FastMCP server for multi-agent coordination."""
 
 import os
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -12,6 +13,12 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from starlette.responses import JSONResponse
 
 from coordinator.agents import AgentManager
+from coordinator.errors import (
+    agent_not_found,
+    invalid_request,
+    rate_limited,
+    ErrorCodes,
+)
 from coordinator.messaging import MessageManager
 
 # Redis connection
@@ -131,6 +138,54 @@ def _register_agent_impl(
     return manager.register_agent(agent_id, capabilities)
 
 
+# Validation patterns
+AGENT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
+MAX_MESSAGE_LENGTH = 50000  # 50KB max message size
+
+
+def _validate_agent_id(agent_id: str, field_name: str = "agent_id") -> None:
+    """Validate an agent ID format.
+
+    Args:
+        agent_id: The ID to validate
+        field_name: Name of the field for error messages
+
+    Raises:
+        ToolError: If validation fails
+    """
+    if not agent_id:
+        err = invalid_request(field_name, "cannot be empty")
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    if not AGENT_ID_PATTERN.match(agent_id):
+        err = invalid_request(
+            field_name,
+            "must be 1-64 characters, alphanumeric with _ . - (no leading special chars)"
+        )
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+
+def _validate_message(message: str) -> None:
+    """Validate a message.
+
+    Args:
+        message: The message to validate
+
+    Raises:
+        ToolError: If validation fails
+    """
+    if not message or not message.strip():
+        err = invalid_request("message", "cannot be empty")
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    if len(message) > MAX_MESSAGE_LENGTH:
+        err = invalid_request(
+            "message",
+            f"exceeds maximum length of {MAX_MESSAGE_LENGTH} characters"
+        )
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+
 def _send_request_impl(
     msg_manager: MessageManager,
     agent_manager: AgentManager,
@@ -140,16 +195,37 @@ def _send_request_impl(
     context: Optional[str] = None,
 ) -> dict:
     """Send a request to another agent."""
+    # Validate inputs
+    _validate_agent_id(target, "target")
+    _validate_message(message)
+    if context and len(context) > MAX_MESSAGE_LENGTH:
+        err = invalid_request(
+            "context",
+            f"exceeds maximum length of {MAX_MESSAGE_LENGTH} characters"
+        )
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    # Check rate limit
+    is_allowed, current_count = msg_manager.check_rate_limit(from_agent)
+    if not is_allowed:
+        err = rate_limited(
+            from_agent,
+            msg_manager.RATE_LIMIT_REQUESTS,
+            msg_manager.RATE_LIMIT_WINDOW_SECONDS
+        )
+        raise ToolError(f"{err.message} {err.suggestion}")
+
     # Check if target agent exists
     target_agent = agent_manager.get_agent(target)
     if target_agent is None:
         # Get list of available agents for helpful error
         available = agent_manager.list_agents()
         agent_ids = [a["id"] for a in available]
-        raise ToolError(
-            f"Agent '{target}' not found. "
-            f"Available agents: {agent_ids if agent_ids else 'none registered'}"
-        )
+        err = agent_not_found(target, agent_ids)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    # Record request for rate limiting
+    msg_manager.record_request(from_agent)
 
     return msg_manager.send_request(from_agent, target, message, context)
 
@@ -170,6 +246,26 @@ def _respond_to_request_impl(
     status: str = "success",
 ) -> dict:
     """Send a response to a previous request."""
+    # Validate response
+    if not response or not response.strip():
+        err = invalid_request("response", "cannot be empty")
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    if len(response) > MAX_MESSAGE_LENGTH:
+        err = invalid_request(
+            "response",
+            f"exceeds maximum length of {MAX_MESSAGE_LENGTH} characters"
+        )
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    # Validate request_id format
+    if not request_id or "::" not in request_id:
+        err = invalid_request(
+            "request_id",
+            "invalid format - should be from a previous request"
+        )
+        raise ToolError(f"{err.message} {err.suggestion}")
+
     return msg_manager.respond_to_request(request_id, from_agent, response, status)
 
 
@@ -184,8 +280,10 @@ def _wait_for_response_impl(
     if result is None:
         return {
             "status": "timeout",
+            "code": ErrorCodes.TIMEOUT,
             "request_id": request_id,
             "message": f"No response received within {timeout} seconds",
+            "suggestion": "The target agent may be offline or busy. Check agent status with list_agents.",
         }
     return result
 
@@ -200,7 +298,9 @@ def _wait_for_request_impl(
     if result is None:
         return {
             "status": "timeout",
+            "code": ErrorCodes.TIMEOUT,
             "message": f"No request received within {timeout} seconds",
+            "suggestion": "No agents have sent requests. You can continue with other work.",
         }
     return result
 
