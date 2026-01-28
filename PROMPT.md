@@ -97,3 +97,83 @@ Each of the 13 steps produces a working, demoable increment. Complete the demo f
 # Stop everything
 ./scripts/test-local.sh stop
 ```
+
+---
+
+## CURRENT TASK: Validation
+
+Implementation is complete (all 13 steps done, 70 tests passing). Now need to validate end-to-end.
+
+### Task 1: Fix Deployment to NAS
+
+The deploy script doesn't work due to architecture mismatch (arm64 Mac → x86_64 NAS).
+
+**Fix approach:** Build Docker image directly on NAS.
+
+1. Copy source to NAS via tar:
+   ```bash
+   cd coordinator
+   tar czf - --exclude='__pycache__' --exclude='.venv' --exclude='.pytest_cache' --exclude='tests' . | \
+     ssh admin@mkansel-nas.home.qerk.be "mkdir -p /volume1/enc-containers/c3po/coordinator && cd /volume1/enc-containers/c3po/coordinator && tar xzf -"
+   ```
+
+2. Build on NAS:
+   ```bash
+   ssh admin@mkansel-nas.home.qerk.be "cd /volume1/enc-containers/c3po/coordinator && docker build -t c3po-coordinator:latest ."
+   ```
+
+3. Start containers:
+   ```bash
+   ssh admin@mkansel-nas.home.qerk.be "cd /volume1/enc-containers/c3po/coordinator && docker-compose up -d"
+   ```
+
+4. Verify:
+   ```bash
+   curl http://mkansel-nas.home.qerk.be:8420/api/health
+   # Expected: {"status":"ok","agents_online":0}
+   ```
+
+5. Update `scripts/deploy.sh` to use this approach instead of local build + push.
+
+### Task 2: Two-Agent End-to-End Test
+
+Prove two Claude Code agents can communicate.
+
+1. Install plugin locally:
+   ```bash
+   cp -r plugin ~/.claude/plugins/c3po
+   ```
+
+2. **Terminal 1 - Agent A:**
+   ```bash
+   mkdir -p /tmp/agent-a && cd /tmp/agent-a
+   export C3PO_AGENT_ID=agent-a
+   export C3PO_COORDINATOR_URL=http://mkansel-nas.home.qerk.be:8420
+   claude
+   ```
+   Run `/coordinate status` - should show 1 agent online.
+
+3. **Terminal 2 - Agent B:**
+   ```bash
+   mkdir -p /tmp/agent-b && cd /tmp/agent-b
+   export C3PO_AGENT_ID=agent-b
+   export C3PO_COORDINATOR_URL=http://mkansel-nas.home.qerk.be:8420
+   claude
+   ```
+   Run `/coordinate status` - should show 2 agents online.
+
+4. **Agent A → Agent B:** In Terminal 1, ask Claude to send a message to agent-b.
+
+5. **Agent B responds:** Complete any task in Terminal 2; Stop hook should trigger and show pending request.
+
+6. **Agent A receives:** The `wait_for_response` should return with the answer.
+
+### Success Criteria
+
+- [ ] Coordinator running at http://mkansel-nas.home.qerk.be:8420
+- [ ] Both agents visible via `list_agents`
+- [ ] Request sent A → B
+- [ ] Request received by B (Stop hook or manual check)
+- [ ] Response sent B → A
+- [ ] Response received by A
+- [ ] Round-trip < 10 seconds
