@@ -100,72 +100,263 @@ Each of the 13 steps produces a working, demoable increment. Complete the demo f
 
 ---
 
-## CURRENT TASK: Two-Agent End-to-End Validation
+## Headless Mode Configuration
 
-**Status:** Coordinator deployed and running at http://mkansel-nas.home.qerk.be:8420
+Plugin `.mcp.json` files are not automatically loaded in headless mode (`claude -p`). MCP servers must be added directly to Claude Code configuration.
 
-### Problem
+### Adding MCP Server for Headless Mode
 
-The plugin provides MCP tools (`list_agents`, `send_request`, etc.) but they're not available in headless mode (`claude -p`) because the plugin's `.mcp.json` isn't being loaded.
+**User scope (recommended)**: Available from any directory:
+```bash
+claude mcp add c3po http://mkansel-nas.home.qerk.be:8420/mcp \
+  -t http -s user -H "X-Agent-ID: your-agent-name"
+```
 
-### Task: Make MCP Tools Work in Headless Mode
+**Project scope**: Only available in the current project:
+```bash
+claude mcp add c3po http://mkansel-nas.home.qerk.be:8420/mcp \
+  -t http -H "X-Agent-ID: your-agent-name"
+```
 
-Investigate and fix why the c3po MCP server isn't connecting when using `claude -p`.
+**Per-invocation**: For different agent IDs in testing, use `--mcp-config` with a JSON file:
+```bash
+# Create config file
+cat > /tmp/agent-a-mcp.json << 'EOF'
+{
+  "mcpServers": {
+    "c3po": {
+      "type": "http",
+      "url": "http://mkansel-nas.home.qerk.be:8420/mcp",
+      "headers": { "X-Agent-ID": "agent-a" }
+    }
+  }
+}
+EOF
 
-**Debug steps:**
+# Use with --strict-mcp-config to only use this config
+echo "Your prompt" | claude -p --mcp-config /tmp/agent-a-mcp.json --strict-mcp-config \
+  --allowedTools "mcp__c3po__list_agents,mcp__c3po__send_request"
+```
 
-1. Check if plugin is installed:
-   ```bash
-   ls ~/.claude/plugins/c3po/
-   ```
+### Pre-approving MCP Tools
 
-2. Check plugin MCP config:
-   ```bash
-   cat ~/.claude/plugins/c3po/.mcp.json
-   ```
+In headless mode, use `--allowedTools` to pre-approve MCP tools:
+```bash
+--allowedTools "mcp__c3po__list_agents,mcp__c3po__send_request,mcp__c3po__wait_for_response,mcp__c3po__wait_for_request,mcp__c3po__respond_to_request"
+```
 
-3. Test coordinator is reachable:
-   ```bash
-   curl http://mkansel-nas.home.qerk.be:8420/api/health
-   ```
+### Verify MCP Configuration
 
-4. Try adding MCP server directly to Claude Code config instead of via plugin:
-   ```bash
-   claude mcp add c3po --transport http http://mkansel-nas.home.qerk.be:8420/mcp
-   ```
+```bash
+claude mcp list  # Shows configured MCP servers and connection status
+```
 
-5. Test with headless mode:
-   ```bash
-   C3PO_AGENT_ID=test-agent claude -p "Use list_agents to see online agents"
-   ```
+---
 
-**If MCP config approach doesn't work**, try:
-- Check Claude Code docs for how plugins load MCP servers
-- Check if environment variables are being passed correctly
-- Check if there's a different way to specify MCP servers for headless mode
+## Two-Agent Test (Validated 2026-01-28)
 
-### Once MCP Works: Two-Agent Test
+### Test Results
 
-1. **Start Agent B in background** (listening for requests):
+All success criteria met:
+- [x] MCP tools available in headless mode (via `claude mcp add` with user scope)
+- [x] Agent A can send request to Agent B
+- [x] Agent B receives and responds
+- [x] Agent A receives response
+
+**Test log:**
+1. Agent A sent request `agent-a::agent-b::aa9f50dd`: "What is the capital of France?"
+2. Agent B received request and responded: "The capital of France is Paris."
+3. Agent A successfully retrieved response with status: success
+
+### Running Two-Agent Tests
+
+1. **Create MCP configs for each agent** (see above)
+
+2. **Start Agent B** (listener):
    ```bash
    cd /tmp/agent-b
-   C3PO_AGENT_ID=agent-b C3PO_COORDINATOR_URL=http://mkansel-nas.home.qerk.be:8420 \
-     claude -p "You are agent-b. Use wait_for_request with a 120 second timeout to wait for incoming requests. When you receive a request, process it and use respond_to_request to reply." &
+   echo "Use mcp__c3po__wait_for_request with timeout 120. When you receive a request, respond using mcp__c3po__respond_to_request." | \
+     claude -p --mcp-config /tmp/agent-b-mcp.json --strict-mcp-config \
+     --allowedTools "mcp__c3po__wait_for_request,mcp__c3po__respond_to_request" &
    ```
 
-2. **Run Agent A** (sends request):
+3. **Wait for Agent B to register** (10-20 seconds)
+
+4. **Run Agent A** (sender):
    ```bash
    cd /tmp/agent-a
-   C3PO_AGENT_ID=agent-a C3PO_COORDINATOR_URL=http://mkansel-nas.home.qerk.be:8420 \
-     claude -p "Use send_request to ask agent-b 'What is 2+2?', then use wait_for_response to get the answer. Report the response you received."
+   echo "Use mcp__c3po__send_request to ask agent-b 'What is 2+2?', then use mcp__c3po__wait_for_response with timeout 60." | \
+     claude -p --mcp-config /tmp/agent-a-mcp.json --strict-mcp-config \
+     --allowedTools "mcp__c3po__send_request,mcp__c3po__wait_for_response"
    ```
 
-3. **Verify** Agent A reports receiving a response from Agent B.
+---
 
-### Success Criteria
+## CURRENT TASKS: Production Readiness
 
-- [ ] MCP tools available in headless mode
-- [ ] Agent A can send request to Agent B
-- [ ] Agent B receives and responds
-- [ ] Agent A receives response
-- [ ] Document how to properly configure MCP for headless mode
+### TASK 1: Clean Room Validation in Fresh Containers
+
+Test the entire setup from scratch in two fresh finch containers to ensure all dependencies are documented and setup steps are complete.
+
+**Steps:**
+
+1. Create two fresh containers:
+   ```bash
+   finch run -it --name c3po-test-a ubuntu:22.04 bash
+   finch run -it --name c3po-test-b ubuntu:22.04 bash
+   ```
+
+2. In each container, follow ONLY the documented setup steps:
+   - Install prerequisites
+   - Install Claude Code
+   - Configure c3po MCP server
+   - Verify connection to coordinator
+
+3. Test agent communication between containers
+
+4. **Document any missing steps or dependencies discovered**
+
+5. Update `docs/SETUP.md` with complete, tested instructions
+
+**Success Criteria:**
+- [ ] Fresh container setup works with documented steps only
+- [ ] No undocumented dependencies
+- [ ] Both containers can communicate through coordinator
+- [ ] Setup time < 15 minutes per host
+
+---
+
+### TASK 2: Comprehensive Test Plan
+
+Create `tests/TEST_PLAN.md` documenting all test cases.
+
+**Test Categories:**
+
+1. **Unit Tests** (existing)
+   - Coordinator: agents, messaging, errors, REST API
+   - Hooks: check_inbox, register_agent
+
+2. **Integration Tests**
+   - Coordinator + Redis
+   - MCP tool invocation via HTTP
+   - Hook execution
+
+3. **End-to-End Tests**
+   - Two-agent request/response
+   - Multi-turn conversation (3+ exchanges)
+   - Timeout handling
+   - Agent disconnect/reconnect
+   - Coordinator restart recovery
+
+4. **Error Handling Tests**
+   - Coordinator unavailable
+   - Target agent offline
+   - Request timeout
+   - Invalid agent ID
+
+5. **Performance Tests**
+   - Latency < 10 seconds
+   - 10+ concurrent agents
+
+**Deliverable:** `tests/TEST_PLAN.md` with test ID, description, steps, expected result, automated vs manual status.
+
+---
+
+### TASK 3: Single-Command Enrollment
+
+**Goal:** ONE command to join a Claude Code instance to the c3po network.
+
+**Target UX:**
+```bash
+# Join the network (one command!)
+curl -sSL https://raw.githubusercontent.com/USER/c3po/main/scripts/enroll.sh | bash -s -- http://nas:8420 my-agent-name
+```
+
+Or if Claude Code is running:
+```
+/c3po join http://nas:8420
+```
+
+**Create `scripts/enroll.sh`:**
+```bash
+#!/bin/bash
+# Usage: curl ... | bash -s -- <coordinator-url> [agent-id]
+
+COORDINATOR_URL="${1:?Usage: $0 <coordinator-url> [agent-id]}"
+AGENT_ID="${2:-$(basename $PWD)}"
+
+# 1. Verify coordinator is reachable
+# 2. Add MCP server to Claude Code config (user scope)
+# 3. Test connection
+# 4. Print success message with next steps
+```
+
+**Requirements:**
+- Works on fresh system with only Claude Code installed
+- Sets up MCP server with correct URL and agent ID
+- Verifies connection works
+- Provides clear success/failure feedback
+- Idempotent (safe to run multiple times)
+
+**Success Criteria:**
+- [ ] Single command enrolls CC instance
+- [ ] Works from any directory
+- [ ] Clear success/error messages
+- [ ] README.md shows one-liner prominently
+
+---
+
+### TASK 4: Documentation Polish
+
+Update all documentation for production readiness.
+
+**README.md** - Quick start:
+```markdown
+# C3PO - Claude Code Coordination
+
+Connect Claude Code instances across machines.
+
+## Quick Start
+
+1. Deploy coordinator:
+   ```bash
+   ./scripts/deploy.sh full
+   ```
+
+2. Enroll any Claude Code instance:
+   ```bash
+   curl -sSL .../enroll.sh | bash -s -- http://your-nas:8420
+   ```
+
+3. Done! Your CC instance can now communicate with others.
+```
+
+**docs/SETUP.md** - Complete setup (validated in clean room)
+
+**docs/USAGE.md** - How to use (sending messages, skills, etc.)
+
+**docs/TROUBLESHOOTING.md** - Common issues and solutions
+
+---
+
+## DEFINITION OF DONE
+
+All tasks complete when:
+
+1. **Clean room validated** - Fresh container setup works
+2. **Test plan complete** - `tests/TEST_PLAN.md` exists
+3. **Single-command enrollment** - `scripts/enroll.sh` works
+4. **Documentation updated** - README, SETUP, USAGE, TROUBLESHOOTING
+5. **All tests passing** - Unit, integration, e2e
+
+**Final user experience:**
+```bash
+# Self-host coordinator (one-time)
+git clone ... && ./scripts/deploy.sh full
+
+# Enroll any CC instance (one command per machine)
+curl -sSL .../enroll.sh | bash -s -- http://nas:8420
+
+# Start collaborating immediately
+# (hooks auto-trigger, tools available, agents discover each other)
+```
