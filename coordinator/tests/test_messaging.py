@@ -12,6 +12,7 @@ from coordinator.server import (
     _get_pending_requests_impl,
     _respond_to_request_impl,
     _wait_for_response_impl,
+    _wait_for_request_impl,
 )
 from fastmcp.exceptions import ToolError
 
@@ -336,3 +337,74 @@ class TestResponseHandling:
 
         assert result["status"] == "error"
         assert result["response"] == "Failed to do that"
+
+
+class TestWaitForRequest:
+    """Tests for wait_for_request blocking behavior."""
+
+    def test_wait_for_request_returns_when_request_arrives(self, message_manager):
+        """wait_for_request should return when a request arrives."""
+        # Send a request first
+        message_manager.send_request("agent-a", "agent-b", "Hello!")
+
+        # Now wait should return immediately
+        result = message_manager.wait_for_request("agent-b", timeout=5)
+
+        assert result is not None
+        assert result["from_agent"] == "agent-a"
+        assert result["to_agent"] == "agent-b"
+        assert result["message"] == "Hello!"
+
+    def test_wait_for_request_times_out_correctly(self, message_manager):
+        """wait_for_request should return None on timeout."""
+        # Don't send any request
+        start = time.time()
+        result = message_manager.wait_for_request("agent-b", timeout=1)
+        elapsed = time.time() - start
+
+        assert result is None
+        assert elapsed >= 1  # Should have waited at least 1 second
+
+    def test_wait_for_request_multiple_queued_return_in_order(self, message_manager):
+        """Multiple queued requests should return in FIFO order."""
+        # Queue multiple requests
+        message_manager.send_request("agent-a", "agent-b", "first")
+        message_manager.send_request("agent-c", "agent-b", "second")
+        message_manager.send_request("agent-d", "agent-b", "third")
+
+        # Wait should return them in order
+        result1 = message_manager.wait_for_request("agent-b", timeout=1)
+        result2 = message_manager.wait_for_request("agent-b", timeout=1)
+        result3 = message_manager.wait_for_request("agent-b", timeout=1)
+
+        assert result1["message"] == "first"
+        assert result2["message"] == "second"
+        assert result3["message"] == "third"
+
+        # Fourth wait should timeout
+        result4 = message_manager.wait_for_request("agent-b", timeout=1)
+        assert result4 is None
+
+    def test_wait_for_request_tool_returns_timeout_dict(self, message_manager):
+        """_wait_for_request_impl should return timeout dict on timeout."""
+        result = _wait_for_request_impl(
+            message_manager,
+            agent_id="agent-b",
+            timeout=1,
+        )
+
+        assert result["status"] == "timeout"
+        assert "No request received" in result["message"]
+
+    def test_wait_for_request_consumes_request(self, message_manager):
+        """wait_for_request should consume the request (not leave it in inbox)."""
+        message_manager.send_request("agent-a", "agent-b", "consume me")
+
+        # Wait gets the request
+        result = message_manager.wait_for_request("agent-b", timeout=1)
+        assert result is not None
+        assert result["message"] == "consume me"
+
+        # Inbox should be empty now
+        pending = message_manager.get_pending_requests("agent-b")
+        assert len(pending) == 0

@@ -248,3 +248,36 @@ class MessageManager:
             # Not our response, put it back for another waiter
             # (push to front since it was originally at front)
             self.redis.lpush(response_key, json.dumps(response))
+
+    def wait_for_request(
+        self,
+        agent_id: str,
+        timeout: int = 60,
+    ) -> Optional[dict]:
+        """Wait for an incoming request using blocking Redis BLPOP.
+
+        This is an alternative to polling get_pending_requests.
+        Blocks until a request arrives or timeout.
+
+        Args:
+            agent_id: The agent waiting for requests
+            timeout: Timeout in seconds (default 60)
+
+        Returns:
+            Request dict if received, or None if timeout
+        """
+        inbox_key = f"{self.INBOX_PREFIX}{agent_id}"
+
+        # BLPOP returns (key, value) or None on timeout
+        # timeout=0 means block forever, so ensure at least 1 second
+        blpop_timeout = max(1, timeout)
+        result = self.redis.blpop(inbox_key, timeout=blpop_timeout)
+
+        if result is None:
+            return None
+
+        _, data = result
+        if isinstance(data, bytes):
+            data = data.decode()
+
+        return json.loads(data)
