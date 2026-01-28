@@ -11,12 +11,14 @@ COPY __init__.py .
 COPY server.py .
 COPY agents.py .
 COPY messaging.py .
+COPY errors.py .
 
 # Create the coordinator package structure
 RUN mkdir -p coordinator && \
     cp __init__.py coordinator/ && \
     cp agents.py coordinator/ && \
-    cp messaging.py coordinator/
+    cp messaging.py coordinator/ && \
+    cp errors.py coordinator/
 
 # Set Python path to find the coordinator module
 ENV PYTHONPATH=/app

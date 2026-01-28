@@ -9,6 +9,8 @@ NAS_HOST="${NAS_HOST:-admin@mkansel-nas.home.qerk.be}"
 NAS_DATA_DIR="${NAS_DATA_DIR:-/volume1/enc-containers/c3po}"
 COORDINATOR_PORT="${COORDINATOR_PORT:-8420}"
 REDIS_PORT="${REDIS_PORT:-6380}"  # Non-standard to avoid conflicts
+# Docker path on Synology NAS (not in default SSH PATH)
+NAS_DOCKER="/usr/local/bin/docker"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -47,42 +49,26 @@ EOF
     exit 1
 }
 
-# Build the coordinator image locally using finch (Docker alternative on macOS)
+# Copy source to NAS and build image there (avoids arm64/x86_64 architecture mismatch)
 cmd_build() {
-    log "Building coordinator image..."
+    log "Copying source to NAS..."
     cd "$PROJECT_DIR/coordinator"
 
-    if command -v finch &>/dev/null; then
-        finch build -t c3po-coordinator:latest .
-    elif command -v docker &>/dev/null; then
-        docker build -t c3po-coordinator:latest .
-    else
-        error "Neither finch nor docker found"
-        exit 1
-    fi
+    # Create coordinator directory on NAS and copy source
+    ssh "$NAS_HOST" "mkdir -p ${NAS_DATA_DIR}/coordinator"
+    tar czf - --exclude='__pycache__' --exclude='.venv' --exclude='.pytest_cache' --exclude='tests' . | \
+        ssh "$NAS_HOST" "cd ${NAS_DATA_DIR}/coordinator && tar xzf -"
+
+    log "Building image on NAS..."
+    ssh "$NAS_HOST" "cd ${NAS_DATA_DIR}/coordinator && ${NAS_DOCKER} build -t c3po-coordinator:latest ."
 
     log "Build complete"
 }
 
-# Save and copy image to NAS
+# Alias for backwards compatibility (build now happens on NAS)
 cmd_push() {
-    log "Saving image to tarball..."
-    local tmpfile="/tmp/c3po-coordinator.tar"
-
-    if command -v finch &>/dev/null; then
-        finch save c3po-coordinator:latest -o "$tmpfile"
-    else
-        docker save c3po-coordinator:latest -o "$tmpfile"
-    fi
-
-    log "Copying to NAS..."
-    scp "$tmpfile" "${NAS_HOST}:/tmp/c3po-coordinator.tar"
-
-    log "Loading image on NAS..."
-    ssh "$NAS_HOST" "docker load -i /tmp/c3po-coordinator.tar && rm /tmp/c3po-coordinator.tar"
-
-    rm -f "$tmpfile"
-    log "Push complete"
+    warn "The 'push' command is no longer needed - 'build' now builds directly on NAS"
+    log "Run 'deploy' to start containers"
 }
 
 # Deploy containers on NAS
@@ -93,26 +79,26 @@ cmd_deploy() {
     ssh "$NAS_HOST" "mkdir -p ${NAS_DATA_DIR}/redis"
 
     # Stop existing containers
-    ssh "$NAS_HOST" "docker stop c3po-coordinator c3po-redis 2>/dev/null || true"
-    ssh "$NAS_HOST" "docker rm c3po-coordinator c3po-redis 2>/dev/null || true"
+    ssh "$NAS_HOST" "${NAS_DOCKER} stop c3po-coordinator c3po-redis 2>/dev/null || true"
+    ssh "$NAS_HOST" "${NAS_DOCKER} rm c3po-coordinator c3po-redis 2>/dev/null || true"
 
     # Create network if not exists
-    ssh "$NAS_HOST" "docker network create c3po-net 2>/dev/null || true"
+    ssh "$NAS_HOST" "${NAS_DOCKER} network create c3po-net 2>/dev/null || true"
 
     # Start Redis
     log "Starting Redis..."
-    ssh "$NAS_HOST" "docker run -d \
+    # Note: Not using --appendonly to avoid permission issues on Synology NAS
+    # Data persistence is not critical for the coordinator
+    ssh "$NAS_HOST" "${NAS_DOCKER} run -d \
         --name c3po-redis \
         --network c3po-net \
         --restart unless-stopped \
-        -v ${NAS_DATA_DIR}/redis:/data \
         -p ${REDIS_PORT}:6379 \
-        redis:7-alpine \
-        redis-server --appendonly yes"
+        redis:7-alpine"
 
     # Start Coordinator
     log "Starting Coordinator..."
-    ssh "$NAS_HOST" "docker run -d \
+    ssh "$NAS_HOST" "${NAS_DOCKER} run -d \
         --name c3po-coordinator \
         --network c3po-net \
         --restart unless-stopped \
@@ -132,16 +118,16 @@ cmd_deploy() {
 cmd_logs() {
     local follow="${1:-}"
     if [[ "$follow" == "-f" ]]; then
-        ssh "$NAS_HOST" "docker logs -f c3po-coordinator"
+        ssh "$NAS_HOST" "${NAS_DOCKER} logs -f c3po-coordinator"
     else
-        ssh "$NAS_HOST" "docker logs --tail 50 c3po-coordinator"
+        ssh "$NAS_HOST" "${NAS_DOCKER} logs --tail 50 c3po-coordinator"
     fi
 }
 
 # Show status
 cmd_status() {
     log "Container status:"
-    ssh "$NAS_HOST" "docker ps --filter name=c3po --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
+    ssh "$NAS_HOST" "${NAS_DOCKER} ps --filter name=c3po --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
 
     echo ""
     log "Health check:"
@@ -155,7 +141,7 @@ cmd_status() {
 # Stop containers
 cmd_stop() {
     log "Stopping containers..."
-    ssh "$NAS_HOST" "docker stop c3po-coordinator c3po-redis 2>/dev/null || true"
+    ssh "$NAS_HOST" "${NAS_DOCKER} stop c3po-coordinator c3po-redis 2>/dev/null || true"
     log "Stopped"
 }
 
@@ -167,7 +153,6 @@ cmd_shell() {
 # Full deployment
 cmd_full() {
     cmd_build
-    cmd_push
     cmd_deploy
 }
 
