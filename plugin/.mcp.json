@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "c3po": {
+      "type": "http",
+      "url": "${C3PO_COORDINATOR_URL:-http://localhost:8420}/mcp",
+      "headers": {
+        "X-Agent-ID": "${C3PO_AGENT_ID:-default}"
+      }
+    }
+  }
+}

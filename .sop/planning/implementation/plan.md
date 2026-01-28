@@ -9,7 +9,7 @@
 - [x] **Step 5**: Blocking wait_for_request tool
 - [x] **Step 6**: REST API for hooks (/api/pending, /api/health)
 - [x] **Step 7**: Docker packaging for coordinator
-- [ ] **Step 8**: Plugin skeleton and MCP configuration
+- [x] **Step 8**: Plugin skeleton and MCP configuration
 - [ ] **Step 9**: Stop hook implementation
 - [ ] **Step 10**: SessionStart hook for registration
 - [ ] **Step 11**: End-to-end two-agent test
