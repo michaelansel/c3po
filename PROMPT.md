@@ -57,3 +57,43 @@ Each of the 13 steps produces a working, demoable increment. Complete the demo f
 - **Coordinator**: Python 3.11+, FastMCP, Redis, uvicorn
 - **Plugin**: Claude Code plugin format (.claude-plugin/, .mcp.json, hooks/)
 - **Deployment**: Docker, docker-compose
+
+## Deployment
+
+### Production (Synology NAS)
+
+```bash
+# Full deployment (build, push, deploy)
+./scripts/deploy.sh full
+
+# Individual commands
+./scripts/deploy.sh build    # Build image locally with finch/docker
+./scripts/deploy.sh push     # Copy image to NAS
+./scripts/deploy.sh deploy   # Start containers on NAS
+./scripts/deploy.sh status   # Check container status
+./scripts/deploy.sh logs     # View coordinator logs
+./scripts/deploy.sh stop     # Stop containers
+```
+
+**NAS Details:**
+- Host: `admin@mkansel-nas.home.qerk.be`
+- Data directory: `/volume1/enc-containers/c3po`
+- Coordinator port: 8420
+- Production URL: `http://mkansel-nas.home.qerk.be:8420`
+
+### Local Testing
+
+```bash
+# Start local Redis + coordinator
+./scripts/test-local.sh start
+
+# Launch test agents (in separate terminals)
+./scripts/test-local.sh agent-a
+./scripts/test-local.sh agent-b
+
+# Check status
+./scripts/test-local.sh status
+
+# Stop everything
+./scripts/test-local.sh stop
+```
