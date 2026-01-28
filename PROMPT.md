@@ -342,7 +342,51 @@ On install, the plugin should:
 
 ---
 
-### TASK 4: Documentation Polish [NOT STARTED]
+### TASK 4: Graceful Agent Disconnect [NOT STARTED]
+
+**REQUIRED DELIVERABLES:**
+1. Add `unregister_agent` endpoint to coordinator (`POST /api/unregister`)
+2. Create `plugin/hooks/unregister_agent.py` - calls unregister on exit
+3. Add `SessionEnd` hook to `plugin/.claude-plugin/plugin.json`
+4. Add cleanup logic - remove agents offline > 24h (optional background task or on list_agents)
+
+**Problem:** Currently agents just disappear - no graceful disconnect. Old agents stay in Redis forever as "offline".
+
+**Solution:** Use `SessionEnd` hook to unregister when CC exits.
+
+```python
+# plugin/hooks/unregister_agent.py
+#!/usr/bin/env python3
+import os
+import urllib.request
+
+COORDINATOR = os.environ.get("C3PO_COORDINATOR_URL", "http://localhost:8420")
+AGENT_ID = os.environ.get("C3PO_AGENT_ID", os.path.basename(os.getcwd()))
+
+try:
+    req = urllib.request.Request(
+        f"{COORDINATOR}/api/unregister",
+        headers={"X-Agent-ID": AGENT_ID},
+        method="POST"
+    )
+    urllib.request.urlopen(req, timeout=5)
+except:
+    pass  # Best effort, don't block exit
+```
+
+**Coordinator changes:**
+- Add `POST /api/unregister` endpoint that removes agent from registry
+- Or add `unregister_agent` MCP tool
+- Consider: just mark offline immediately vs delete entirely
+
+**Success Criteria:**
+- [ ] Agent is marked offline/removed when CC exits gracefully
+- [ ] `list_agents` doesn't show stale agents (or marks them clearly)
+- [ ] Old agents (>24h offline) are cleaned up
+
+---
+
+### TASK 5: Documentation Polish [NOT STARTED]
 
 **REQUIRED:** Update documentation to reflect plugin-based enrollment.
 
@@ -384,8 +428,9 @@ All tasks complete when:
 1. **Clean room validated** - Fresh container setup works with plugin install only
 2. **Test plan complete** - `tests/TEST_PLAN.md` exists
 3. **Plugin-based enrollment** - `/plugin install c3po` fully configures everything
-4. **Documentation updated** - README, SETUP, USAGE, TROUBLESHOOTING
-5. **All tests passing** - Unit, integration, e2e
+4. **Graceful disconnect** - SessionEnd hook unregisters agent, stale cleanup works
+5. **Documentation updated** - README, SETUP, USAGE, TROUBLESHOOTING
+6. **All tests passing** - Unit, integration, e2e
 
 **Final user experience:**
 ```bash
