@@ -386,7 +386,61 @@ except:
 
 ---
 
-### TASK 5: Documentation Polish [NOT STARTED]
+### TASK 5: Agent ID Collision Handling [NOT STARTED]
+
+**Problem:** If you open Claude Code twice in the same folder, both get the same agent ID. They collide - sharing one inbox, messages go to whichever instance grabs them first.
+
+**REQUIRED DELIVERABLES:**
+1. Update `coordinator/agents.py` to track `session_id` per agent
+2. Update registration logic to detect collisions
+3. Auto-suffix agent ID when collision detected (`agent-2`, `agent-3`, etc.)
+4. Return the actual agent ID used in registration response
+5. Update hooks to use the assigned agent ID (may differ from requested)
+
+**Implementation:**
+
+```python
+def register_agent(agent_id, session_id, capabilities=None):
+    existing = get_agent(agent_id)
+
+    # Same session reconnecting - OK, update heartbeat
+    if existing and existing.get("session_id") == session_id:
+        return update_heartbeat(agent_id)
+
+    # Different session, agent online - collision!
+    if existing and existing["status"] == "online":
+        # Find next available suffix
+        base_id = agent_id
+        counter = 2
+        while True:
+            candidate = f"{base_id}-{counter}"
+            existing_candidate = get_agent(candidate)
+            if not existing_candidate or existing_candidate["status"] == "offline":
+                agent_id = candidate
+                break
+            counter += 1
+
+    # Register with session_id
+    agent_data = {
+        "id": agent_id,
+        "session_id": session_id,
+        "capabilities": capabilities or [],
+        ...
+    }
+    return agent_data  # Includes actual agent_id used
+```
+
+**Session ID source:** CC provides session ID in hooks via `session_id` field in stdin JSON. Pass through to coordinator.
+
+**Success Criteria:**
+- [ ] Two CC instances in same folder get unique agent IDs
+- [ ] Reconnecting same session keeps same agent ID
+- [ ] Registration response includes actual assigned agent ID
+- [ ] Messages route to correct instance
+
+---
+
+### TASK 6: Documentation Polish [NOT STARTED]
 
 **REQUIRED:** Update documentation to reflect plugin-based enrollment.
 
@@ -429,8 +483,9 @@ All tasks complete when:
 2. **Test plan complete** - `tests/TEST_PLAN.md` exists
 3. **Plugin-based enrollment** - `/plugin install c3po` fully configures everything
 4. **Graceful disconnect** - SessionEnd hook unregisters agent, stale cleanup works
-5. **Documentation updated** - README, SETUP, USAGE, TROUBLESHOOTING
-6. **All tests passing** - Unit, integration, e2e
+5. **Collision handling** - Two CCs in same folder get unique agent IDs
+6. **Documentation updated** - README, SETUP, USAGE, TROUBLESHOOTING
+7. **All tests passing** - Unit, integration, e2e
 
 **Final user experience:**
 ```bash
