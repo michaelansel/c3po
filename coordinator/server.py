@@ -9,6 +9,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from starlette.responses import JSONResponse
 
 from coordinator.agents import AgentManager
 from coordinator.messaging import MessageManager
@@ -55,6 +56,54 @@ mcp = FastMCP(
     ),
 )
 mcp.add_middleware(AgentIdentityMiddleware())
+
+
+# REST API endpoints for hooks (non-MCP access)
+@mcp.custom_route("/api/health", methods=["GET"])
+async def api_health(request):
+    """Health check endpoint.
+
+    Returns coordinator status and count of online agents.
+    Used by hooks and monitoring systems.
+    """
+    try:
+        online_count = agent_manager.count_online_agents()
+        return JSONResponse({
+            "status": "ok",
+            "agents_online": online_count,
+        })
+    except Exception as e:
+        return JSONResponse(
+            {"status": "error", "error": str(e)},
+            status_code=500,
+        )
+
+
+@mcp.custom_route("/api/pending", methods=["GET"])
+async def api_pending(request):
+    """Check pending requests for an agent without consuming them.
+
+    Requires X-Agent-ID header. Used by Stop hooks to check inbox.
+    Does NOT consume messages - just peeks at the inbox.
+    """
+    agent_id = request.headers.get("x-agent-id")
+    if not agent_id:
+        return JSONResponse(
+            {"error": "Missing X-Agent-ID header"},
+            status_code=400,
+        )
+
+    try:
+        requests = message_manager.peek_pending_requests(agent_id)
+        return JSONResponse({
+            "count": len(requests),
+            "requests": requests,
+        })
+    except Exception as e:
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500,
+        )
 
 
 # Tool implementations (testable standalone functions)
@@ -137,6 +186,21 @@ def _wait_for_response_impl(
             "status": "timeout",
             "request_id": request_id,
             "message": f"No response received within {timeout} seconds",
+        }
+    return result
+
+
+def _wait_for_request_impl(
+    msg_manager: MessageManager,
+    agent_id: str,
+    timeout: int = 60,
+) -> dict:
+    """Wait for an incoming request (blocking)."""
+    result = msg_manager.wait_for_request(agent_id, timeout)
+    if result is None:
+        return {
+            "status": "timeout",
+            "message": f"No request received within {timeout} seconds",
         }
     return result
 
@@ -260,6 +324,28 @@ def wait_for_response(
     """
     agent_id = ctx.get_state("agent_id")
     return _wait_for_response_impl(message_manager, agent_id, request_id, timeout)
+
+
+@mcp.tool()
+def wait_for_request(
+    ctx: Context,
+    timeout: int = 60,
+) -> dict:
+    """Wait for an incoming request from another agent.
+
+    This is a blocking call - it will wait until a request arrives
+    in your inbox or the timeout is reached. This is an alternative
+    to polling with get_pending_requests.
+
+    Args:
+        ctx: MCP context (injected automatically)
+        timeout: Maximum seconds to wait (default 60)
+
+    Returns:
+        Request data if received, or timeout indicator
+    """
+    agent_id = ctx.get_state("agent_id")
+    return _wait_for_request_impl(message_manager, agent_id, timeout)
 
 
 def main():

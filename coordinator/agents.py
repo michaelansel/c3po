@@ -153,3 +153,12 @@ class AgentManager:
         """
         result = self.redis.hdel(self.AGENTS_KEY, agent_id)
         return result > 0
+
+    def count_online_agents(self) -> int:
+        """Count the number of currently online agents.
+
+        Returns:
+            Number of agents with status 'online'
+        """
+        agents = self.list_agents()
+        return sum(1 for a in agents if a.get("status") == "online")

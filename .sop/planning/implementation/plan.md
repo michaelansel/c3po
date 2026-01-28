@@ -6,8 +6,8 @@
 - [x] **Step 2**: Redis integration and agent registration
 - [x] **Step 3**: Basic messaging (send_request, get_pending_requests)
 - [x] **Step 4**: Response handling (respond_to_request, wait_for_response)
-- [ ] **Step 5**: Blocking wait_for_request tool
-- [ ] **Step 6**: REST API for hooks (/api/pending, /api/health)
+- [x] **Step 5**: Blocking wait_for_request tool
+- [x] **Step 6**: REST API for hooks (/api/pending, /api/health)
 - [ ] **Step 7**: Docker packaging for coordinator
 - [ ] **Step 8**: Plugin skeleton and MCP configuration
 - [ ] **Step 9**: Stop hook implementation
