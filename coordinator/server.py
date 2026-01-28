@@ -11,6 +11,7 @@ from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 from coordinator.agents import AgentManager
+from coordinator.messaging import MessageManager
 
 # Redis connection
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
@@ -18,6 +19,9 @@ redis_client = redis.from_url(REDIS_URL, decode_responses=False)
 
 # Agent manager
 agent_manager = AgentManager(redis_client)
+
+# Message manager
+message_manager = MessageManager(redis_client)
 
 
 class AgentIdentityMiddleware(Middleware):
@@ -78,6 +82,65 @@ def _register_agent_impl(
     return manager.register_agent(agent_id, capabilities)
 
 
+def _send_request_impl(
+    msg_manager: MessageManager,
+    agent_manager: AgentManager,
+    from_agent: str,
+    target: str,
+    message: str,
+    context: Optional[str] = None,
+) -> dict:
+    """Send a request to another agent."""
+    # Check if target agent exists
+    target_agent = agent_manager.get_agent(target)
+    if target_agent is None:
+        # Get list of available agents for helpful error
+        available = agent_manager.list_agents()
+        agent_ids = [a["id"] for a in available]
+        raise ToolError(
+            f"Agent '{target}' not found. "
+            f"Available agents: {agent_ids if agent_ids else 'none registered'}"
+        )
+
+    return msg_manager.send_request(from_agent, target, message, context)
+
+
+def _get_pending_requests_impl(
+    msg_manager: MessageManager,
+    agent_id: str,
+) -> list[dict]:
+    """Get all pending requests for an agent (consumes them)."""
+    return msg_manager.get_pending_requests(agent_id)
+
+
+def _respond_to_request_impl(
+    msg_manager: MessageManager,
+    from_agent: str,
+    request_id: str,
+    response: str,
+    status: str = "success",
+) -> dict:
+    """Send a response to a previous request."""
+    return msg_manager.respond_to_request(request_id, from_agent, response, status)
+
+
+def _wait_for_response_impl(
+    msg_manager: MessageManager,
+    agent_id: str,
+    request_id: str,
+    timeout: int = 60,
+) -> dict:
+    """Wait for a response to a specific request."""
+    result = msg_manager.wait_for_response(agent_id, request_id, timeout)
+    if result is None:
+        return {
+            "status": "timeout",
+            "request_id": request_id,
+            "message": f"No response received within {timeout} seconds",
+        }
+    return result
+
+
 # Register tools with MCP server
 @mcp.tool()
 def ping() -> dict:
@@ -109,6 +172,94 @@ def register_agent(
     """
     agent_id = ctx.get_state("agent_id")
     return _register_agent_impl(agent_manager, agent_id, name, capabilities)
+
+
+@mcp.tool()
+def send_request(
+    ctx: Context,
+    target: str,
+    message: str,
+    context: Optional[str] = None,
+) -> dict:
+    """Send a request to another agent.
+
+    Args:
+        ctx: MCP context (injected automatically)
+        target: The ID of the agent to send the request to
+        message: The request message
+        context: Optional context or background for the request
+
+    Returns:
+        Request data including id, status, and timestamp
+    """
+    from_agent = ctx.get_state("agent_id")
+    return _send_request_impl(
+        message_manager, agent_manager, from_agent, target, message, context
+    )
+
+
+@mcp.tool()
+def get_pending_requests(ctx: Context) -> list[dict]:
+    """Get all pending requests for this agent.
+
+    This consumes the requests - they will not be returned again.
+    Process each request and respond with respond_to_request.
+
+    Args:
+        ctx: MCP context (injected automatically)
+
+    Returns:
+        List of pending request dicts with id, from_agent, message, etc.
+    """
+    agent_id = ctx.get_state("agent_id")
+    return _get_pending_requests_impl(message_manager, agent_id)
+
+
+@mcp.tool()
+def respond_to_request(
+    ctx: Context,
+    request_id: str,
+    response: str,
+    status: str = "success",
+) -> dict:
+    """Respond to a request from another agent.
+
+    Args:
+        ctx: MCP context (injected automatically)
+        request_id: The ID of the request to respond to
+        response: Your response message
+        status: Response status (default "success", can be "error" for failures)
+
+    Returns:
+        Response data including request_id, status, and timestamp
+    """
+    from_agent = ctx.get_state("agent_id")
+    return _respond_to_request_impl(
+        message_manager, from_agent, request_id, response, status
+    )
+
+
+@mcp.tool()
+def wait_for_response(
+    ctx: Context,
+    request_id: str,
+    timeout: int = 60,
+) -> dict:
+    """Wait for a response to a previously sent request.
+
+    This is a blocking call - it will wait until a response arrives
+    or the timeout is reached.
+
+    Args:
+        ctx: MCP context (injected automatically)
+        request_id: The ID of the request to wait for
+        timeout: Maximum seconds to wait (default 60)
+
+    Returns:
+        Response data if received, or timeout indicator
+    """
+    agent_id = ctx.get_state("agent_id")
+    return _wait_for_response_impl(message_manager, agent_id, request_id, timeout)
 
 
 def main():
