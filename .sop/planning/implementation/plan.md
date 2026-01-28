@@ -2,8 +2,8 @@
 
 ## Implementation Checklist
 
-- [ ] **Step 1**: Project scaffolding and coordinator skeleton
-- [ ] **Step 2**: Redis integration and agent registration
+- [x] **Step 1**: Project scaffolding and coordinator skeleton
+- [x] **Step 2**: Redis integration and agent registration
 - [ ] **Step 3**: Basic messaging (send_request, get_pending_requests)
 - [ ] **Step 4**: Response handling (respond_to_request, wait_for_response)
 - [ ] **Step 5**: Blocking wait_for_request tool
