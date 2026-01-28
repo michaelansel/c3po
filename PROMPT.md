@@ -100,80 +100,72 @@ Each of the 13 steps produces a working, demoable increment. Complete the demo f
 
 ---
 
-## CURRENT TASK: Validation
+## CURRENT TASK: Two-Agent End-to-End Validation
 
-Implementation is complete (all 13 steps done, 70 tests passing). Now need to validate end-to-end.
+**Status:** Coordinator deployed and running at http://mkansel-nas.home.qerk.be:8420
 
-### Task 1: Fix Deployment to NAS
+### Problem
 
-The deploy script doesn't work due to architecture mismatch (arm64 Mac → x86_64 NAS).
+The plugin provides MCP tools (`list_agents`, `send_request`, etc.) but they're not available in headless mode (`claude -p`) because the plugin's `.mcp.json` isn't being loaded.
 
-**Fix approach:** Build Docker image directly on NAS.
+### Task: Make MCP Tools Work in Headless Mode
 
-1. Copy source to NAS via tar:
+Investigate and fix why the c3po MCP server isn't connecting when using `claude -p`.
+
+**Debug steps:**
+
+1. Check if plugin is installed:
    ```bash
-   cd coordinator
-   tar czf - --exclude='__pycache__' --exclude='.venv' --exclude='.pytest_cache' --exclude='tests' . | \
-     ssh admin@mkansel-nas.home.qerk.be "mkdir -p /volume1/enc-containers/c3po/coordinator && cd /volume1/enc-containers/c3po/coordinator && tar xzf -"
+   ls ~/.claude/plugins/c3po/
    ```
 
-2. Build on NAS:
+2. Check plugin MCP config:
    ```bash
-   ssh admin@mkansel-nas.home.qerk.be "cd /volume1/enc-containers/c3po/coordinator && docker build -t c3po-coordinator:latest ."
+   cat ~/.claude/plugins/c3po/.mcp.json
    ```
 
-3. Start containers:
-   ```bash
-   ssh admin@mkansel-nas.home.qerk.be "cd /volume1/enc-containers/c3po/coordinator && docker-compose up -d"
-   ```
-
-4. Verify:
+3. Test coordinator is reachable:
    ```bash
    curl http://mkansel-nas.home.qerk.be:8420/api/health
-   # Expected: {"status":"ok","agents_online":0}
    ```
 
-5. Update `scripts/deploy.sh` to use this approach instead of local build + push.
-
-### Task 2: Two-Agent End-to-End Test
-
-Prove two Claude Code agents can communicate.
-
-1. Install plugin locally:
+4. Try adding MCP server directly to Claude Code config instead of via plugin:
    ```bash
-   cp -r plugin ~/.claude/plugins/c3po
+   claude mcp add c3po --transport http http://mkansel-nas.home.qerk.be:8420/mcp
    ```
 
-2. **Terminal 1 - Agent A:**
+5. Test with headless mode:
    ```bash
-   mkdir -p /tmp/agent-a && cd /tmp/agent-a
-   export C3PO_AGENT_ID=agent-a
-   export C3PO_COORDINATOR_URL=http://mkansel-nas.home.qerk.be:8420
-   claude
+   C3PO_AGENT_ID=test-agent claude -p "Use list_agents to see online agents"
    ```
-   Run `/coordinate status` - should show 1 agent online.
 
-3. **Terminal 2 - Agent B:**
+**If MCP config approach doesn't work**, try:
+- Check Claude Code docs for how plugins load MCP servers
+- Check if environment variables are being passed correctly
+- Check if there's a different way to specify MCP servers for headless mode
+
+### Once MCP Works: Two-Agent Test
+
+1. **Start Agent B in background** (listening for requests):
    ```bash
-   mkdir -p /tmp/agent-b && cd /tmp/agent-b
-   export C3PO_AGENT_ID=agent-b
-   export C3PO_COORDINATOR_URL=http://mkansel-nas.home.qerk.be:8420
-   claude
+   cd /tmp/agent-b
+   C3PO_AGENT_ID=agent-b C3PO_COORDINATOR_URL=http://mkansel-nas.home.qerk.be:8420 \
+     claude -p "You are agent-b. Use wait_for_request with a 120 second timeout to wait for incoming requests. When you receive a request, process it and use respond_to_request to reply." &
    ```
-   Run `/coordinate status` - should show 2 agents online.
 
-4. **Agent A → Agent B:** In Terminal 1, ask Claude to send a message to agent-b.
+2. **Run Agent A** (sends request):
+   ```bash
+   cd /tmp/agent-a
+   C3PO_AGENT_ID=agent-a C3PO_COORDINATOR_URL=http://mkansel-nas.home.qerk.be:8420 \
+     claude -p "Use send_request to ask agent-b 'What is 2+2?', then use wait_for_response to get the answer. Report the response you received."
+   ```
 
-5. **Agent B responds:** Complete any task in Terminal 2; Stop hook should trigger and show pending request.
-
-6. **Agent A receives:** The `wait_for_response` should return with the answer.
+3. **Verify** Agent A reports receiving a response from Agent B.
 
 ### Success Criteria
 
-- [ ] Coordinator running at http://mkansel-nas.home.qerk.be:8420
-- [ ] Both agents visible via `list_agents`
-- [ ] Request sent A → B
-- [ ] Request received by B (Stop hook or manual check)
-- [ ] Response sent B → A
-- [ ] Response received by A
-- [ ] Round-trip < 10 seconds
+- [ ] MCP tools available in headless mode
+- [ ] Agent A can send request to Agent B
+- [ ] Agent B receives and responds
+- [ ] Agent A receives response
+- [ ] Document how to properly configure MCP for headless mode
