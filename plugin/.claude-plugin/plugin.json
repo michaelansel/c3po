@@ -2,5 +2,6 @@
   "name": "c3po",
   "description": "Multi-agent coordination for Claude Code",
   "version": "0.1.0",
-  "hooks": "./hooks/hooks.json"
+  "hooks": "./hooks/hooks.json",
+  "skills": "./skills"
 }
