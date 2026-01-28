@@ -262,47 +262,70 @@ Create `tests/TEST_PLAN.md` documenting all test cases.
 
 ---
 
-### TASK 3: Single-Command Enrollment
+### TASK 3: Plugin-Based Enrollment
 
-**Goal:** ONE command to join a Claude Code instance to the c3po network.
+**Goal:** Plugin installation IS the enrollment. No separate scripts needed.
 
 **Target UX:**
 ```bash
-# Join the network (one command!)
-curl -sSL https://raw.githubusercontent.com/USER/c3po/main/scripts/enroll.sh | bash -s -- http://nas:8420 my-agent-name
+# One-time: Add the c3po marketplace
+/plugin marketplace add user/c3po
+
+# Enroll this machine:
+/plugin install c3po
 ```
 
-Or if Claude Code is running:
-```
-/c3po join http://nas:8420
-```
+On install, the plugin should:
+1. Prompt for coordinator URL (or use `C3PO_COORDINATOR_URL` env var)
+2. Prompt for agent ID (or default to folder name)
+3. Configure the MCP server connection
+4. Verify connection works
+5. Show success message
 
-**Create `scripts/enroll.sh`:**
-```bash
-#!/bin/bash
-# Usage: curl ... | bash -s -- <coordinator-url> [agent-id]
+**Plugin Structure Updates:**
 
-COORDINATOR_URL="${1:?Usage: $0 <coordinator-url> [agent-id]}"
-AGENT_ID="${2:-$(basename $PWD)}"
+1. **Add setup hook** - `plugin/.claude-plugin/plugin.json` should include a setup/install hook that runs on first install
 
-# 1. Verify coordinator is reachable
-# 2. Add MCP server to Claude Code config (user scope)
-# 3. Test connection
-# 4. Print success message with next steps
-```
+2. **Create setup script** - `plugin/setup.py` or similar that:
+   ```python
+   # Runs during plugin install
+   # 1. Check for C3PO_COORDINATOR_URL or prompt user
+   # 2. Check for C3PO_AGENT_ID or use folder name
+   # 3. Run: claude mcp add c3po <url>/mcp -t http -s user -H "X-Agent-ID: <id>"
+   # 4. Test connection: curl <url>/api/health
+   # 5. Print success/next steps
+   ```
+
+3. **Update plugin.json** with install hook:
+   ```json
+   {
+     "name": "c3po",
+     "hooks": {
+       "Setup": [{
+         "hooks": [{
+           "type": "command",
+           "command": "python3 ${CLAUDE_PLUGIN_ROOT}/setup.py"
+         }]
+       }]
+     }
+   }
+   ```
+
+4. **Handle reconfiguration** - `/coordinate setup` skill to reconfigure coordinator URL
 
 **Requirements:**
-- Works on fresh system with only Claude Code installed
-- Sets up MCP server with correct URL and agent ID
-- Verifies connection works
-- Provides clear success/failure feedback
-- Idempotent (safe to run multiple times)
+- Plugin install handles all MCP configuration
+- Works with env vars OR interactive prompts
+- Idempotent (reinstall doesn't break things)
+- `/coordinate setup` allows changing coordinator URL later
+- Clear success/failure messages
 
 **Success Criteria:**
-- [ ] Single command enrolls CC instance
-- [ ] Works from any directory
-- [ ] Clear success/error messages
-- [ ] README.md shows one-liner prominently
+- [ ] `/plugin install c3po` fully enrolls the machine
+- [ ] No manual `claude mcp add` needed
+- [ ] Connection verified during install
+- [ ] `/coordinate setup` allows reconfiguration
+- [ ] Works on fresh CC installation
 
 ---
 
@@ -343,20 +366,26 @@ Connect Claude Code instances across machines.
 
 All tasks complete when:
 
-1. **Clean room validated** - Fresh container setup works
+1. **Clean room validated** - Fresh container setup works with plugin install only
 2. **Test plan complete** - `tests/TEST_PLAN.md` exists
-3. **Single-command enrollment** - `scripts/enroll.sh` works
+3. **Plugin-based enrollment** - `/plugin install c3po` fully configures everything
 4. **Documentation updated** - README, SETUP, USAGE, TROUBLESHOOTING
 5. **All tests passing** - Unit, integration, e2e
 
 **Final user experience:**
 ```bash
-# Self-host coordinator (one-time)
-git clone ... && ./scripts/deploy.sh full
+# Self-host coordinator (one-time on NAS)
+git clone https://github.com/user/c3po && ./scripts/deploy.sh full
 
-# Enroll any CC instance (one command per machine)
-curl -sSL .../enroll.sh | bash -s -- http://nas:8420
+# Enroll any CC instance (inside Claude Code)
+/plugin marketplace add user/c3po
+/plugin install c3po
+# → Prompts for coordinator URL (or uses C3PO_COORDINATOR_URL)
+# → Configures MCP, verifies connection
+# → Done! Ready to collaborate.
 
-# Start collaborating immediately
-# (hooks auto-trigger, tools available, agents discover each other)
+# Or with env var pre-set:
+export C3PO_COORDINATOR_URL=http://nas:8420
+/plugin install c3po
+# → Auto-configures, no prompts needed
 ```
