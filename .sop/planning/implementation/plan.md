@@ -10,8 +10,8 @@
 - [x] **Step 6**: REST API for hooks (/api/pending, /api/health)
 - [x] **Step 7**: Docker packaging for coordinator
 - [x] **Step 8**: Plugin skeleton and MCP configuration
-- [ ] **Step 9**: Stop hook implementation
-- [ ] **Step 10**: SessionStart hook for registration
+- [x] **Step 9**: Stop hook implementation
+- [x] **Step 10**: SessionStart hook for registration
 - [ ] **Step 11**: End-to-end two-agent test
 - [ ] **Step 12**: Error handling and graceful degradation
 - [ ] **Step 13**: /coordinate skill and documentation

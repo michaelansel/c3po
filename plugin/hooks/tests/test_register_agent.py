@@ -1,0 +1,214 @@
+"""Tests for the register_agent SessionStart hook."""
+
+import json
+import subprocess
+import sys
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+import os
+
+import pytest
+
+
+HOOK_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "register_agent.py")
+
+
+class MockCoordinatorHandler(BaseHTTPRequestHandler):
+    """Mock HTTP handler for testing coordinator responses."""
+
+    # Class-level response configuration
+    health_response = {"status": "ok", "agents_online": 0}
+    response_code = 200
+    response_delay = 0
+
+    def log_message(self, format, *args):
+        """Suppress request logging."""
+        pass
+
+    def do_GET(self):
+        """Handle GET requests."""
+        import time
+
+        if self.response_delay:
+            time.sleep(self.response_delay)
+
+        if self.path == "/api/health":
+            self.send_response(self.response_code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            if self.response_code == 200:
+                self.wfile.write(json.dumps(self.health_response).encode())
+            else:
+                self.wfile.write(b'{"error": "test error"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+@pytest.fixture
+def mock_coordinator():
+    """Start a mock coordinator server."""
+    # Reset to defaults
+    MockCoordinatorHandler.health_response = {"status": "ok", "agents_online": 0}
+    MockCoordinatorHandler.response_code = 200
+    MockCoordinatorHandler.response_delay = 0
+
+    server = HTTPServer(("127.0.0.1", 0), MockCoordinatorHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever)
+    thread.daemon = True
+    thread.start()
+
+    yield f"http://127.0.0.1:{port}"
+
+    server.shutdown()
+
+
+def run_hook(env: dict = None) -> tuple[int, str, str]:
+    """Run the hook script and return (exit_code, stdout, stderr)."""
+    full_env = os.environ.copy()
+    if env:
+        full_env.update(env)
+
+    result = subprocess.run(
+        [sys.executable, HOOK_SCRIPT],
+        capture_output=True,
+        text=True,
+        env=full_env,
+        timeout=10,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+class TestRegisterAgentHook:
+    """Tests for the register_agent SessionStart hook."""
+
+    def test_outputs_connection_status_when_coordinator_available(
+        self, mock_coordinator
+    ):
+        """Hook should output connection status when coordinator is reachable."""
+        MockCoordinatorHandler.health_response = {"status": "ok", "agents_online": 3}
+
+        exit_code, stdout, stderr = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                "C3PO_AGENT_ID": "test-agent",
+            },
+        )
+
+        assert exit_code == 0
+        assert "[c3po] Connected to coordinator" in stdout
+        assert "test-agent" in stdout
+        assert "3 agent(s) currently online" in stdout
+        assert "list_agents" in stdout
+        assert "send_request" in stdout
+
+    def test_outputs_local_mode_when_coordinator_unavailable(self):
+        """Hook should indicate local mode when coordinator is not reachable."""
+        exit_code, stdout, stderr = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": "http://127.0.0.1:9999",  # Non-existent
+                "C3PO_AGENT_ID": "test-agent",
+            },
+        )
+
+        assert exit_code == 0
+        assert "[c3po]" in stdout
+        assert "not available" in stdout or "Running in local mode" in stdout
+
+    def test_outputs_local_mode_on_http_error(self, mock_coordinator):
+        """Hook should indicate local mode on HTTP error responses."""
+        MockCoordinatorHandler.response_code = 500
+
+        exit_code, stdout, stderr = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                "C3PO_AGENT_ID": "test-agent",
+            },
+        )
+
+        assert exit_code == 0
+        assert "Running in local mode" in stdout
+
+    def test_always_exits_successfully(self, mock_coordinator):
+        """Hook should always exit with code 0 to not block session start."""
+        # Test with valid coordinator
+        MockCoordinatorHandler.health_response = {"status": "ok", "agents_online": 1}
+        exit_code, _, _ = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                "C3PO_AGENT_ID": "test-agent",
+            },
+        )
+        assert exit_code == 0
+
+        # Test with unavailable coordinator
+        exit_code, _, _ = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": "http://127.0.0.1:9999",
+                "C3PO_AGENT_ID": "test-agent",
+            },
+        )
+        assert exit_code == 0
+
+    def test_uses_default_coordinator_url(self):
+        """Hook should use default coordinator URL when not specified."""
+        # Just verify the script doesn't crash with defaults
+        result = subprocess.run(
+            [sys.executable, HOOK_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        # Should exit cleanly (local mode since localhost:8420 probably isn't running)
+        assert result.returncode == 0
+        assert "[c3po]" in result.stdout
+
+    def test_uses_cwd_as_default_agent_id(self, mock_coordinator, tmp_path, monkeypatch):
+        """Hook should use current directory name as default agent ID."""
+        # Change to a temp directory with known name
+        test_dir = tmp_path / "my-test-project"
+        test_dir.mkdir()
+        monkeypatch.chdir(test_dir)
+
+        MockCoordinatorHandler.health_response = {"status": "ok", "agents_online": 0}
+
+        exit_code, stdout, stderr = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                # Don't set C3PO_AGENT_ID - should use cwd name
+            },
+        )
+
+        assert exit_code == 0
+        assert "my-test-project" in stdout
+
+    def test_shows_zero_agents_online(self, mock_coordinator):
+        """Hook should correctly display zero agents online."""
+        MockCoordinatorHandler.health_response = {"status": "ok", "agents_online": 0}
+
+        exit_code, stdout, stderr = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                "C3PO_AGENT_ID": "test-agent",
+            },
+        )
+
+        assert exit_code == 0
+        assert "0 agent(s) currently online" in stdout
+
+    def test_handles_missing_agents_online_field(self, mock_coordinator):
+        """Hook should handle missing agents_online field gracefully."""
+        MockCoordinatorHandler.health_response = {"status": "ok"}
+
+        exit_code, stdout, stderr = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                "C3PO_AGENT_ID": "test-agent",
+            },
+        )
+
+        assert exit_code == 0
+        # Should default to 0
+        assert "0 agent(s) currently online" in stdout

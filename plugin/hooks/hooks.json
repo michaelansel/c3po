@@ -1,0 +1,27 @@
+{
+  "description": "C3PO multi-agent coordination hooks",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/register_agent.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/check_inbox.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
