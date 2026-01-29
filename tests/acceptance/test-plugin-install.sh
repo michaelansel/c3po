@@ -72,13 +72,51 @@ if echo "$MCP_LIST" | grep -q "c3po"; then
 fi
 log "No pre-configured MCP server"
 
-# Step 5: Configure MCP server manually (simulating /coordinate setup)
-log "Step 5: Configuring MCP server..."
+# Step 4.5: Verify plugin structure (hooks and skills exist)
+log "Step 4.5: Verifying plugin structure..."
+PLUGIN_CACHE=$(ls -d ~/.claude/plugins/cache/*/c3po/*/  2>/dev/null | head -1)
+if [ -z "$PLUGIN_CACHE" ]; then
+    fail "Plugin cache directory not found"
+fi
+log "Plugin cache: $PLUGIN_CACHE"
+
+# Check setup.py exists (for --init hook)
+if [ ! -f "$PLUGIN_CACHE/setup.py" ]; then
+    fail "setup.py not found in plugin - claude --init won't work"
+fi
+log "setup.py found"
+
+# Check hooks.json exists and has Setup hook
+if [ ! -f "$PLUGIN_CACHE/hooks/hooks.json" ]; then
+    fail "hooks/hooks.json not found in plugin"
+fi
+if ! grep -q '"Setup"' "$PLUGIN_CACHE/hooks/hooks.json"; then
+    fail "Setup hook not defined in hooks.json"
+fi
+log "Setup hook configured"
+
+# Check coordinate skill exists
+if [ ! -f "$PLUGIN_CACHE/skills/coordinate/SKILL.md" ]; then
+    fail "coordinate skill not found in plugin"
+fi
+log "coordinate skill found"
+
+# Step 5: Test setup.py directly (non-interactive mode should exit cleanly)
+log "Step 5: Testing setup.py (non-interactive mode)..."
+SETUP_OUTPUT=$(python3 "$PLUGIN_CACHE/setup.py" 2>&1) || true
+echo "$SETUP_OUTPUT"
+if echo "$SETUP_OUTPUT" | grep -qi "error\|traceback\|exception"; then
+    fail "setup.py has errors"
+fi
+log "setup.py runs without errors"
+
+# Step 6: Configure MCP server manually (simulating what setup.py would do)
+log "Step 6: Configuring MCP server..."
 claude mcp add c3po "$COORDINATOR_URL/mcp" -t http -s user -H "X-Agent-ID: $AGENT_ID" || fail "Failed to add MCP server"
 log "MCP server configured"
 
-# Step 6: Verify MCP server is configured
-log "Step 6: Verifying MCP configuration..."
+# Step 7: Verify MCP server is configured
+log "Step 7: Verifying MCP configuration..."
 MCP_LIST=$(claude mcp list 2>&1)
 echo "$MCP_LIST"
 
@@ -87,17 +125,17 @@ if ! echo "$MCP_LIST" | grep -q "c3po"; then
 fi
 log "MCP server is configured"
 
-# Step 7: Verify MCP connection is healthy
-log "Step 7: Verifying MCP connection is healthy..."
+# Step 8: Verify MCP connection is healthy
+log "Step 8: Verifying MCP connection is healthy..."
 # The 'claude mcp list' output includes a health check - look for "✓ Connected"
 if ! echo "$MCP_LIST" | grep -q "Connected"; then
     fail "MCP server not connected - health check failed"
 fi
 log "MCP connection verified (health check passed)"
 
-# Step 8 (optional): Test MCP tools via Claude API
+# Step 9 (optional): Test MCP tools via Claude API
 if [ -n "$ANTHROPIC_API_KEY" ]; then
-    log "Step 8: Testing MCP tools via Claude API..."
+    log "Step 9: Testing MCP tools via Claude API..."
     RESULT=$(echo "Use the list_agents tool and tell me what agents are online" | claude -p --allowedTools "mcp__c3po__list_agents" 2>&1) || true
     echo "$RESULT"
 
@@ -106,7 +144,7 @@ if [ -n "$ANTHROPIC_API_KEY" ]; then
     fi
     log "MCP tools work via Claude API"
 else
-    log "Step 8: Skipped (ANTHROPIC_API_KEY not set - MCP tools test requires API access)"
+    log "Step 9: Skipped (ANTHROPIC_API_KEY not set - MCP tools test requires API access)"
 fi
 
 log "=== Plugin installation test completed ==="
