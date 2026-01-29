@@ -1,3 +1,8 @@
+---
+name: coordinate
+description: Multi-agent coordination - use /coordinate setup to configure, /coordinate status to check connection, /coordinate send to message other agents
+---
+
 # /coordinate
 
 Multi-agent coordination for Claude Code instances.
