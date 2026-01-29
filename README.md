@@ -50,6 +50,7 @@ In Claude Code, you now have access to:
 
 - [Setup Guide](docs/SETUP.md) - Detailed installation and configuration
 - [Usage Guide](docs/USAGE.md) - How to use C3PO for agent coordination
+- [API Reference](docs/API_REFERENCE.md) - MCP tools and REST endpoints
 - [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and solutions
 
 ## Architecture
