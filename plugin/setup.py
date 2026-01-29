@@ -94,7 +94,10 @@ def validate_url(url: str) -> str | None:
 
 
 def validate_agent_id(agent_id: str) -> str | None:
-    """Validate agent ID format."""
+    """Validate agent ID format.
+
+    Allows machine/project format (e.g., 'macbook/myproject').
+    """
     agent_id = agent_id.strip()
     if not agent_id:
         return None
@@ -103,8 +106,9 @@ def validate_agent_id(agent_id: str) -> str | None:
     if len(agent_id) < 1 or len(agent_id) > 64:
         return None
 
-    # Character check: must start with alphanumeric, then alphanumeric/._-
-    if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$', agent_id):
+    # Character check: alphanumeric start, then alphanumeric/._-/
+    # Allows paths like "machine/project"
+    if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._/-]*$', agent_id):
         return None
 
     return agent_id
@@ -126,8 +130,25 @@ def check_coordinator(url: str) -> dict | None:
     return None
 
 
+def get_default_agent_id() -> str:
+    """Generate default agent ID in machine/project format."""
+    import platform
+    machine = platform.node().split('.')[0]  # hostname without domain
+    project = os.path.basename(os.getcwd())
+    return f"{machine}/{project}"
+
+
 def add_mcp_server(url: str, agent_id: str) -> bool:
-    """Add c3po MCP server to Claude Code config."""
+    """Add c3po MCP server to Claude Code config.
+
+    Configures with:
+    - X-Agent-ID: Uses env var with fallback to provided agent_id
+    - X-Session-ID: Uses env var (for per-session tracking)
+    """
+    # Use env var expansion so users can override, but default to the provided agent_id
+    agent_id_header = f"${{C3PO_AGENT_ID:-{agent_id}}}"
+    session_id_header = "${C3PO_SESSION_ID:-}"
+
     try:
         result = subprocess.run(
             [
@@ -135,7 +156,8 @@ def add_mcp_server(url: str, agent_id: str) -> bool:
                 f"{url}/mcp",
                 "-t", "http",
                 "-s", "user",
-                "-H", f"X-Agent-ID: {agent_id}"
+                "-H", f"X-Agent-ID: {agent_id_header}",
+                "-H", f"X-Session-ID: {session_id_header}"
             ],
             capture_output=True,
             text=True,
@@ -216,19 +238,23 @@ def run_setup() -> int:
             agents = health.get("agents_online", 0)
             log(f"Coordinator online! {agents} agent(s) currently connected.")
 
-    # Get agent ID
+    # Get agent ID (auto-generate a good default)
     print()
-    default_agent_id = os.path.basename(os.getcwd())
-    info(f"Enter an identifier for this agent (default: {default_agent_id})")
-    info("This should be unique and descriptive (e.g., 'homeassistant', 'meshtastic').")
+    default_agent_id = get_default_agent_id()
+    info(f"Agent ID will be: {default_agent_id}")
+    info("(Format: machine/project - override with C3PO_AGENT_ID env var)")
     print()
 
-    agent_id = None
-    while not agent_id:
-        id_input = prompt("Agent ID", default_agent_id)
-        agent_id = validate_agent_id(id_input)
-        if not agent_id:
-            error("Invalid agent ID. Must be 1-64 chars, alphanumeric start, may contain ._-")
+    response = prompt("Use a different agent ID? (y/N)", "n").lower()
+    if response == "y":
+        agent_id = None
+        while not agent_id:
+            id_input = prompt("Agent ID", default_agent_id)
+            agent_id = validate_agent_id(id_input)
+            if not agent_id:
+                error("Invalid agent ID. Must be 1-64 chars, alphanumeric start, may contain ._-/")
+    else:
+        agent_id = default_agent_id
 
     # Configure MCP server
     print()

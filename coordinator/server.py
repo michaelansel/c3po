@@ -219,7 +219,7 @@ def _register_agent_impl(
 
 
 # Validation patterns
-AGENT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
+AGENT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,63}$")
 MAX_MESSAGE_LENGTH = 50000  # 50KB max message size
 
 
