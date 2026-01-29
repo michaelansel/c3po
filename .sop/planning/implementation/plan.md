@@ -1,692 +1,634 @@
-# C3PO Implementation Plan
+# C3PO Improvement Implementation Plan
 
-## Implementation Checklist
+## Progress Checklist
 
-- [x] **Step 1**: Project scaffolding and coordinator skeleton
-- [x] **Step 2**: Redis integration and agent registration
-- [x] **Step 3**: Basic messaging (send_request, get_pending_requests)
-- [x] **Step 4**: Response handling (respond_to_request, wait_for_response)
-- [x] **Step 5**: Blocking wait_for_request tool
-- [x] **Step 6**: REST API for hooks (/api/pending, /api/health)
-- [x] **Step 7**: Docker packaging for coordinator
-- [x] **Step 8**: Plugin skeleton and MCP configuration
-- [x] **Step 9**: Stop hook implementation
-- [x] **Step 10**: SessionStart hook for registration
-- [x] **Step 11**: End-to-end two-agent test
-- [x] **Step 12**: Error handling and graceful degradation
-- [x] **Step 13**: /coordinate skill and documentation
+### Group 1: Code Fixes
+- [ ] Step 1: Fix response queue race condition (lpush → rpush)
+- [ ] Step 2: Increase BLPOP timeout (1s → 10s)
+- [ ] Step 3: Remove dead code (pending_count, unused error codes, update_heartbeat)
+- [ ] Step 4: Improve Redis error messages
+- [ ] Step 5: Run tests and commit Group 1
 
----
+### Group 2: Test Additions
+- [ ] Step 6: Create middleware test file with header extraction tests
+- [ ] Step 7: Add middleware collision resolution tests
+- [ ] Step 8: Add /api/unregister endpoint tests
+- [ ] Step 9: Add response put-back mechanism tests
+- [ ] Step 10: Run tests and commit Group 2
 
-## Step 1: Project Scaffolding and Coordinator Skeleton
+### Group 3: Documentation Updates
+- [ ] Step 11: Fix agent timeout documentation (5min → 90s)
+- [ ] Step 12: Document SessionEnd hook and /api/unregister
+- [ ] Step 13: Create API Reference - MCP tools section
+- [ ] Step 14: Create API Reference - REST endpoints section
+- [ ] Step 15: Document collision detection behavior
+- [ ] Step 16: Fix TROUBLESHOOTING.md and add ping tool docs
+- [ ] Step 17: Fix terminology inconsistencies
+- [ ] Step 18: Commit Group 3
 
-### Objective
-Set up the project structure and create a minimal FastMCP coordinator that responds to a simple health check tool.
+### Group 4: Design Document Reconciliation
+- [ ] Step 19: Update detailed-design.md (mark unimplemented as Future)
+- [ ] Step 20: Update PROMPT.md task statuses
+- [ ] Step 21: Commit Group 4
 
-### Implementation Guidance
+### Group 5: Low Priority Improvements
+- [ ] Step 22: Add input validation to REST endpoints
+- [ ] Step 23: Add pagination to list_agents (or document as deferred)
+- [ ] Step 24: Address session ID uniqueness
+- [ ] Step 25: Run tests and commit Group 5
 
-Create the directory structure:
-```
-c3po/
-├── coordinator/
-│   ├── __init__.py
-│   ├── server.py          # FastMCP server entry point
-│   ├── requirements.txt   # fastmcp, redis, uvicorn
-│   └── tests/
-│       └── test_server.py
-├── plugin/
-│   └── (empty for now)
-└── README.md
-```
-
-Implement `coordinator/server.py`:
-- Create FastMCP instance with name "c3po"
-- Add a simple `ping` tool that returns `{"pong": true, "timestamp": "..."}`
-- Add `list_agents` tool that returns empty list for now
-- Run with HTTP transport on port 8420
-
-### Test Requirements
-- Unit test: `ping` tool returns expected response
-- Manual test: Start server, connect with MCP client, call ping
-
-### Integration
-This is the foundation. All subsequent steps build on this server.
-
-### Demo
-Start the coordinator and verify it responds:
-```bash
-cd coordinator
-python server.py
-# In another terminal:
-curl -X POST http://localhost:8420/mcp -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-# Should return list including "ping" tool
-```
+### Final Verification
+- [ ] Step 26: Run full test suite and verify all passes
+- [ ] Step 27: Final review of documentation accuracy
 
 ---
 
-## Step 2: Redis Integration and Agent Registration
+## Implementation Steps
 
-### Objective
-Connect to Redis and implement agent registration so agents can join the network and be discovered.
-
-### Implementation Guidance
-
-Add Redis client initialization in `server.py`:
-- Connect to Redis (configurable via `REDIS_URL` env var)
-- Default to `redis://localhost:6379`
-
-Create `coordinator/agents.py`:
-- `register_agent(agent_id, capabilities=None)` → stores in Redis hash `agents`
-- `list_agents()` → returns all agents from hash
-- `get_agent(agent_id)` → returns single agent or None
-- `update_heartbeat(agent_id)` → updates `last_seen` timestamp
-
-Add middleware to extract `X-Agent-ID` header and auto-register on each request.
-
-Implement MCP tools:
-- `register_agent(name?: string, capabilities?: string[])` → explicit registration
-- `list_agents()` → returns all registered agents with status
-
-### Test Requirements
-- Unit test: Agent registration stores correct data in Redis (use fakeredis)
-- Unit test: list_agents returns registered agents
-- Unit test: Duplicate registration updates rather than errors
-
-### Integration
-Builds on Step 1's server. Adds Redis dependency.
-
-### Demo
-```bash
-# Terminal 1: Start Redis
-docker run --rm -p 6379:6379 redis:7-alpine
-
-# Terminal 2: Start coordinator
-python server.py
-
-# Terminal 3: Test registration via curl or MCP client
-# Call list_agents - should show agent based on X-Agent-ID header
-```
+### Group 1: Code Fixes
 
 ---
 
-## Step 3: Basic Messaging (send_request, get_pending_requests)
+**Step 1: Fix response queue race condition**
 
-### Objective
-Enable agents to send requests to other agents and retrieve pending requests from their inbox.
+**Objective**: Fix the bug where wrong responses get re-queued to the front instead of back, causing FIFO order violation.
 
-### Implementation Guidance
+**Implementation Guidance**:
+1. Open `coordinator/messaging.py`
+2. Locate line ~338-340 where `lpush` is used to put back a response
+3. Change `lpush` to `rpush` to maintain FIFO order
+4. Verify the surrounding logic makes sense with this change
 
-Create `coordinator/messaging.py`:
-- `send_request(from_agent, to_agent, message, context=None)` → generates request ID, pushes to Redis list `inbox:{to_agent}`
-- `get_pending_requests(agent_id)` → pops all from Redis list, returns as array
-- Request format: `{id, from_agent, to_agent, message, context, timestamp, status}`
+**Test Requirements**: Existing tests should continue to pass.
 
-Implement MCP tools:
-- `send_request(target: string, message: string, context?: string)` → uses middleware to get sender ID
-- `get_pending_requests()` → returns pending requests for calling agent
+**Integration**: Standalone fix, no dependencies.
 
-Handle edge cases:
-- Target agent doesn't exist → return error with available agents
-- Empty inbox → return empty array
-
-### Test Requirements
-- Unit test: send_request creates properly formatted message in Redis
-- Unit test: get_pending_requests retrieves and removes messages
-- Unit test: Multiple messages queue correctly (FIFO order)
-- Unit test: Unknown target returns helpful error
-
-### Integration
-Uses agents module from Step 2 to verify target exists.
-
-### Demo
-```bash
-# With coordinator and Redis running:
-# 1. Send request as "agent-a" to "agent-b"
-# 2. Get pending requests as "agent-b" - should see the message
-# 3. Get pending requests again - should be empty (consumed)
-```
+**Demo**: Run existing message tests to verify no regression. The fix ensures that when multiple agents wait for responses, they receive them in correct order.
 
 ---
 
-## Step 4: Response Handling (respond_to_request, wait_for_response)
+**Step 2: Increase BLPOP timeout**
 
-### Objective
-Enable agents to respond to requests and for requesting agents to receive those responses.
+**Objective**: Reduce Redis round-trips by increasing the blocking wait timeout.
 
-### Implementation Guidance
+**Implementation Guidance**:
+1. Open `coordinator/messaging.py`
+2. Locate line ~322 where BLPOP timeout is set to 1
+3. Change timeout value from 1 to 10
 
-Extend `coordinator/messaging.py`:
-- `respond_to_request(request_id, from_agent, response, status="success")` → pushes to Redis list `responses:{original_sender}`
-- `wait_for_response(agent_id, request_id, timeout=60)` → uses Redis BLPOP on responses list
+**Test Requirements**: Existing tests should pass. Tests may run slightly slower if they depend on timeout behavior.
 
-Response format: `{request_id, from_agent, to_agent, response, status, timestamp}`
+**Integration**: Standalone fix, no dependencies.
 
-Implement MCP tools:
-- `respond_to_request(request_id: string, response: string, status?: string)`
-- `wait_for_response(request_id: string, timeout?: int)` → blocking call
-
-Parse request_id to determine original sender (format: `{sender}-{receiver}-{timestamp}`).
-
-### Test Requirements
-- Unit test: respond_to_request creates properly formatted response
-- Unit test: wait_for_response returns when response arrives
-- Unit test: wait_for_response times out correctly and returns timeout indicator
-- Integration test: Full send → receive → respond → wait cycle
-
-### Integration
-Builds on Step 3 messaging. Completes the request/response cycle.
-
-### Demo
-```bash
-# Two terminal windows simulating two agents:
-# Terminal A (agent-a): send_request to agent-b, then wait_for_response
-# Terminal B (agent-b): get_pending_requests, then respond_to_request
-# Terminal A should receive the response
-```
+**Demo**: Observe reduced Redis command frequency in logs during idle wait periods.
 
 ---
 
-## Step 5: Blocking wait_for_request Tool
+**Step 3: Remove dead code**
 
-### Objective
-Enable agents to actively listen for incoming requests by blocking until one arrives.
+**Objective**: Clean up unused code to reduce confusion and maintenance burden.
 
-### Implementation Guidance
+**Implementation Guidance**:
+1. In `coordinator/messaging.py`:
+   - Remove the `pending_count()` method (lines ~221-231)
+2. In `coordinator/errors.py`:
+   - Remove `AGENT_BUSY` error code
+   - Remove `COORD_UNAVAILABLE` error code
+   - Remove `MESSAGE_EXPIRED` error code
+3. In `coordinator/agents.py`:
+   - Check if `update_heartbeat()` is called anywhere in production code
+   - If not called, remove the method
+4. In `coordinator/tests/`:
+   - Remove any tests for the deleted methods
+   - Search for references to removed error codes and update/remove tests
 
-Extend `coordinator/messaging.py`:
-- `wait_for_request(agent_id, timeout=60)` → uses Redis BLPOP on `inbox:{agent_id}`
+**Test Requirements**: Remaining tests must pass. Some tests will be removed.
 
-Implement MCP tool:
-- `wait_for_request(timeout?: int)` → blocks until request arrives or timeout
+**Integration**: Ensure no imports or references to removed code remain.
 
-This provides an alternative to the Stop hook pattern for agents that want to actively listen.
-
-### Test Requirements
-- Unit test: wait_for_request returns when request arrives
-- Unit test: wait_for_request times out correctly
-- Unit test: Multiple queued requests return in order
-
-### Integration
-Alternative to Stop hook polling. Uses same inbox as Step 3.
-
-### Demo
-```bash
-# Terminal A (agent-a): wait_for_request with 30s timeout
-# Terminal B (agent-b): send_request to agent-a
-# Terminal A immediately receives the request (before timeout)
-```
+**Demo**: Run `grep -r "pending_count\|AGENT_BUSY\|COORD_UNAVAILABLE\|MESSAGE_EXPIRED\|update_heartbeat" coordinator/` to verify no references remain (except in comments if documenting removal).
 
 ---
 
-## Step 6: REST API for Hooks (/api/pending, /api/health)
+**Step 4: Improve Redis error messages**
 
-### Objective
-Add REST endpoints that hooks can call to check for pending requests without going through MCP.
+**Objective**: Ensure Redis connection errors provide actionable information.
 
-### Implementation Guidance
+**Implementation Guidance**:
+1. Identify Redis client initialization points in the codebase
+2. Wrap connection attempts with try/except for Redis connection errors
+3. Re-raise with enhanced message: "Cannot connect to Redis at {host}:{port}. Ensure Redis is running and accessible."
+4. Apply consistently across `agents.py`, `messaging.py`, and `server.py`
 
-Add REST routes to `server.py` (FastMCP uses Starlette internally):
-- `GET /api/health` → `{"status": "ok", "agents_online": N}`
-- `GET /api/pending` → requires `X-Agent-ID` header, returns `{"count": N, "requests": [...]}`
+**Test Requirements**: Existing tests pass. Consider adding a test that verifies error message format when Redis is unavailable (may require mocking).
 
-The `/api/pending` endpoint should NOT consume messages (just peek). Hooks use this for quick checks.
+**Integration**: Affects all modules that use Redis.
 
-### Test Requirements
-- Unit test: /api/health returns correct format
-- Unit test: /api/pending returns count without consuming
-- Unit test: /api/pending with unknown agent returns empty
-
-### Integration
-Used by Stop hook (Step 9). Non-MCP access for lightweight checks.
-
-### Demo
-```bash
-# With pending request in agent-a's inbox:
-curl http://localhost:8420/api/pending -H "X-Agent-ID: agent-a"
-# Returns: {"count": 1, "requests": [...]}
-
-# Call again - still returns same count (not consumed)
-```
+**Demo**: Stop Redis and attempt to start the coordinator; verify the error message is helpful.
 
 ---
 
-## Step 7: Docker Packaging for Coordinator
+**Step 5: Run tests and commit Group 1**
 
-### Objective
-Package the coordinator and Redis into Docker containers for easy deployment on NAS.
+**Objective**: Verify all code fixes work correctly and commit the changes.
 
-### Implementation Guidance
+**Implementation Guidance**:
+1. Run: `cd coordinator && pytest tests/ -v`
+2. Run: `cd plugin/hooks && pytest tests/ -v`
+3. If all pass, stage changed files:
+   - `coordinator/messaging.py`
+   - `coordinator/errors.py`
+   - `coordinator/agents.py`
+   - Any modified test files
+4. Commit with message: "Fix code issues: race condition, BLPOP timeout, dead code removal, Redis errors"
 
-Create `coordinator/Dockerfile`:
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-CMD ["python", "server.py"]
-```
+**Test Requirements**: All tests must pass before committing.
 
-Create `coordinator/docker-compose.yml`:
-```yaml
-version: '3.8'
-services:
-  coordinator:
-    build: .
-    ports:
-      - "8420:8420"
-    environment:
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - redis
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes
-volumes:
-  redis_data:
-```
+**Integration**: Completes Group 1.
 
-### Test Requirements
-- Docker build succeeds
-- docker-compose up starts both services
-- Coordinator connects to Redis successfully
-- All previous demos work with containerized version
-
-### Integration
-Packages Steps 1-6 for deployment.
-
-### Demo
-```bash
-cd coordinator
-docker-compose up -d
-curl http://localhost:8420/api/health
-# Returns: {"status": "ok", ...}
-```
+**Demo**: Show passing test output and git log with new commit.
 
 ---
 
-## Step 8: Plugin Skeleton and MCP Configuration
-
-### Objective
-Create the Claude Code plugin structure with MCP server configuration.
-
-### Implementation Guidance
-
-Create plugin structure:
-```
-plugin/
-├── .claude-plugin/
-│   └── plugin.json
-├── .mcp.json
-├── hooks/
-│   └── (placeholder files)
-└── README.md
-```
-
-`.claude-plugin/plugin.json`:
-```json
-{
-  "name": "c3po",
-  "description": "Multi-agent coordination for Claude Code",
-  "version": "0.1.0"
-}
-```
-
-`.mcp.json`:
-```json
-{
-  "mcpServers": {
-    "c3po": {
-      "type": "http",
-      "url": "${C3PO_COORDINATOR_URL:-http://localhost:8420}/mcp",
-      "headers": {
-        "X-Agent-ID": "${C3PO_AGENT_ID:-default}"
-      }
-    }
-  }
-}
-```
-
-### Test Requirements
-- Plugin structure validates against CC plugin schema
-- MCP config connects to coordinator when installed
-
-### Integration
-Prepares for hooks in Steps 9-10. Can be tested with CC.
-
-### Demo
-```bash
-# With coordinator running:
-# In a project directory:
-export C3PO_COORDINATOR_URL=http://localhost:8420
-export C3PO_AGENT_ID=test-agent
-
-# Install plugin locally for testing
-claude mcp add c3po --config /path/to/plugin/.mcp.json
-
-# In Claude Code:
-# Use list_agents tool - should work
-```
+### Group 2: Test Additions
 
 ---
 
-## Step 9: Stop Hook Implementation
+**Step 6: Create middleware test file with header extraction tests**
 
-### Objective
-Implement the Stop hook that checks for pending requests and blocks Claude if any exist.
+**Objective**: Add test coverage for AgentIdentityMiddleware header extraction.
 
-### Implementation Guidance
+**Implementation Guidance**:
+1. Create new file: `coordinator/tests/test_middleware.py`
+2. Import necessary dependencies (pytest, the middleware class, test client)
+3. Write tests for:
+   - Valid `X-Agent-ID` header is correctly extracted
+   - Missing `X-Agent-ID` header handling
+   - Malformed header handling
+   - Header value is passed to request state correctly
 
-Create `plugin/hooks/check_inbox.py`:
-```python
-#!/usr/bin/env python3
-import json
-import os
-import sys
-import urllib.request
-import urllib.error
+**Test Requirements**: New tests must pass.
 
-COORDINATOR = os.environ.get("C3PO_COORDINATOR_URL", "http://localhost:8420")
-AGENT_ID = os.environ.get("C3PO_AGENT_ID", os.path.basename(os.getcwd()))
+**Integration**: Tests the middleware in `coordinator/server.py:35-59`.
 
-def main():
-    # Check if stop hook is already active (prevent loops)
-    stdin_data = json.load(sys.stdin)
-    if stdin_data.get("stop_hook_active"):
-        sys.exit(0)
-
-    try:
-        req = urllib.request.Request(
-            f"{COORDINATOR}/api/pending",
-            headers={"X-Agent-ID": AGENT_ID}
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-
-        if data.get("count", 0) > 0:
-            output = {
-                "decision": "block",
-                "reason": f"You have {data['count']} pending coordination request(s). Use get_pending_requests to retrieve and process them, then respond with respond_to_request."
-            }
-            print(json.dumps(output))
-    except Exception:
-        pass  # Fail open
-
-    sys.exit(0)
-
-if __name__ == "__main__":
-    main()
-```
-
-Update `plugin.json` to include hook configuration.
-
-### Test Requirements
-- Hook script runs without error when no pending requests
-- Hook returns block decision when requests pending
-- Hook fails open when coordinator unreachable
-- Hook respects stop_hook_active flag
-
-### Integration
-Uses /api/pending from Step 6. Triggers CC to process requests.
-
-### Demo
-```bash
-# 1. Start CC in a project directory with plugin installed
-# 2. From another terminal, send a request to that agent via coordinator
-# 3. Complete a task in CC - when Claude tries to stop, hook triggers
-# 4. Claude receives instruction to process pending request
-```
+**Demo**: Run `pytest coordinator/tests/test_middleware.py -v` showing all new tests pass.
 
 ---
 
-## Step 10: SessionStart Hook for Registration
+**Step 7: Add middleware collision resolution tests**
 
-### Objective
-Implement hook that registers the agent and injects coordination context on session start.
+**Objective**: Test the auto-registration and collision handling in middleware.
 
-### Implementation Guidance
+**Implementation Guidance**:
+1. Add to `coordinator/tests/test_middleware.py`:
+   - Test: Agent auto-registers when not found
+   - Test: Collision detected when same agent ID from different session
+   - Test: Auto-suffix generation on collision
+   - Test: Session ID tracking behavior
 
-Create `plugin/hooks/register_agent.py`:
-```python
-#!/usr/bin/env python3
-import json
-import os
-import sys
-import urllib.request
+**Test Requirements**: New tests must pass.
 
-COORDINATOR = os.environ.get("C3PO_COORDINATOR_URL", "http://localhost:8420")
-AGENT_ID = os.environ.get("C3PO_AGENT_ID", os.path.basename(os.getcwd()))
+**Integration**: Builds on Step 6.
 
-def main():
-    try:
-        # Check coordinator health
-        req = urllib.request.Request(f"{COORDINATOR}/api/health")
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-
-        # Output context for Claude
-        print(f"[c3po] Connected to coordinator. Agent ID: {AGENT_ID}")
-        print(f"[c3po] {data.get('agents_online', 0)} agent(s) online.")
-        print("[c3po] Use list_agents to see available agents, send_request to collaborate.")
-    except Exception as e:
-        print(f"[c3po] Coordinator not available ({e}). Running in local mode.")
-
-    sys.exit(0)
-
-if __name__ == "__main__":
-    main()
-```
-
-Update `plugin.json` with SessionStart hook.
-
-### Test Requirements
-- Hook outputs connection status
-- Hook gracefully handles coordinator unavailable
-- Context appears in Claude's session
-
-### Integration
-Complements Stop hook. Provides initial context to Claude.
-
-### Demo
-```bash
-# Start CC with plugin installed
-# On startup, see "[c3po] Connected to coordinator..." message
-# Claude now knows coordination is available
-```
+**Demo**: Run middleware tests showing collision scenarios handled correctly.
 
 ---
 
-## Step 11: End-to-End Two-Agent Test
+**Step 8: Add /api/unregister endpoint tests**
 
-### Objective
-Validate the complete flow with two actual Claude Code instances communicating.
+**Objective**: Add test coverage for the unregister REST endpoint.
 
-### Implementation Guidance
+**Implementation Guidance**:
+1. Open `coordinator/tests/test_rest_api.py`
+2. Add tests for `POST /api/unregister`:
+   - Successful unregistration of existing agent
+   - Unregistration of non-existent agent (expected behavior)
+   - Missing agent_id in request body
+   - Invalid request body format
+3. Reference implementation at `coordinator/server.py:122-151`
 
-Create test script `test_e2e.sh` that:
-1. Starts coordinator (docker-compose)
-2. Opens two terminal sessions with different agent IDs
-3. Provides test instructions for each terminal
+**Test Requirements**: New tests must pass.
 
-Test scenarios:
-1. **Simple request/response**: Agent A asks question, Agent B answers
-2. **Multi-turn**: Agent A asks, B responds, A follows up, B responds again
-3. **Timeout**: Agent A asks offline agent, gets timeout
-4. **Interrupt**: Human interrupts Agent B mid-processing
+**Integration**: Tests endpoint used by SessionEnd hook.
 
-Create `tests/TESTING.md` with manual test procedures.
-
-### Test Requirements
-- All four scenarios complete successfully
-- Latency < 10 seconds for simple request/response
-- Human interrupt works as expected
-
-### Integration
-Validates all previous steps working together.
-
-### Demo
-Full demonstration of two agents collaborating:
-```
-Terminal 1 (homeassistant):
-> "Ask the meshtastic agent what MQTT topics are available"
-[Sends request, waits...]
-[Receives response]
-> "The meshtastic agent says topics are: mesh/node/#, mesh/stat/#"
-
-Terminal 2 (meshtastic):
-[Stop hook fires when finishing other work]
-[Claude sees pending request, processes it]
-[Sends response automatically]
-```
+**Demo**: Run REST API tests showing unregister endpoint behaves correctly.
 
 ---
 
-## Step 12: Error Handling and Graceful Degradation
+**Step 9: Add response put-back mechanism tests**
 
-### Objective
-Ensure robust error handling throughout the system.
+**Objective**: Add specific tests verifying FIFO order when responses are put back.
 
-### Implementation Guidance
+**Implementation Guidance**:
+1. Open `coordinator/tests/test_messaging.py`
+2. Add tests for:
+   - Response put back maintains FIFO order
+   - Multiple responses put back in correct sequence
+   - Concurrent waiters receive responses in order
 
-Coordinator improvements:
-- Add request validation (missing fields, invalid agent IDs)
-- Add rate limiting (max 10 requests/minute per agent)
-- Add request expiration (24h TTL on inbox items)
-- Improve error messages with actionable suggestions
+**Test Requirements**: New tests must pass.
 
-Plugin improvements:
-- Hooks fail silently (don't break CC)
-- MCP tools return structured errors: `{"error": "...", "code": "...", "suggestion": "..."}`
-- Add `/coordinate status` skill to check connection
+**Integration**: Validates the fix from Step 1.
 
-Error codes:
-- `COORD_UNAVAILABLE`: Coordinator not reachable
-- `AGENT_NOT_FOUND`: Target agent doesn't exist
-- `AGENT_BUSY`: Target agent is busy/away
-- `TIMEOUT`: Request timed out
-- `INVALID_REQUEST`: Malformed request
-
-### Test Requirements
-- Each error code is returned appropriately
-- Hooks don't crash on any error condition
-- Rate limiting works correctly
-- Old messages expire
-
-### Integration
-Hardens all previous steps for production use.
-
-### Demo
-```bash
-# Test graceful degradation:
-# 1. Stop coordinator
-# 2. Try to use c3po tools in CC
-# 3. Get clear error message, CC continues to work
-# 4. Restart coordinator
-# 5. Tools work again without restarting CC
-```
+**Demo**: Run messaging tests showing put-back behavior is correct.
 
 ---
 
-## Step 13: /coordinate Skill and Documentation
+**Step 10: Run tests and commit Group 2**
 
-### Objective
-Add user-facing skill for common coordination tasks and complete documentation.
+**Objective**: Verify all new tests pass and commit.
 
-### Implementation Guidance
+**Implementation Guidance**:
+1. Run: `cd coordinator && pytest tests/ -v`
+2. Verify new test file appears and all tests pass
+3. Stage new/modified files:
+   - `coordinator/tests/test_middleware.py` (new)
+   - `coordinator/tests/test_rest_api.py`
+   - `coordinator/tests/test_messaging.py`
+4. Commit with message: "Add test coverage: middleware, /api/unregister, response put-back"
 
-Create `plugin/skills/coordinate/SKILL.md`:
-```markdown
-# /coordinate
+**Test Requirements**: All tests must pass.
 
-Manage agent coordination.
+**Integration**: Completes Group 2.
 
-## Usage
-
-- `/coordinate status` - Check connection and list online agents
-- `/coordinate agents` - List all agents with their capabilities
-- `/coordinate send <agent> <message>` - Send a quick message to another agent
-
-## Examples
-
-Check who's online:
-> /coordinate status
-
-Ask another agent for help:
-> /coordinate send homeassistant "What automations are running?"
-```
-
-Create/update documentation:
-- `README.md` - Quick start guide
-- `docs/SETUP.md` - Detailed setup instructions
-- `docs/USAGE.md` - User guide with examples
-- `docs/TROUBLESHOOTING.md` - Common issues and solutions
-
-### Test Requirements
-- Skill parses arguments correctly
-- Status shows accurate information
-- Documentation is accurate and complete
-
-### Integration
-Final user-facing polish on all previous work.
-
-### Demo
-```bash
-# In Claude Code with plugin:
-> /coordinate status
-c3po Status:
-  Coordinator: http://nas:8420 (connected)
-  Agent ID: homeassistant
-  Online agents: homeassistant, meshtastic, mediaserver
-
-> /coordinate send meshtastic "What nodes are online?"
-Sent request to meshtastic. Waiting for response...
-Response from meshtastic: "Nodes online: node-1234, node-5678, node-9abc"
-```
+**Demo**: Show test count increased and all passing.
 
 ---
 
-## Implementation Notes
+### Group 3: Documentation Updates
 
-### Development Environment
+---
 
-```bash
-# Prerequisites
-python 3.11+
-docker & docker-compose
-Claude Code with plugin support
+**Step 11: Fix agent timeout documentation**
 
-# Quick start
-cd coordinator
-pip install -r requirements.txt
-docker run -d -p 6379:6379 redis:7-alpine
-python server.py
+**Objective**: Correct the agent timeout value in documentation.
 
-# In another terminal
-cd plugin
-export C3PO_COORDINATOR_URL=http://localhost:8420
-export C3PO_AGENT_ID=test-agent
-# Test with Claude Code
-```
+**Implementation Guidance**:
+1. Open `docs/USAGE.md`
+2. Search for "5 minute" or "five minute" references to agent timeout
+3. Change to "90 seconds"
+4. Add reference: "See `AGENT_TIMEOUT_SECONDS` in `coordinator/agents.py`"
 
-### Key Files to Create
+**Test Requirements**: N/A (documentation only).
 
-| Step | Files |
-|------|-------|
-| 1 | `coordinator/server.py`, `requirements.txt` |
-| 2 | `coordinator/agents.py` |
-| 3-5 | `coordinator/messaging.py` |
-| 6 | Update `server.py` with REST routes |
-| 7 | `Dockerfile`, `docker-compose.yml` |
-| 8 | `plugin/.claude-plugin/plugin.json`, `plugin/.mcp.json` |
-| 9 | `plugin/hooks/check_inbox.py` |
-| 10 | `plugin/hooks/register_agent.py` |
-| 11 | `tests/TESTING.md`, `test_e2e.sh` |
-| 12 | Updates across all files |
-| 13 | `plugin/skills/coordinate/SKILL.md`, `docs/*` |
+**Integration**: Standalone fix.
 
-### Recommended Order
+**Demo**: Show the corrected documentation section.
 
-Follow the steps sequentially. Each step produces a working, testable increment. Don't skip ahead - the demos at each step validate your work before building more.
+---
+
+**Step 12: Document SessionEnd hook and /api/unregister**
+
+**Objective**: Document the graceful disconnect mechanism.
+
+**Implementation Guidance**:
+1. Open `docs/USAGE.md` or `docs/SETUP.md` (choose most appropriate location)
+2. Add new section "Graceful Agent Disconnect" covering:
+   - SessionEnd hook automatically unregisters agents
+   - How it works: hook calls `/api/unregister` endpoint
+   - Automatic cleanup via TTL as backup
+   - What happens if coordinator is unavailable (fails open)
+3. Document the `/api/unregister` endpoint behavior
+
+**Test Requirements**: N/A (documentation only).
+
+**Integration**: Explains functionality added in TASK 4.
+
+**Demo**: Show the new documentation section explaining graceful disconnect.
+
+---
+
+**Step 13: Create API Reference - MCP tools section**
+
+**Objective**: Document all MCP tools with parameters and return values.
+
+**Implementation Guidance**:
+1. Create new file: `docs/API_REFERENCE.md`
+2. Add header and introduction
+3. Document each MCP tool in simple markdown format:
+   - `ping` - Parameters: none. Returns: pong with timestamp.
+   - `list_agents` - Parameters: none. Returns: list of agents with status.
+   - `register_agent` - Parameters: name (optional), capabilities (optional). Returns: registration data.
+   - `send_request` - Parameters: target, message, context (optional). Returns: request data with ID.
+   - `get_pending_requests` - Parameters: none. Returns: list of pending requests (consumes them).
+   - `respond_to_request` - Parameters: request_id, response, status (optional). Returns: response confirmation.
+   - `wait_for_response` - Parameters: request_id, timeout (optional, default 60). Returns: response or timeout.
+   - `wait_for_request` - Parameters: timeout (optional, default 60). Returns: request or timeout.
+4. Include example usage for each tool
+
+**Test Requirements**: N/A (documentation only).
+
+**Integration**: New file, referenced from README.md.
+
+**Demo**: Show the new API reference with all MCP tools documented.
+
+---
+
+**Step 14: Create API Reference - REST endpoints section**
+
+**Objective**: Document REST endpoints in OpenAPI style.
+
+**Implementation Guidance**:
+1. Continue in `docs/API_REFERENCE.md`
+2. Add "REST API" section
+3. Document `POST /api/unregister` in OpenAPI style:
+   - Summary and description
+   - Request body schema (agent_id: string, required)
+   - Response schemas (200 success, 400 bad request, 404 not found)
+   - Example request/response
+4. Document any other REST endpoints that exist
+
+**Test Requirements**: N/A (documentation only).
+
+**Integration**: Builds on Step 13.
+
+**Demo**: Show the OpenAPI-style REST documentation.
+
+---
+
+**Step 15: Document collision detection behavior**
+
+**Objective**: Explain what happens when two CC instances use the same working directory.
+
+**Implementation Guidance**:
+1. Open `docs/USAGE.md`
+2. Add section "Agent ID Collisions" covering:
+   - How agent IDs are derived (from working directory)
+   - What happens when collision is detected
+   - Session ID tracking mechanism
+   - Auto-suffix generation behavior
+   - Guidance on avoiding collisions
+
+**Test Requirements**: N/A (documentation only).
+
+**Integration**: Documents TASK 5 implementation.
+
+**Demo**: Show the new collision detection documentation.
+
+---
+
+**Step 16: Fix TROUBLESHOOTING.md and add ping tool docs**
+
+**Objective**: Correct misleading troubleshooting advice and document ping tool.
+
+**Implementation Guidance**:
+1. Open `docs/TROUBLESHOOTING.md`
+2. Find section about manual `redis-cli FLUSHDB`
+3. Update to clarify:
+   - Auto-TTL handles cleanup in most cases
+   - Manual cleanup rarely needed
+   - When manual cleanup might be appropriate
+4. Open `docs/USAGE.md`
+5. Add mention of `ping` tool for health checks
+
+**Test Requirements**: N/A (documentation only).
+
+**Integration**: Standalone fixes.
+
+**Demo**: Show corrected troubleshooting guidance.
+
+---
+
+**Step 17: Fix terminology inconsistencies**
+
+**Objective**: Standardize terminology across all documentation.
+
+**Implementation Guidance**:
+1. Search all docs for inconsistent terms
+2. Standardize to:
+   - "Stop hook" (capitalize consistently)
+   - "coordinator" (prefer over "MCP server" when referring to C3PO)
+   - "agent ID" (not "agent identifier")
+   - "registration" (not "enrollment")
+3. Apply changes across: USAGE.md, SETUP.md, TROUBLESHOOTING.md, API_REFERENCE.md, README.md
+
+**Test Requirements**: N/A (documentation only).
+
+**Integration**: Final polish for documentation.
+
+**Demo**: Show consistent terminology in documentation.
+
+---
+
+**Step 18: Commit Group 3**
+
+**Objective**: Commit all documentation changes.
+
+**Implementation Guidance**:
+1. Stage documentation files:
+   - `docs/USAGE.md`
+   - `docs/SETUP.md`
+   - `docs/TROUBLESHOOTING.md`
+   - `docs/API_REFERENCE.md` (new)
+   - `README.md` (if modified)
+2. Commit with message: "Documentation updates: fix timeout, add API reference, document SessionEnd and collisions"
+
+**Test Requirements**: N/A (documentation only).
+
+**Integration**: Completes Group 3.
+
+**Demo**: Show git diff summary of documentation changes.
+
+---
+
+### Group 4: Design Document Reconciliation
+
+---
+
+**Step 19: Update detailed-design.md**
+
+**Objective**: Align the original design document with implementation reality.
+
+**Implementation Guidance**:
+1. Open `.sop/planning/design/detailed-design.md` (the original project design, not the improvement plan)
+2. Find references to unimplemented tools:
+   - `set_status` - Add note: "[Future] Not yet implemented"
+   - `escalate_to_human` - Add note: "[Future] Not yet implemented"
+   - `get_agent_status` - Add note: "[Future] Not yet implemented"
+   - `/api/agents` endpoint - Add note: "[Future] Not yet implemented"
+3. Add section "Implemented Features Not In Original Design":
+   - `wait_for_request` tool (blocking listener)
+   - `register_agent` explicit tool
+   - `peek_pending_requests` internal method
+
+**Test Requirements**: N/A (documentation only).
+
+**Integration**: Standalone.
+
+**Demo**: Show the updated design document with Future annotations.
+
+---
+
+**Step 20: Update PROMPT.md task statuses**
+
+**Objective**: Reflect completed work in the project PROMPT.md.
+
+**Implementation Guidance**:
+1. Open `PROMPT.md`
+2. Find TASK 4 (Graceful disconnect) and mark as COMPLETE
+3. Find TASK 5 (Collision handling) and mark as COMPLETE
+4. Review other tasks and update status if appropriate
+
+**Test Requirements**: N/A (documentation only).
+
+**Integration**: Standalone.
+
+**Demo**: Show updated task statuses in PROMPT.md.
+
+---
+
+**Step 21: Commit Group 4**
+
+**Objective**: Commit design document updates.
+
+**Implementation Guidance**:
+1. Stage files:
+   - `.sop/planning/design/detailed-design.md`
+   - `PROMPT.md`
+2. Commit with message: "Update design docs: mark unimplemented as Future, update task statuses"
+
+**Test Requirements**: N/A.
+
+**Integration**: Completes Group 4.
+
+**Demo**: Show commit with design document updates.
+
+---
+
+### Group 5: Low Priority Improvements
+
+---
+
+**Step 22: Add input validation to REST endpoints**
+
+**Objective**: Add consistent input size validation to REST endpoints.
+
+**Implementation Guidance**:
+1. Open `coordinator/server.py`
+2. Identify REST endpoints that accept request bodies
+3. Add validation for request body size (match 50KB limit used in MCP tools)
+4. Return appropriate error response if validation fails
+
+**Test Requirements**: Add tests for oversized request handling.
+
+**Integration**: Affects REST API behavior.
+
+**Demo**: Show that oversized requests are rejected with clear error.
+
+---
+
+**Step 23: Add pagination to list_agents**
+
+**Objective**: Support pagination for large agent lists.
+
+**Implementation Guidance**:
+1. Open `coordinator/agents.py`
+2. Modify `list_agents()` to accept optional `limit` and `offset` parameters
+3. Update `coordinator/server.py` MCP tool to expose these parameters
+4. Default behavior (no params) returns all agents for backward compatibility
+
+**Alternative**: If agent count is expected to remain small, document this as "deferred" and skip implementation.
+
+**Test Requirements**: Add tests for pagination if implemented.
+
+**Integration**: Updates MCP tool interface.
+
+**Demo**: Show paginated results with limit/offset parameters.
+
+---
+
+**Step 24: Address session ID uniqueness**
+
+**Objective**: Handle or document session ID behavior.
+
+**Implementation Guidance**:
+Option A (Enforce uniqueness):
+1. Open `coordinator/agents.py`
+2. Add validation to reject duplicate session IDs
+3. Return clear error if session ID already in use
+
+Option B (Document current behavior):
+1. Document that session IDs are informational only
+2. Explain they are used for collision detection, not enforced unique
+
+**Test Requirements**: Add tests if implementing enforcement.
+
+**Integration**: Affects registration behavior.
+
+**Demo**: Show behavior when duplicate session ID is used.
+
+---
+
+**Step 25: Run tests and commit Group 5**
+
+**Objective**: Verify low priority improvements and commit.
+
+**Implementation Guidance**:
+1. Run: `cd coordinator && pytest tests/ -v`
+2. Run: `cd plugin/hooks && pytest tests/ -v`
+3. Stage modified files
+4. Commit with message: "Low priority improvements: input validation, pagination, session ID handling"
+
+**Test Requirements**: All tests must pass.
+
+**Integration**: Completes Group 5.
+
+**Demo**: Show passing tests and final commit.
+
+---
+
+### Final Verification
+
+---
+
+**Step 26: Run full test suite**
+
+**Objective**: Verify all changes work together.
+
+**Implementation Guidance**:
+1. Run: `cd coordinator && pytest tests/ -v`
+2. Run: `cd plugin/hooks && pytest tests/ -v`
+3. Verify test count matches or exceeds expectations
+4. Verify no warnings or deprecation notices
+
+**Test Requirements**: 100% pass rate.
+
+**Integration**: Validates all groups together.
+
+**Demo**: Show complete test output with all tests passing.
+
+---
+
+**Step 27: Final documentation review**
+
+**Objective**: Ensure all documentation is accurate and consistent.
+
+**Implementation Guidance**:
+1. Read through each documentation file
+2. Verify terminology is consistent
+3. Check that code references (file paths, line numbers) are accurate
+4. Verify API Reference matches actual implementation
+5. Note any remaining issues for follow-up
+
+**Test Requirements**: N/A.
+
+**Integration**: Final quality check.
+
+**Demo**: Confirm documentation accurately reflects implementation.
+
+---
+
+## Summary
+
+This implementation plan contains 27 steps organized into 5 groups plus final verification:
+
+| Group | Steps | Focus |
+|-------|-------|-------|
+| 1 | 1-5 | Code fixes (race condition, timeout, dead code, errors) |
+| 2 | 6-10 | Test additions (middleware, API, messaging) |
+| 3 | 11-18 | Documentation updates |
+| 4 | 19-21 | Design document reconciliation |
+| 5 | 22-25 | Low priority improvements |
+| Final | 26-27 | Full verification |
+
+Each group results in a working, tested state with a commit checkpoint.

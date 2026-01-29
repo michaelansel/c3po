@@ -1,519 +1,273 @@
-# C3PO Detailed Design Document
+# C3PO Improvement Plan: Detailed Design
 
-## Claude Code Control Panel and Orchestrator
+## Overview
 
-**Version:** 1.0 (MVP)
-**Date:** 2026-01-28
+This document describes the improvements to be made to the C3PO multi-agent coordination system based on the comprehensive project review. The work addresses documentation gaps, code issues, test coverage, and design document inconsistencies.
 
----
-
-## 1. Overview
-
-C3PO is a coordination layer that enables multiple Claude Code instances running on different hosts to collaborate on cross-cutting problems. Each CC instance maintains context about its domain (e.g., Home Assistant, Meshtastic, media server) and can request help from other instances without human relay.
-
-### 1.1 Key Value Proposition
-
-A user working with the Home Assistant agent can say "debug why Meshtastic sensor data isn't appearing" and the HA agent will automatically reach out to the Meshtastic agent, have a multi-turn conversation to diagnose the issue, and report back—all without the human switching terminals or relaying messages.
-
-### 1.2 Design Principles
-
-1. **Minimal per-host setup**: Install plugin with one command, no local runtime required
-2. **Human stays in control**: Can interrupt any agent at any time, agents escalate when uncertain
-3. **Graceful degradation**: Works normally if coordinator is down
-4. **Explicit collaboration**: Human initiates agent linking, no automatic cross-agent chatter
+**Goal**: Bring C3PO from "70-80% complete with rough edges" to production-ready with accurate documentation and comprehensive test coverage.
 
 ---
 
-## 2. Detailed Requirements
+## Detailed Requirements
 
-### 2.1 Core Functionality
+### Scope
+All identified issues will be addressed (High + Medium + Low priority).
 
-| ID | Requirement | Priority |
-|----|-------------|----------|
-| R1 | Agent A can send a request to Agent B and receive a response | Must |
-| R2 | Agents can have multi-turn async conversations (back-and-forth) | Must |
-| R3 | Human can interrupt any agent at any time (Esc, Ctrl-C) | Must |
-| R4 | Agents can escalate to human when uncertain | Must |
-| R5 | Agents discover other available agents | Must |
-| R6 | System degrades gracefully when coordinator unavailable | Must |
-| R7 | Coordination can be enabled/disabled easily | Must |
+### Implementation Target
+Claude Code will implement via PROMPT.md with autonomous execution.
 
-### 2.2 User Experience
+### Work Organization
+Grouped sequential - one PROMPT.md with clearly identified independent groups, enabling future parallelization.
 
-| ID | Requirement | Priority |
-|----|-------------|----------|
-| U1 | Per-host setup via single plugin install command | Must |
-| U2 | Agent name defaults to project folder name | Must |
-| U3 | Coordinator handles agent name collisions (auto-suffix) | Must |
-| U4 | Human explicitly directs agents to collaborate | Must |
-| U5 | No automatic agent-to-agent suggestions (keeps prompts simple) | Must |
+### Verification Strategy
+- Run tests after each group completes
+- Create a commit after each group passes tests
+- Fail fast on Redis connection errors with clear messages
 
-### 2.3 Infrastructure
-
-| ID | Requirement | Priority |
-|----|-------------|----------|
-| I1 | Central coordinator runs on Docker (Synology NAS) | Must |
-| I2 | Uses Redis for message storage | Must |
-| I3 | Local network only (no internet exposure for MVP) | Must |
-| I4 | No authentication for MVP (trusted home network) | Should |
-
-### 2.4 Acceptance Criteria Summary
-
-- **AC1**: Basic request/response between agents (< 10s latency)
-- **AC2**: Human interrupt stops processing immediately
-- **AC3**: AI escalation pauses coordination and prompts human
-- **AC4**: Human can resume coordination mode
-- **AC5**: New host joins network in < 15 minutes
-- **AC6**: Coordination tools fail gracefully when network down
-- **AC7**: Enable/disable via simple command or config
+### Design Decisions
+- Unimplemented features in design docs: Mark as "Future" (do not remove)
+- Dead code: Remove entirely
+- API Reference format: OpenAPI for REST endpoints, simple markdown for MCP tools
+- BLPOP timeout: Change from 1s to 10s
 
 ---
 
-## 3. Architecture Overview
+## Work Groups
 
-### 3.1 System Architecture
+The improvements are organized into 5 independent groups. Groups can be executed in any order, though the suggested order minimizes potential conflicts.
 
-```mermaid
-graph TB
-    subgraph "Distribution"
-        Plugin[c3po Plugin<br/>GitHub Repo]
-    end
+### Group 1: Code Fixes
 
-    subgraph "Host A"
-        CCA[Claude Code]
-        HookA[Stop Hook]
-        CCA --> HookA
-    end
+Critical and medium priority code changes.
 
-    subgraph "Host B"
-        CCB[Claude Code]
-        HookB[Stop Hook]
-        CCB --> HookB
-    end
+#### 1.1 Fix Response Queue Race Condition (Critical)
+- **File**: `coordinator/messaging.py:338-340`
+- **Issue**: Wrong responses get re-queued with `lpush` (front) instead of `rpush` (back)
+- **Fix**: Change `lpush` to `rpush` to maintain FIFO order
+- **Verification**: Existing tests should pass; consider adding a specific test for this behavior
 
-    subgraph "Host C"
-        CCC[Claude Code]
-        HookC[Stop Hook]
-        CCC --> HookC
-    end
+#### 1.2 Increase BLPOP Timeout (Medium)
+- **File**: `coordinator/messaging.py:322`
+- **Issue**: 1-second timeout causes excessive Redis round-trips
+- **Fix**: Change timeout from 1 to 10 seconds
+- **Verification**: Existing tests should pass
 
-    subgraph "NAS (Docker)"
-        Coord[FastMCP Coordinator<br/>Port 8420]
-        Redis[(Redis<br/>Port 6379)]
-        Coord --> Redis
-    end
+#### 1.3 Remove Dead Code (Medium)
+- **Files**:
+  - `coordinator/messaging.py:221-231` - Remove `pending_count()` method
+  - `coordinator/errors.py` - Remove unused error codes: `AGENT_BUSY`, `COORD_UNAVAILABLE`, `MESSAGE_EXPIRED`
+  - `coordinator/agents.py` - Remove `update_heartbeat()` method if unused
+  - `coordinator/tests/` - Remove tests for removed methods
+- **Verification**: All remaining tests pass
 
-    Plugin -.->|/plugin install| CCA
-    Plugin -.->|/plugin install| CCB
-    Plugin -.->|/plugin install| CCC
-
-    CCA -->|HTTP + X-Agent-ID| Coord
-    CCB -->|HTTP + X-Agent-ID| Coord
-    CCC -->|HTTP + X-Agent-ID| Coord
-
-    HookA -->|Check pending| Coord
-    HookB -->|Check pending| Coord
-    HookC -->|Check pending| Coord
-```
-
-### 3.2 Component Overview
-
-| Component | Location | Technology | Purpose |
-|-----------|----------|------------|---------|
-| c3po Plugin | GitHub repo | CC Plugin format | Distribution, hooks, skills |
-| Coordinator | NAS Docker | FastMCP (Python) | Message routing, agent registry |
-| Redis | NAS Docker | Redis 7 | Message queues, agent state |
-| Stop Hook | Each host (via plugin) | Python script | Check for pending requests |
-
-### 3.3 Communication Flow
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant AgentA as Agent A (HA)
-    participant Coord as Coordinator
-    participant AgentB as Agent B (Mesh)
-
-    User->>AgentA: "Ask meshtastic about MQTT topics"
-    AgentA->>Coord: send_request(target="meshtastic", msg="...")
-    Coord->>Coord: Queue message in Redis
-    AgentA->>Coord: wait_for_response(timeout=60)
-
-    Note over AgentB: Agent B finishes current task
-    AgentB->>AgentB: Stop hook triggers
-    AgentB->>Coord: GET /api/pending
-    Coord-->>AgentB: {count: 1}
-    Note over AgentB: Hook returns decision: block
-
-    AgentB->>Coord: get_pending_requests()
-    Coord-->>AgentB: [{from: "ha", msg: "..."}]
-    AgentB->>AgentB: Process request
-    AgentB->>Coord: respond_to_request(response="...")
-
-    Coord-->>AgentA: Response received
-    AgentA->>User: "Meshtastic says..."
-```
+#### 1.4 Improve Redis Error Messages (Medium)
+- **Files**: Throughout `coordinator/` modules
+- **Issue**: Redis exceptions propagate without user-friendly context
+- **Fix**: Ensure Redis connection errors have clear, actionable messages
+- **Approach**: Fail fast but with helpful error text (e.g., "Cannot connect to Redis at {host}:{port}. Ensure Redis is running.")
+- **Verification**: Manual verification of error messages
 
 ---
 
-## 4. Components and Interfaces
+### Group 2: Test Additions
 
-### 4.1 Coordinator MCP Server
+New tests for untested critical functionality.
 
-The coordinator exposes these MCP tools to Claude Code instances:
+#### 2.1 Add Middleware Tests (Critical)
+- **New File**: `coordinator/tests/test_middleware.py`
+- **Coverage Required**:
+  - Header extraction (`X-Agent-ID` parsing)
+  - Auto-registration when agent not found
+  - Collision resolution (session_id tracking, auto-suffix generation)
+  - Missing header handling
+- **Reference**: `coordinator/server.py:35-59` (AgentIdentityMiddleware)
 
-#### 4.1.1 Agent Management
+#### 2.2 Add /api/unregister Endpoint Tests (Critical)
+- **File**: `coordinator/tests/test_rest_api.py` (add to existing)
+- **Coverage Required**:
+  - Successful unregistration
+  - Unregistration of non-existent agent
+  - Request validation
+  - Integration with SessionEnd hook behavior
+- **Reference**: `coordinator/server.py:122-151`
 
-| Tool | Parameters | Returns | Description |
-|------|------------|---------|-------------|
-| `register_agent` | `name?: string, capabilities?: string[]` | `{agent_id, name}` | Register this instance (auto-called on connect) |
-| `list_agents` | none | `[{id, name, status, last_seen}]` | List all known agents |
-| `get_agent_status` | `agent_id: string` | `{status, last_seen, current_task}` | Get specific agent status |
-
-#### 4.1.2 Messaging
-
-| Tool | Parameters | Returns | Description |
-|------|------------|---------|-------------|
-| `send_request` | `target: string, message: string, context?: string` | `{request_id, status}` | Send request to another agent |
-| `get_pending_requests` | none | `[{id, from, message, context, timestamp}]` | Get all pending requests for this agent |
-| `respond_to_request` | `request_id: string, response: string, status?: string` | `{success}` | Respond to a request |
-| `wait_for_response` | `request_id: string, timeout?: int` | `{response, status}` or `{timeout: true}` | Block until response arrives |
-| `wait_for_request` | `timeout?: int` | `{request}` or `{timeout: true}` | Block until a request arrives |
-
-#### 4.1.3 Coordination Control
-
-| Tool | Parameters | Returns | Description |
-|------|------------|---------|-------------|
-| `set_status` | `status: string` | `{success}` | Set agent status (available, busy, away) |
-| `escalate_to_human` | `reason: string` | `{success}` | Mark this agent as needing human input |
-
-### 4.2 Coordinator REST API
-
-For hooks and health checks (non-MCP):
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/mcp` | POST | FastMCP HTTP transport endpoint |
-| `/api/pending` | GET | Quick check for pending requests (for Stop hook) |
-| `/api/health` | GET | Health check |
-| `/api/agents` | GET | List agents (for debugging) |
-
-### 4.3 Plugin Structure
-
-```
-c3po/
-├── .claude-plugin/
-│   └── plugin.json              # Plugin manifest
-├── .mcp.json                    # MCP server configuration
-├── hooks/
-│   ├── check_inbox.py           # Stop hook script
-│   └── register_agent.py        # SessionStart hook script
-├── skills/
-│   └── coordinate/
-│       └── SKILL.md             # /coordinate skill
-├── coordinator/                 # Coordinator source (for self-hosting)
-│   ├── Dockerfile
-│   ├── docker-compose.yml
-│   ├── requirements.txt
-│   └── server.py
-└── README.md
-```
-
-### 4.4 Plugin Configuration
-
-**.claude-plugin/plugin.json:**
-```json
-{
-  "name": "c3po",
-  "description": "Multi-agent coordination for Claude Code",
-  "version": "1.0.0",
-  "hooks": {
-    "Stop": [{
-      "matcher": {},
-      "hooks": [{
-        "type": "command",
-        "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/check_inbox.py"
-      }]
-    }],
-    "SessionStart": [{
-      "matcher": {"source": ["startup", "resume"]},
-      "hooks": [{
-        "type": "command",
-        "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/register_agent.py"
-      }]
-    }]
-  }
-}
-```
-
-**.mcp.json:**
-```json
-{
-  "mcpServers": {
-    "c3po": {
-      "type": "http",
-      "url": "${C3PO_COORDINATOR_URL:-http://localhost:8420}/mcp",
-      "headers": {
-        "X-Agent-ID": "${C3PO_AGENT_ID:-${PWD##*/}}"
-      }
-    }
-  }
-}
-```
+#### 2.3 Add Response Put-Back Mechanism Tests (Medium)
+- **File**: `coordinator/tests/test_messaging.py` (add to existing)
+- **Coverage Required**:
+  - Verify FIFO order maintained when response is put back
+  - Multiple agents waiting for responses scenario
+- **Note**: This validates the Group 1.1 fix
 
 ---
 
-## 5. Data Models
+### Group 3: Documentation Updates
 
-### 5.1 Agent Record
+Fix inaccuracies and add missing documentation.
 
-Stored in Redis hash `agents`:
+#### 3.1 Fix Agent Timeout Documentation (Critical)
+- **File**: `docs/USAGE.md`
+- **Issue**: Documents "5 minutes" but code uses 90 seconds
+- **Fix**: Update to say 90 seconds, reference `AGENT_TIMEOUT_SECONDS` constant
 
-```json
-{
-  "id": "homeassistant",
-  "name": "homeassistant",
-  "display_name": "Home Assistant",
-  "capabilities": ["mqtt", "zigbee", "automation"],
-  "status": "available",
-  "last_seen": "2026-01-28T10:30:00Z",
-  "session_id": "abc123",
-  "current_task": null
-}
-```
+#### 3.2 Document SessionEnd Hook (Critical)
+- **File**: `docs/USAGE.md` (add section) or `docs/SETUP.md`
+- **Content**:
+  - Explain that agents gracefully unregister on session end
+  - Reference the hook mechanism
+  - Document `/api/unregister` endpoint behavior
+  - Explain automatic cleanup via TTL
 
-### 5.2 Request Message
+#### 3.3 Create API Reference (Critical)
+- **New File**: `docs/API_REFERENCE.md`
+- **MCP Tools Section** (simple markdown format):
+  - `ping` - Health check
+  - `list_agents` - List registered agents with status
+  - `register_agent` - Explicit registration with capabilities
+  - `send_request` - Send request to another agent
+  - `get_pending_requests` - Get queued requests (consumes them)
+  - `respond_to_request` - Respond to a received request
+  - `wait_for_response` - Blocking wait for response
+  - `wait_for_request` - Blocking wait for incoming request
+- **REST Endpoints Section** (OpenAPI-style):
+  - `POST /api/unregister` - Unregister an agent
+  - Include: parameters, request/response schemas, error codes
 
-Stored in Redis list `inbox:{agent_id}`:
+#### 3.4 Document Collision Detection (Medium)
+- **File**: `docs/USAGE.md` (add section)
+- **Content**:
+  - Explain what happens when two CC instances use same working directory
+  - Describe session_id tracking and auto-suffix mechanism
+  - Provide guidance on avoiding collisions
 
-```json
-{
-  "id": "homeassistant-meshtastic-1706438400.123",
-  "from_agent": "homeassistant",
-  "to_agent": "meshtastic",
-  "message": "What MQTT topic does node 0x1234 publish to?",
-  "context": "Trying to configure HA sensor for this node",
-  "timestamp": "2026-01-28T10:30:00Z",
-  "status": "pending",
-  "priority": "normal"
-}
-```
+#### 3.5 Fix TROUBLESHOOTING.md Inconsistency (Medium)
+- **File**: `docs/TROUBLESHOOTING.md`
+- **Issue**: Suggests manual `redis-cli FLUSHDB` but auto-TTL handles cleanup
+- **Fix**: Clarify that manual cleanup is rarely needed; explain TTL-based expiration
 
-### 5.3 Response Message
+#### 3.6 Document ping Tool (Medium)
+- **File**: `docs/USAGE.md`
+- **Issue**: Tool exists but not mentioned
+- **Fix**: Add brief description of ping tool for health checks
 
-Stored in Redis list `responses:{agent_id}`:
-
-```json
-{
-  "request_id": "homeassistant-meshtastic-1706438400.123",
-  "from_agent": "meshtastic",
-  "to_agent": "homeassistant",
-  "response": "Node 0x1234 publishes to mesh/node/1234/sensors",
-  "status": "success",
-  "timestamp": "2026-01-28T10:30:15Z"
-}
-```
-
-### 5.4 Redis Key Structure
-
-| Key Pattern | Type | TTL | Purpose |
-|-------------|------|-----|---------|
-| `agents` | Hash | None | Agent registry (field = agent_id) |
-| `inbox:{agent_id}` | List | 24h | Pending requests for agent |
-| `responses:{agent_id}` | List | 1h | Responses waiting to be retrieved |
-| `agent:{agent_id}:status` | String | 5m | Quick status check with auto-expire |
+#### 3.7 Fix Terminology Inconsistencies (Low)
+- **Files**: All documentation files
+- **Standardize**:
+  - "stop hook" → "Stop hook" (consistent capitalization)
+  - Choose either "MCP server" or "coordinator" and use consistently
+  - "agent ID" vs "agent identifier" → pick one
+  - "registration" vs "enrollment" → pick one
 
 ---
 
-## 6. Error Handling
+### Group 4: Design Document Reconciliation
 
-### 6.1 Coordinator Unavailable
+Align design documents with implementation reality.
 
-**Detection:** HTTP connection timeout or error
+#### 4.1 Update detailed-design.md (Medium)
+- **File**: `.sop/planning/design/detailed-design.md` (the original one, not this file)
+- **Changes**:
+  - Mark `set_status` tool as "Future"
+  - Mark `escalate_to_human` tool as "Future"
+  - Mark `get_agent_status` tool as "Future"
+  - Mark `/api/agents` REST endpoint as "Future"
+  - Add section documenting implemented features not in original design:
+    - `wait_for_request` tool
+    - `register_agent` explicit tool
+    - `peek_pending_requests` internal method
 
-**Behavior:**
-- MCP tools return clear error: `{"error": "Coordinator unavailable", "code": "COORD_DOWN"}`
-- Agent continues normal operation for local tasks
-- Stop hook fails open (allows stop, doesn't block)
-
-**User experience:**
-```
-⚠️ c3po coordinator is not reachable. Coordination features disabled.
-You can continue working locally. Run /coordinate status to check connection.
-```
-
-### 6.2 Target Agent Unavailable
-
-**Detection:** Agent not in registry or status = "away"
-
-**Behavior:**
-- `send_request` returns: `{"error": "Agent 'meshtastic' is not available", "code": "AGENT_UNAVAILABLE"}`
-- Suggests available agents if any exist
-
-### 6.3 Request Timeout
-
-**Detection:** `wait_for_response` timeout expires
-
-**Behavior:**
-- Returns: `{"timeout": true, "request_id": "...", "waited_seconds": 60}`
-- Request stays in target's inbox (they may still respond)
-- Agent can retry or report timeout to user
-
-### 6.4 Agent Name Collision
-
-**Detection:** Registration with existing name
-
-**Behavior:**
-- Coordinator auto-suffixes: `homeassistant` → `homeassistant-2`
-- Returns canonical name in registration response
-- Hook updates local environment if needed
-
-### 6.5 Human Interrupt During Coordination
-
-**Detection:** User presses Esc/Ctrl-C or types interrupt phrase
-
-**Behavior:**
-- CC's normal interrupt handling takes over
-- In-flight `wait_for_response` is cancelled
-- Agent marks current task as interrupted
-- Other agents waiting for response eventually timeout
+#### 4.2 Update PROMPT.md Task Statuses (Medium)
+- **File**: `PROMPT.md`
+- **Changes**:
+  - TASK 4 (Graceful disconnect): Mark as COMPLETE
+  - TASK 5 (Collision handling): Mark as COMPLETE
+  - Update any other tasks that have been completed
 
 ---
 
-## 7. Testing Strategy
+### Group 5: Low Priority Improvements
 
-### 7.1 Unit Tests
+Nice-to-have improvements.
 
-| Component | Test Focus |
-|-----------|------------|
-| Coordinator tools | Each MCP tool in isolation with mock Redis |
-| Message routing | Request/response flow with multiple agents |
-| Name collision | Auto-suffix logic |
-| Timeout handling | Redis BLPOP timeout behavior |
+#### 5.1 Add Input Validation to REST Endpoints (Low)
+- **File**: `coordinator/server.py`
+- **Issue**: 50KB validation exists at MCP tool level but not REST level
+- **Fix**: Add consistent input size validation to REST endpoints
 
-### 7.2 Integration Tests
+#### 5.2 Add Pagination to list_agents (Low)
+- **File**: `coordinator/agents.py` and `coordinator/server.py`
+- **Issue**: Large agent lists returned without pagination
+- **Fix**: Add optional `limit` and `offset` parameters
+- **Note**: May be deferred if agent count is expected to remain small
 
-| Test | Setup | Verification |
-|------|-------|--------------|
-| Two-agent request/response | 2 CC instances, coordinator, Redis | Agent A sends, B receives and responds |
-| Multi-turn conversation | 2 CC instances | 3+ round trips complete successfully |
-| Coordinator restart | Kill and restart coordinator | Agents reconnect, pending messages survive |
-| Agent disconnect | Kill one CC instance | Other agent's request times out gracefully |
-
-### 7.3 Manual Testing Checklist
-
-- [ ] Install plugin on fresh CC instance
-- [ ] Agent registers with folder name
-- [ ] `list_agents` shows registered agents
-- [ ] Send request to another agent
-- [ ] Receive and respond to request
-- [ ] Stop hook triggers on pending request
-- [ ] Coordinator down: graceful error message
-- [ ] Human interrupt works during coordination
-- [ ] Name collision produces unique name
-
-### 7.4 Demo Scenarios
-
-**Demo 1: Basic Coordination**
-```
-Host A (homeassistant folder):
-> "Ask the meshtastic agent what MQTT topics it uses"
-[Agent A sends request, waits]
-[Agent B receives via stop hook, responds]
-> "Meshtastic says it uses mesh/# for all topics"
-```
-
-**Demo 2: Multi-turn Troubleshooting**
-```
-Host A:
-> "Work with meshtastic to debug why sensor data isn't appearing in HA"
-[Multiple back-and-forth exchanges]
-> "Found the issue: node was in sleep mode. Meshtastic agent woke it up."
-```
+#### 5.3 Session ID Uniqueness (Low)
+- **File**: `coordinator/agents.py`
+- **Issue**: Session ID uniqueness not enforced
+- **Fix**: Add validation or documentation about expected behavior
+- **Note**: May be documentation-only fix
 
 ---
 
-## 8. Appendices
+## Testing Strategy
 
-### A. Technology Choices
-
-| Choice | Selected | Alternatives Considered | Rationale |
-|--------|----------|------------------------|-----------|
-| Coordinator framework | FastMCP (Python) | mcp-framework (TS), custom | Best docs, Python ecosystem, quick to develop |
-| Message store | Redis | SQLite, PostgreSQL, custom | Native pub/sub, BLPOP for blocking, simple |
-| Distribution | CC Plugin | NPM package, git clone | One-command install, includes hooks |
-| Agent identity | X-Agent-ID header | Bearer token, query param | Simple, no auth needed for home lab |
-| Incoming requests | Stop hook + blocking tool | Polling, SSE notifications | Works with CC's limitations |
-
-### B. Research Findings Summary
-
-1. **CC Hooks** can block Claude from stopping and inject instructions
-2. **FastMCP** supports HTTP transport with multiple concurrent clients
-3. **MCP notifications** are received but not acted upon by CC
-4. **Blocking MCP tools** are the reliable pattern for waiting on external events
-5. **HCOM project** validates the hooks + message queue approach
-
-### C. Alternative Approaches Considered
-
-**Per-host MCP server:** Rejected because user wanted minimal per-host setup and some hosts are resource-constrained.
-
-**Pure polling:** Rejected because it requires agent to actively check, adds latency, and complicates prompts.
-
-**SSE notifications:** Not viable because CC doesn't auto-act on notifications.
-
-**HCOM integration:** Could be used, but adds SQLite dependency and different patterns. May revisit post-MVP.
-
-### D. Future Enhancements (Post-MVP)
-
-1. **Authentication**: Add Bearer token auth for non-home-lab deployments
-2. **Encryption**: TLS for coordinator connections
-3. **Agent suggestions**: "I notice meshtastic might help here. Should I reach out?"
-4. **Persistent conversations**: Track multi-turn context across sessions
-5. **Web dashboard**: Visualization of agent network and message flow
-6. **Priority queues**: Urgent requests processed first
-
-### E. Configuration Reference
-
-**Environment Variables:**
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `C3PO_COORDINATOR_URL` | `http://localhost:8420` | Coordinator URL |
-| `C3PO_AGENT_ID` | `${PWD##*/}` (folder name) | Agent identifier |
-| `C3PO_TIMEOUT` | `60` | Default request timeout (seconds) |
-
-**Docker Compose (coordinator/docker-compose.yml):**
-```yaml
-version: '3.8'
-services:
-  coordinator:
-    build: .
-    ports:
-      - "8420:8420"
-    environment:
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - redis
-
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes
-
-volumes:
-  redis_data:
+### Per-Group Testing
+After each group, run:
+```bash
+cd coordinator && pytest tests/ -v
+cd plugin/hooks && pytest tests/ -v
 ```
+
+### New Test Files
+- `coordinator/tests/test_middleware.py` - New file for middleware tests
+
+### Test Updates
+- `coordinator/tests/test_rest_api.py` - Add /api/unregister tests
+- `coordinator/tests/test_messaging.py` - Add response put-back tests
+- Remove tests for deleted dead code
+
+### Final Verification
+After all groups complete:
+1. Full test suite passes
+2. Two-agent manual test per PROMPT.md procedure
+3. Documentation review against implementation
 
 ---
 
-## 9. Glossary
+## Error Handling
 
-| Term | Definition |
+### Redis Connection Errors
+- Fail fast with clear error message
+- Include connection details in error (host, port)
+- Suggest remediation (e.g., "Ensure Redis is running")
+
+### Validation Errors
+- Return structured error responses with error codes
+- Include field-level details where applicable
+
+---
+
+## Appendices
+
+### A. Files Modified by Group
+
+| Group | Files |
+|-------|-------|
+| 1 - Code Fixes | messaging.py, errors.py, agents.py, related tests |
+| 2 - Test Additions | test_middleware.py (new), test_rest_api.py, test_messaging.py |
+| 3 - Documentation | USAGE.md, SETUP.md, TROUBLESHOOTING.md, API_REFERENCE.md (new) |
+| 4 - Design Docs | detailed-design.md, PROMPT.md |
+| 5 - Low Priority | server.py, agents.py |
+
+### B. Risk Assessment
+
+| Risk | Mitigation |
 |------|------------|
-| Agent | A Claude Code instance participating in coordination |
-| Coordinator | Central service that routes messages between agents |
-| Domain | Legacy term for agent (from original spec) |
-| Escalation | When an agent pauses and asks for human input |
-| Handoff | Explicit transfer of a task between agents |
-| Stop hook | CC hook that runs when Claude finishes a task |
+| Breaking existing functionality | Run tests after each group; commit only on pass |
+| Documentation drift | Create API_REFERENCE.md from code inspection |
+| Test gaps | New tests written to cover middleware and API |
+
+### C. Out of Scope
+
+- Implementing `set_status`, `escalate_to_human`, `get_agent_status` tools (marked Future)
+- Adding authentication (noted as "Should" priority in review)
+- Plugin-based enrollment (TASK 3 from original PROMPT.md)
+- Clean room validation (TASK 1 from original PROMPT.md)
