@@ -87,22 +87,26 @@ if ! echo "$MCP_LIST" | grep -q "c3po"; then
 fi
 log "MCP server is configured"
 
-# Step 7: Test MCP connection by calling list_agents
-log "Step 7: Testing MCP connection..."
-# Check if we have an API key before trying to use Claude
-if [ -z "$ANTHROPIC_API_KEY" ]; then
-    warn "ANTHROPIC_API_KEY not set - skipping MCP connection test"
-    log "MCP configuration complete (connection test skipped)"
-else
-    # Use claude in non-interactive mode to test the MCP tools
+# Step 7: Verify MCP connection is healthy
+log "Step 7: Verifying MCP connection is healthy..."
+# The 'claude mcp list' output includes a health check - look for "✓ Connected"
+if ! echo "$MCP_LIST" | grep -q "Connected"; then
+    fail "MCP server not connected - health check failed"
+fi
+log "MCP connection verified (health check passed)"
+
+# Step 8 (optional): Test MCP tools via Claude API
+if [ -n "$ANTHROPIC_API_KEY" ]; then
+    log "Step 8: Testing MCP tools via Claude API..."
     RESULT=$(echo "Use the list_agents tool and tell me what agents are online" | claude -p --allowedTools "mcp__c3po__list_agents" 2>&1) || true
     echo "$RESULT"
 
     if echo "$RESULT" | grep -qi "error\|failed\|unavailable"; then
-        warn "MCP connection test had issues - check output above"
-    else
-        log "MCP connection works"
+        fail "MCP tools test failed - check output above"
     fi
+    log "MCP tools work via Claude API"
+else
+    log "Step 8: Skipped (ANTHROPIC_API_KEY not set - MCP tools test requires API access)"
 fi
 
 log "=== Plugin installation test completed ==="
