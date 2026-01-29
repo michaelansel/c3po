@@ -4,40 +4,40 @@ C3PO enables multiple Claude Code instances to communicate with each other, enab
 
 ## Quick Start
 
-### 1. Start the Coordinator
+### 1. Deploy the Coordinator (one-time)
 
+```bash
+git clone https://github.com/USER/c3po.git
+cd c3po
+./scripts/deploy.sh full
+```
+
+Or for local testing:
 ```bash
 cd coordinator
 docker-compose up -d
 ```
 
-This starts the coordinator (port 8420) and Redis backend.
-
-### 2. Install the Plugin
-
-Copy the plugin to your Claude Code plugins directory:
+### 2. Enroll Any Claude Code Instance (one command!)
 
 ```bash
-cp -r plugin ~/.claude/plugins/c3po
+./scripts/enroll.sh http://your-coordinator:8420 my-agent-name
 ```
 
-### 3. Configure Environment
+That's it! The script:
+- Verifies the coordinator is reachable
+- Configures Claude Code's MCP settings
+- Sets up the agent identity
 
-Set these environment variables in your shell profile or before starting Claude Code:
+### 3. Start Collaborating
 
-```bash
-export C3PO_COORDINATOR_URL=http://localhost:8420
-export C3PO_AGENT_ID=my-project-name
-```
+In Claude Code, you now have access to:
 
-### 4. Use C3PO
-
-In Claude Code, you can now:
-
-- `/coordinate status` - Check connection and see online agents
-- `/coordinate send <agent> <message>` - Send a message to another agent
-- Use `list_agents` tool to see available agents
-- Use `send_request` tool for detailed messaging
+- `list_agents` - See all online agents
+- `send_request` - Send a message to another agent
+- `wait_for_response` - Wait for a reply
+- `get_pending_requests` - Check your inbox
+- `respond_to_request` - Reply to requests
 
 ## How It Works
 

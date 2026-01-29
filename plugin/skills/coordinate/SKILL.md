@@ -4,6 +4,7 @@ Multi-agent coordination for Claude Code instances.
 
 ## Usage
 
+- `/coordinate setup` - Configure C3PO coordinator connection (interactive)
 - `/coordinate status` - Check connection and list online agents
 - `/coordinate agents` - List all agents with their status
 - `/coordinate send <agent> <message>` - Send a quick message to another agent
@@ -11,6 +12,33 @@ Multi-agent coordination for Claude Code instances.
 ## Implementation
 
 When the user runs this skill, parse the command and use the appropriate MCP tools from the c3po server:
+
+### `/coordinate setup`
+
+Guide the user through configuring their C3PO coordinator connection. This is an interactive process.
+
+1. Ask for the coordinator URL (e.g., `http://nas.local:8420`)
+2. Test connectivity to the coordinator using the `/api/health` endpoint
+3. Ask for an agent ID (suggest the current folder name as default)
+4. Configure the MCP server using `claude mcp add`:
+   ```bash
+   claude mcp add c3po <url>/mcp -t http -s user -H "X-Agent-ID: <agent-id>"
+   ```
+5. Verify the configuration works
+
+Output format on success:
+```
+C3PO Setup Complete!
+  Coordinator: http://nas.local:8420
+  Agent ID: my-project
+
+Next steps:
+  1. Restart Claude Code to connect
+  2. Use 'list_agents' to see online agents
+  3. Run '/coordinate status' to check connection
+```
+
+Note: Users can also run `claude --init` to trigger the Setup hook which provides a similar interactive experience.
 
 ### `/coordinate status`
 

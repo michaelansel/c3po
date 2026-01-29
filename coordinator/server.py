@@ -38,6 +38,7 @@ class AgentIdentityMiddleware(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         headers = get_http_headers()
         agent_id = headers.get("x-agent-id")
+        session_id = headers.get("x-session-id")
 
         if not agent_id:
             raise ToolError(
@@ -45,11 +46,15 @@ class AgentIdentityMiddleware(Middleware):
                 "Set this header to identify your agent."
             )
 
-        # Store agent_id in context for tools to use
-        context.fastmcp_context.set_state("agent_id", agent_id)
-
         # Auto-register/update heartbeat on each tool call
-        agent_manager.register_agent(agent_id)
+        # This may return a different agent_id if collision was resolved
+        registration = agent_manager.register_agent(agent_id, session_id)
+        actual_agent_id = registration["id"]
+
+        # Store actual agent_id in context for tools to use
+        context.fastmcp_context.set_state("agent_id", actual_agent_id)
+        context.fastmcp_context.set_state("requested_agent_id", agent_id)
+        context.fastmcp_context.set_state("session_id", session_id)
 
         return await call_next(context)
 
@@ -113,6 +118,39 @@ async def api_pending(request):
         )
 
 
+@mcp.custom_route("/api/unregister", methods=["POST"])
+async def api_unregister(request):
+    """Unregister an agent when it disconnects gracefully.
+
+    Requires X-Agent-ID header. Called by SessionEnd hook.
+    Removes the agent from the registry so list_agents doesn't show stale entries.
+    """
+    agent_id = request.headers.get("x-agent-id")
+    if not agent_id:
+        return JSONResponse(
+            {"error": "Missing X-Agent-ID header"},
+            status_code=400,
+        )
+
+    try:
+        removed = agent_manager.remove_agent(agent_id)
+        if removed:
+            return JSONResponse({
+                "status": "ok",
+                "message": f"Agent '{agent_id}' unregistered",
+            })
+        else:
+            return JSONResponse({
+                "status": "ok",
+                "message": f"Agent '{agent_id}' was not registered",
+            })
+    except Exception as e:
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500,
+        )
+
+
 # Tool implementations (testable standalone functions)
 def _ping_impl() -> dict:
     """Check coordinator health. Returns pong with timestamp."""
@@ -130,12 +168,13 @@ def _list_agents_impl(manager: AgentManager) -> list[dict]:
 def _register_agent_impl(
     manager: AgentManager,
     agent_id: str,
+    session_id: Optional[str] = None,
     name: Optional[str] = None,
     capabilities: Optional[list[str]] = None,
 ) -> dict:
     """Register an agent with optional name and capabilities."""
     # Use provided name or agent_id as the identifier
-    return manager.register_agent(agent_id, capabilities)
+    return manager.register_agent(agent_id, session_id, capabilities)
 
 
 # Validation patterns
@@ -334,8 +373,10 @@ def register_agent(
     Returns:
         Agent registration data including id, capabilities, and timestamps
     """
-    agent_id = ctx.get_state("agent_id")
-    return _register_agent_impl(agent_manager, agent_id, name, capabilities)
+    # Use requested_agent_id so explicit registration can retry collision resolution
+    agent_id = ctx.get_state("requested_agent_id") or ctx.get_state("agent_id")
+    session_id = ctx.get_state("session_id")
+    return _register_agent_impl(agent_manager, agent_id, session_id, name, capabilities)
 
 
 @mcp.tool()

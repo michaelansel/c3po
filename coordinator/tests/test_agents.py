@@ -37,30 +37,32 @@ class TestRegisterAgent:
     def test_register_agent_with_capabilities(self, agent_manager):
         """Should store capabilities when provided."""
         result = agent_manager.register_agent(
-            "agent-a", capabilities=["home-automation", "mqtt"]
+            "agent-a", session_id=None, capabilities=["home-automation", "mqtt"]
         )
 
         assert result["capabilities"] == ["home-automation", "mqtt"]
 
-    def test_register_duplicate_updates_existing(self, agent_manager):
-        """Duplicate registration should update, not create new."""
-        first = agent_manager.register_agent("agent-a")
+    def test_register_duplicate_with_same_session_updates_existing(self, agent_manager):
+        """Duplicate registration with same session should update, not create new."""
+        first = agent_manager.register_agent("agent-a", session_id="session-1")
         original_registered_at = first["registered_at"]
 
         # Small delay to ensure timestamp difference
         time.sleep(0.01)
 
-        second = agent_manager.register_agent("agent-a")
+        second = agent_manager.register_agent("agent-a", session_id="session-1")
 
         # Should keep original registration time
         assert second["registered_at"] == original_registered_at
         # Should update last_seen
         assert second["last_seen"] >= first["last_seen"]
+        # Should keep same ID
+        assert second["id"] == "agent-a"
 
     def test_register_updates_capabilities(self, agent_manager):
         """Re-registering with new capabilities should update them."""
-        agent_manager.register_agent("agent-a", capabilities=["old"])
-        result = agent_manager.register_agent("agent-a", capabilities=["new"])
+        agent_manager.register_agent("agent-a", session_id=None, capabilities=["old"])
+        result = agent_manager.register_agent("agent-a", session_id=None, capabilities=["new"])
 
         assert result["capabilities"] == ["new"]
 
@@ -114,7 +116,7 @@ class TestGetAgent:
 
     def test_get_existing_agent(self, agent_manager):
         """Should return agent data when exists."""
-        agent_manager.register_agent("agent-a", capabilities=["test"])
+        agent_manager.register_agent("agent-a", session_id=None, capabilities=["test"])
         result = agent_manager.get_agent("agent-a")
 
         assert result is not None
@@ -164,3 +166,100 @@ class TestRemoveAgent:
         """Should return False for unknown agent."""
         result = agent_manager.remove_agent("unknown")
         assert result is False
+
+
+class TestCollisionHandling:
+    """Tests for agent ID collision handling."""
+
+    def test_collision_without_session_id(self, agent_manager):
+        """Without session_id, re-registration is treated as collision if online."""
+        first = agent_manager.register_agent("agent-a")
+        second = agent_manager.register_agent("agent-a")
+
+        # Without session_id, we can't tell if it's the same session,
+        # so treat as collision if agent is online
+        assert second["id"] == "agent-a-2"
+
+    def test_same_session_reconnect_keeps_id(self, agent_manager):
+        """Same session reconnecting should keep the same agent ID."""
+        first = agent_manager.register_agent("agent-a", session_id="session-123")
+        second = agent_manager.register_agent("agent-a", session_id="session-123")
+
+        assert second["id"] == "agent-a"
+        assert second["session_id"] == "session-123"
+
+    def test_collision_with_different_session_gets_suffix(self, agent_manager):
+        """Different session with same agent ID gets suffixed ID."""
+        first = agent_manager.register_agent("agent-a", session_id="session-1")
+        second = agent_manager.register_agent("agent-a", session_id="session-2")
+
+        assert first["id"] == "agent-a"
+        assert second["id"] == "agent-a-2"
+        assert second["session_id"] == "session-2"
+
+    def test_multiple_collisions_increment_suffix(self, agent_manager):
+        """Multiple collisions should increment suffix."""
+        agent_manager.register_agent("agent-a", session_id="session-1")
+        agent_manager.register_agent("agent-a", session_id="session-2")
+        third = agent_manager.register_agent("agent-a", session_id="session-3")
+
+        assert third["id"] == "agent-a-3"
+
+    def test_collision_reuses_offline_slot(self, agent_manager, redis_client):
+        """Collision should reuse an offline agent's slot."""
+        # Register first agent
+        agent_manager.register_agent("agent-a", session_id="session-1")
+
+        # Register second agent (gets -2)
+        agent_manager.register_agent("agent-a", session_id="session-2")
+
+        # Make agent-a-2 offline
+        old_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=100)
+        ).isoformat()
+        data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, "agent-a-2"))
+        data["last_seen"] = old_time
+        redis_client.hset(agent_manager.AGENTS_KEY, "agent-a-2", json.dumps(data))
+
+        # New session should get agent-a-2 (reusing offline slot)
+        third = agent_manager.register_agent("agent-a", session_id="session-3")
+        assert third["id"] == "agent-a-2"
+
+    def test_collision_skips_online_slots(self, agent_manager):
+        """Collision should skip online agent slots."""
+        agent_manager.register_agent("agent-a", session_id="session-1")
+        agent_manager.register_agent("agent-a", session_id="session-2")  # Gets -2
+        # Session-3 should get -3 since both agent-a and agent-a-2 are online
+        third = agent_manager.register_agent("agent-a", session_id="session-3")
+
+        assert third["id"] == "agent-a-3"
+
+    def test_no_collision_with_offline_agent(self, agent_manager, redis_client):
+        """New session can reuse ID of offline agent."""
+        agent_manager.register_agent("agent-a", session_id="session-1")
+
+        # Make agent offline
+        old_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=100)
+        ).isoformat()
+        data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, "agent-a"))
+        data["last_seen"] = old_time
+        redis_client.hset(agent_manager.AGENTS_KEY, "agent-a", json.dumps(data))
+
+        # New session should get agent-a (not -2)
+        second = agent_manager.register_agent("agent-a", session_id="session-2")
+        assert second["id"] == "agent-a"
+
+    def test_session_id_stored(self, agent_manager):
+        """Session ID should be stored in agent data."""
+        agent_manager.register_agent("agent-a", session_id="session-123")
+        agent = agent_manager.get_agent("agent-a")
+
+        assert agent["session_id"] == "session-123"
+
+    def test_session_id_none_allowed(self, agent_manager):
+        """Registration without session_id should work."""
+        result = agent_manager.register_agent("agent-a", session_id=None)
+
+        assert result["id"] == "agent-a"
+        assert result["session_id"] is None

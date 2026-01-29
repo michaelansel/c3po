@@ -2,9 +2,61 @@
 
 ## Prerequisites
 
-- Python 3.11+
+**For Coordinator (server):**
 - Docker and docker-compose (or finch)
-- Claude Code with plugin support
+- Network access from Claude Code clients
+
+**For Claude Code Clients:**
+- Claude Code CLI installed
+- Network access to coordinator
+
+## Quick Start: Plugin Setup (Recommended)
+
+The easiest way to configure C3PO is through the plugin's interactive setup:
+
+### Option 1: Using claude --init
+
+If you have the c3po plugin installed, run:
+
+```bash
+claude --init
+```
+
+This triggers the Setup hook which guides you through:
+1. Entering your coordinator URL
+2. Testing connectivity
+3. Choosing an agent ID
+4. Configuring the MCP server
+
+### Option 2: Using /coordinate setup
+
+Inside Claude Code, run:
+
+```
+/coordinate setup
+```
+
+This provides the same interactive setup experience.
+
+### Option 3: Shell Script
+
+For scripted or non-interactive setup:
+
+```bash
+# From the c3po repo
+./scripts/enroll.sh http://your-coordinator:8420 my-agent-name
+
+# Or via curl (from anywhere)
+curl -sSL https://raw.githubusercontent.com/USER/c3po/main/scripts/enroll.sh | \
+  bash -s -- http://your-coordinator:8420 my-agent-name
+```
+
+All methods:
+1. Verify the coordinator is reachable
+2. Configure Claude Code's MCP settings with user scope
+3. Set up the agent identity
+
+After setup, restart Claude Code to connect.
 
 ## Coordinator Setup
 
@@ -71,7 +123,41 @@ Configure in `scripts/deploy.sh`:
 - `NAS_HOST` - SSH address of your server
 - `DATA_DIR` - Data directory for Redis persistence
 
-## Plugin Installation
+## Headless Mode Configuration
+
+**Important:** Plugin `.mcp.json` files are NOT loaded in headless mode (`claude -p`). The enrollment script handles this by adding the MCP server with user scope, which works in both interactive and headless modes.
+
+### Pre-approved Tools for Headless Mode
+
+In headless mode, use `--allowedTools` to pre-approve MCP tools:
+
+```bash
+claude -p "Your prompt" --allowedTools "mcp__c3po__list_agents,mcp__c3po__send_request,mcp__c3po__wait_for_response,mcp__c3po__respond_to_request"
+```
+
+### Per-Invocation Configuration
+
+For testing with different agent IDs, create a config file:
+
+```bash
+cat > /tmp/agent-config.json << 'EOF'
+{
+  "mcpServers": {
+    "c3po": {
+      "type": "http",
+      "url": "http://your-coordinator:8420/mcp",
+      "headers": { "X-Agent-ID": "test-agent" }
+    }
+  }
+}
+EOF
+
+claude -p "Your prompt" --mcp-config /tmp/agent-config.json --strict-mcp-config
+```
+
+## Plugin Installation (Alternative)
+
+For interactive use only (not headless mode), you can install the plugin manually.
 
 ### Manual Installation
 
