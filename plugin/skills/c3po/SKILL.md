@@ -23,13 +23,19 @@ When the user runs this skill, parse the command and use the appropriate MCP too
 Guide the user through configuring their C3PO coordinator connection. This is an interactive process.
 
 1. Ask for the coordinator URL (e.g., `http://nas.local:8420`)
-2. Test connectivity to the coordinator using the `/api/health` endpoint
-3. Ask for an agent ID (suggest the current folder name as default)
+2. Test connectivity using curl (NOT WebFetch - it has network restrictions):
+   ```bash
+   curl -s <url>/api/health
+   ```
+   Expected response: `{"status":"ok","agents_online":N}`
+3. Ask for an agent ID (suggest hostname/project format as default)
 4. Configure the MCP server using `claude mcp add`:
    ```bash
    claude mcp add c3po <url>/mcp -t http -s user -H "X-Agent-ID: <agent-id>"
    ```
-5. Verify the configuration works
+5. Verify the configuration with `claude mcp list`
+
+IMPORTANT: Always use Bash with curl for HTTP requests, never use WebFetch (it runs in a sandbox with different network access).
 
 Output format on success:
 ```

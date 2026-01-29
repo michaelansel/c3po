@@ -8,7 +8,7 @@
       "name": "c3po",
       "source": "./plugin",
       "description": "Multi-agent coordination for Claude Code",
-      "version": "0.2.2"
+      "version": "0.2.3"
     }
   ]
 }
