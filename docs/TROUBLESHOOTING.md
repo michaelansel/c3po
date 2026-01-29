@@ -88,11 +88,11 @@ Wait for target agent to start Claude Code.
 - Agent appears in list but status is "offline"
 
 **Cause:**
-Agent hasn't made a request recently (>5 minutes)
+Agent hasn't made a request recently (>90 seconds)
 
 **Solution:**
 
-This is normal - agents go "offline" after 5 minutes of inactivity. They'll come back "online" on next tool use.
+This is normal - agents go "offline" after 90 seconds of inactivity. They'll come back "online" on next tool use.
 
 The agent can still receive messages while "offline" - they'll be delivered when the agent checks.
 
@@ -318,13 +318,17 @@ Messages accumulating (not being consumed)
 
 **Solution:**
 
-Messages expire after 24h automatically. If you need to clear manually:
+Messages and agent registrations have automatic TTLs:
+- **Messages**: Expire after 24 hours if not consumed
+- **Agent registrations**: Automatically cleaned up when agents go offline
+
+In normal operation, Redis memory should stabilize. If you need to force-clear everything (e.g., during development):
 
 ```bash
 docker exec c3po-redis redis-cli FLUSHDB
 ```
 
-**Warning:** This deletes all messages!
+**Warning:** This deletes all messages and agent registrations!
 
 ## Getting Help
 

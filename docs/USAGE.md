@@ -59,6 +59,22 @@ Example:
 
 For more control, use the MCP tools directly:
 
+### ping
+
+Check coordinator health and connectivity.
+
+```
+Use the ping tool to verify the coordinator is responding.
+```
+
+Returns:
+```json
+{
+  "pong": true,
+  "timestamp": "2024-01-15T10:30:00Z"
+}
+```
+
 ### list_agents
 
 List all registered agents with status.
@@ -226,6 +242,22 @@ Choose meaningful agent IDs:
 - Use consistent naming across hosts
 - Avoid generic names like "agent1"
 
+### Collision Detection
+
+When two Claude Code instances try to register with the same agent ID (e.g., two terminals in the same folder), the coordinator handles this automatically:
+
+1. **Same session reconnecting**: If the session ID matches, the existing registration is updated (heartbeat refresh)
+2. **Different session, existing agent offline**: The new session takes over the ID
+3. **Different session, existing agent online**: A suffix is added (e.g., `myproject-2`, `myproject-3`)
+
+The registration response includes the actual assigned ID, which may differ from the requested ID if a collision was resolved.
+
+Example scenario:
+- Terminal 1 starts in `/home/user/myproject` → registers as `myproject`
+- Terminal 2 starts in same folder while Terminal 1 is active → registers as `myproject-2`
+- Terminal 1 exits gracefully → `myproject` ID becomes available
+- Terminal 3 starts in same folder → registers as `myproject` (reuses the ID)
+
 ## Rate Limiting
 
 The coordinator limits requests to prevent abuse:
@@ -233,6 +265,24 @@ The coordinator limits requests to prevent abuse:
 - Resets every 60 seconds
 
 If rate limited, wait and retry.
+
+## Agent Lifecycle
+
+### Agent Timeout
+
+Agents are considered "offline" after **90 seconds** of inactivity (no tool calls). They automatically come back "online" on their next interaction with the coordinator.
+
+Note: "Offline" agents can still receive messages - they'll be delivered when the agent next checks their inbox.
+
+### Graceful Disconnect (SessionEnd Hook)
+
+When a Claude Code session ends, the SessionEnd hook automatically unregisters the agent from the coordinator. This:
+
+- Removes the agent from `list_agents` immediately (no 90-second wait)
+- Cleans up the agent registry
+- Allows the same agent ID to be reused immediately in a new session
+
+The hook runs silently and fails gracefully - it won't block session exit if the coordinator is unavailable.
 
 ## Message Expiration
 
