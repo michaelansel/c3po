@@ -17,13 +17,40 @@ from coordinator.errors import (
     agent_not_found,
     invalid_request,
     rate_limited,
+    redis_unavailable,
+    RedisConnectionError,
     ErrorCodes,
 )
 from coordinator.messaging import MessageManager
 
-# Redis connection
+
+def create_redis_client(redis_url: str, test_connection: bool = False) -> redis.Redis:
+    """Create Redis client with improved error handling.
+
+    Args:
+        redis_url: Redis connection URL
+        test_connection: If True, test the connection immediately
+
+    Returns:
+        Redis client (connection tested if test_connection=True)
+
+    Raises:
+        RedisConnectionError: If connection test fails with actionable message
+    """
+    client = redis.from_url(redis_url, decode_responses=False)
+    if test_connection:
+        try:
+            client.ping()
+        except redis.ConnectionError as e:
+            raise RedisConnectionError(redis_url, e) from e
+        except redis.RedisError as e:
+            raise RedisConnectionError(redis_url, e) from e
+    return client
+
+
+# Redis connection (lazy - connection tested on first use or at server start)
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
-redis_client = redis.from_url(REDIS_URL, decode_responses=False)
+redis_client = create_redis_client(REDIS_URL, test_connection=False)
 
 # Agent manager
 agent_manager = AgentManager(redis_client)
@@ -496,6 +523,16 @@ def main():
 
     print(f"Starting C3PO coordinator on {host}:{port}")
     print(f"Redis URL: {REDIS_URL}")
+
+    # Test Redis connection at startup with improved error message
+    try:
+        redis_client.ping()
+        print("Redis connection verified")
+    except redis.ConnectionError as e:
+        raise RedisConnectionError(REDIS_URL, e) from e
+    except redis.RedisError as e:
+        raise RedisConnectionError(REDIS_URL, e) from e
+
     mcp.run(transport="http", host=host, port=port)
 
 

@@ -19,6 +19,8 @@ from coordinator.errors import (
     agent_not_found,
     invalid_request,
     rate_limited,
+    redis_unavailable,
+    RedisConnectionError,
 )
 from fastmcp.exceptions import ToolError
 
@@ -281,3 +283,52 @@ class TestRespondToRequestValidation:
             "This is my response"
         )
         assert result["response"] == "This is my response"
+
+
+class TestRedisErrorHandling:
+    """Tests for Redis connection error messages."""
+
+    def test_redis_unavailable_parses_host_port(self):
+        """Error parses host:port from Redis URL."""
+        err = redis_unavailable("redis://localhost:6379")
+        result = err.to_dict()
+
+        assert result["code"] == ErrorCodes.REDIS_UNAVAILABLE
+        assert "localhost:6379" in result["error"]
+        assert "Ensure Redis is running" in result["suggestion"]
+
+    def test_redis_unavailable_default_port(self):
+        """Error uses default port when not specified."""
+        err = redis_unavailable("redis://myhost")
+        result = err.to_dict()
+
+        assert "myhost:6379" in result["error"]
+
+    def test_redis_unavailable_includes_original_error(self):
+        """Error includes original error message."""
+        err = redis_unavailable(
+            "redis://localhost:6379",
+            "Connection refused"
+        )
+        result = err.to_dict()
+
+        assert "Connection refused" in result["error"]
+        assert "localhost:6379" in result["error"]
+
+    def test_redis_connection_error_exception(self):
+        """RedisConnectionError has actionable message."""
+        original = ConnectionError("Connection refused")
+        exc = RedisConnectionError("redis://localhost:6379", original)
+
+        error_str = str(exc)
+        assert "localhost:6379" in error_str
+        assert "Ensure Redis is running" in error_str
+        assert "Connection refused" in error_str
+
+    def test_redis_unavailable_non_standard_url(self):
+        """Error handles non-standard URL format gracefully."""
+        err = redis_unavailable("unix:///var/run/redis.sock")
+        result = err.to_dict()
+
+        # Should fall back to showing the full URL
+        assert "unix:///var/run/redis.sock" in result["error"]

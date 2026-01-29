@@ -29,6 +29,7 @@ class ErrorCodes:
     TIMEOUT = "TIMEOUT"
     INVALID_REQUEST = "INVALID_REQUEST"
     RATE_LIMITED = "RATE_LIMITED"
+    REDIS_UNAVAILABLE = "REDIS_UNAVAILABLE"
 
 
 def agent_not_found(target: str, available: list[str]) -> C3POError:
@@ -64,3 +65,37 @@ def rate_limited(agent_id: str, limit: int, window_seconds: int) -> C3POError:
         message=f"Rate limit exceeded for agent '{agent_id}'.",
         suggestion=f"Maximum {limit} requests per {window_seconds} seconds. Wait before sending more requests.",
     )
+
+
+def redis_unavailable(redis_url: str, original_error: str = "") -> C3POError:
+    """Create error for Redis connection failure."""
+    # Parse host:port from Redis URL for clearer error message
+    # URL format: redis://host:port or redis://host:port/db
+    import re
+    match = re.search(r"redis://([^/:]+):?(\d+)?", redis_url)
+    if match:
+        host = match.group(1)
+        port = match.group(2) or "6379"
+        location = f"{host}:{port}"
+    else:
+        location = redis_url
+
+    message = f"Cannot connect to Redis at {location}."
+    if original_error:
+        message = f"{message} Error: {original_error}"
+
+    return C3POError(
+        code=ErrorCodes.REDIS_UNAVAILABLE,
+        message=message,
+        suggestion="Ensure Redis is running and accessible. Check REDIS_URL environment variable.",
+    )
+
+
+class RedisConnectionError(Exception):
+    """Raised when Redis connection fails with actionable error message."""
+
+    def __init__(self, redis_url: str, original_error: Exception):
+        self.redis_url = redis_url
+        self.original_error = original_error
+        err = redis_unavailable(redis_url, str(original_error))
+        super().__init__(f"{err.message} {err.suggestion}")
