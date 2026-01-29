@@ -12,7 +12,6 @@ Exit codes:
 
 Environment variables:
 - C3PO_COORDINATOR_URL: Coordinator URL (default: http://localhost:8420)
-- C3PO_AGENT_ID: Agent identifier (default: current directory name)
 """
 
 import json
@@ -54,7 +53,6 @@ def get_coordinator_url() -> str:
 
 # Configuration
 COORDINATOR_URL = get_coordinator_url()
-AGENT_ID = os.environ.get("C3PO_AGENT_ID", os.path.basename(os.getcwd()))
 
 
 def _get_agent_id_file() -> str:
@@ -79,7 +77,10 @@ def _heartbeat() -> None:
     Claude Code (fires every turn), so we use it as a heartbeat to
     keep the agent marked as online.
     """
-    assigned_id = _read_agent_id() or AGENT_ID
+    assigned_id = _read_agent_id()
+    if not assigned_id:
+        print("[c3po] Warning: no agent ID file found, skipping heartbeat", file=sys.stderr)
+        return
     try:
         req = urllib.request.Request(
             f"{COORDINATOR_URL}/api/register",
@@ -110,10 +111,15 @@ def main() -> None:
         sys.exit(0)
 
     # Check for pending requests
+    assigned_id = _read_agent_id()
+    if not assigned_id:
+        print("[c3po] Warning: no agent ID file found, skipping pending check", file=sys.stderr)
+        sys.exit(0)
+
     try:
         req = urllib.request.Request(
             f"{COORDINATOR_URL}/api/pending",
-            headers={"X-Agent-ID": AGENT_ID},
+            headers={"X-Agent-ID": assigned_id},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())

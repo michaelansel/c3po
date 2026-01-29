@@ -11,7 +11,6 @@ Exit codes:
 
 Environment variables:
 - C3PO_COORDINATOR_URL: Coordinator URL (default: http://localhost:8420)
-- C3PO_AGENT_ID: Agent identifier (default: current directory name)
 """
 
 import json
@@ -53,7 +52,6 @@ def get_coordinator_url() -> str:
 
 # Configuration
 COORDINATOR_URL = get_coordinator_url()
-AGENT_ID = os.environ.get("C3PO_AGENT_ID", os.path.basename(os.getcwd()))
 
 
 def _get_agent_id_file() -> str:
@@ -73,19 +71,22 @@ def _read_agent_id() -> str | None:
 
 def main() -> None:
     """Unregister agent from coordinator and clean up session file."""
-    # Read the assigned agent_id (may differ from AGENT_ID due to collision)
-    assigned_id = _read_agent_id() or AGENT_ID
-
-    try:
-        req = urllib.request.Request(
-            f"{COORDINATOR_URL}/api/unregister",
-            headers={"X-Agent-ID": assigned_id},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=5)
-    except (urllib.error.URLError, urllib.error.HTTPError, Exception):
-        # Best effort - don't block exit
-        pass
+    # Read the assigned agent_id (written by SessionStart hook)
+    assigned_id = _read_agent_id()
+    if not assigned_id:
+        print("[c3po] Warning: no agent ID file found, skipping unregister", file=sys.stderr)
+        # Still clean up the file (may be empty)
+    else:
+        try:
+            req = urllib.request.Request(
+                f"{COORDINATOR_URL}/api/unregister",
+                headers={"X-Agent-ID": assigned_id},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except (urllib.error.URLError, urllib.error.HTTPError, Exception):
+            # Best effort - don't block exit
+            pass
 
     # Clean up the agent_id file
     try:
