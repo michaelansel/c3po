@@ -38,13 +38,13 @@ features (set_status, escalate_to_human, get_agent_status, /api/agents) are docu
 in the "Out of Scope" section of summary.md.
 
 ### Group 5: Low Priority Improvements
-- [ ] Step 22: Add input validation to REST endpoints
-- [ ] Step 23: Add pagination to list_agents (or document as deferred)
-- [ ] Step 24: Address session ID uniqueness
-- [ ] Step 25: Run tests and commit Group 5
+- [x] Step 22: Add input validation to REST endpoints
+- [x] Step 23: Add pagination to list_agents (or document as deferred)
+- [x] Step 24: Address session ID uniqueness
+- [x] Step 25: Run tests and commit Group 5
 
 ### Final Verification
-- [ ] Step 26: Run full test suite and verify all passes
+- [x] Step 26: Run full test suite and verify all passes
 - [ ] Step 27: Final review of documentation accuracy
 
 ---

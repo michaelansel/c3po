@@ -246,3 +246,49 @@ class TestUnregisterEndpoint:
         # Check updated count
         response = await client.get("/api/health")
         assert response.json()["agents_online"] == 1
+
+
+class TestInputValidation:
+    """Tests for REST endpoint input validation."""
+
+    @pytest.mark.asyncio
+    async def test_pending_rejects_invalid_agent_id_format(self, client):
+        """Pending endpoint should reject invalid agent ID format."""
+        response = await client.get(
+            "/api/pending", headers={"X-Agent-ID": "-invalid-start"}
+        )
+
+        assert response.status_code == 400
+        data = response.json()
+        assert "Invalid" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_pending_accepts_valid_agent_id(self, client):
+        """Pending endpoint should accept valid agent ID format."""
+        response = await client.get(
+            "/api/pending", headers={"X-Agent-ID": "valid-agent_123"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "count" in data
+
+    @pytest.mark.asyncio
+    async def test_unregister_rejects_invalid_agent_id_format(self, client):
+        """Unregister endpoint should reject invalid agent ID format."""
+        response = await client.post(
+            "/api/unregister", headers={"X-Agent-ID": " spaces-not-allowed"}
+        )
+
+        assert response.status_code == 400
+        data = response.json()
+        assert "Invalid" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_unregister_accepts_valid_agent_id(self, client):
+        """Unregister endpoint should accept valid agent ID format."""
+        response = await client.post(
+            "/api/unregister", headers={"X-Agent-ID": "valid.agent-1"}
+        )
+
+        assert response.status_code == 200

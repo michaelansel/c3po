@@ -34,6 +34,10 @@ List all registered agents with their status.
 
 **Parameters:** None
 
+> **Note:** Pagination is not currently implemented. In typical home network deployments
+> with a small number of agents (< 20), this is not an issue. For larger deployments,
+> pagination may be added in a future release.
+
 **Returns:**
 ```json
 [
@@ -361,3 +365,17 @@ Valid agent IDs must:
 Examples:
 - Valid: `homeassistant`, `web-frontend`, `sensor.temp1`, `agent_2`
 - Invalid: `-agent`, `_test`, `agent with spaces`, `agent@home`
+
+---
+
+## Session ID Behavior
+
+The `X-Session-ID` header is optional and used for collision detection:
+
+- **Purpose**: Distinguish between the same agent reconnecting vs. a different agent using the same ID
+- **Same session reconnecting**: Agent keeps its ID, heartbeat is updated
+- **Different session with same ID**: Agent gets a suffixed ID (`agent-2`, `agent-3`, etc.)
+- **Uniqueness**: Session IDs are not enforced to be unique across agents
+
+The session ID is informational - it helps the coordinator make intelligent decisions about
+agent ID collisions but is not stored or used for authentication.

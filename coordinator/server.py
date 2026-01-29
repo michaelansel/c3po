@@ -132,6 +132,13 @@ async def api_pending(request):
             status_code=400,
         )
 
+    # Validate agent_id format (same rules as MCP tools)
+    if not AGENT_ID_PATTERN.match(agent_id):
+        return JSONResponse(
+            {"error": "Invalid X-Agent-ID format"},
+            status_code=400,
+        )
+
     try:
         requests = message_manager.peek_pending_requests(agent_id)
         return JSONResponse({
@@ -156,6 +163,13 @@ async def api_unregister(request):
     if not agent_id:
         return JSONResponse(
             {"error": "Missing X-Agent-ID header"},
+            status_code=400,
+        )
+
+    # Validate agent_id format (same rules as MCP tools)
+    if not AGENT_ID_PATTERN.match(agent_id):
+        return JSONResponse(
+            {"error": "Invalid X-Agent-ID format"},
             status_code=400,
         )
 
