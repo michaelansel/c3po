@@ -68,7 +68,7 @@ SESSION_ID = str(os.getppid())
 
 
 def register_with_coordinator() -> dict | None:
-    """Register this session with the coordinator via MCP.
+    """Register this session with the coordinator via REST API.
 
     Sends headers that coordinator uses to construct full agent_id:
     - X-Agent-ID: Machine identifier (base)
@@ -76,36 +76,22 @@ def register_with_coordinator() -> dict | None:
     - X-Session-ID: Session identifier (for same-session detection)
 
     Returns:
-        Registration result dict or None if failed
+        Registration result dict (with assigned agent_id) or None if failed
     """
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": "register_agent",
-            "arguments": {}
-        }
-    }
-
     req = urllib.request.Request(
-        f"{COORDINATOR_URL}/mcp",
-        data=json.dumps(payload).encode(),
+        f"{COORDINATOR_URL}/api/register",
+        data=b"",  # POST with empty body
         headers={
-            "Content-Type": "application/json",
             "X-Agent-ID": AGENT_ID,
             "X-Project-Name": PROJECT_NAME,
             "X-Session-ID": SESSION_ID,
         },
+        method="POST",
     )
 
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
-            result = json.loads(resp.read())
-            if "result" in result:
-                return result["result"]
-            if os.environ.get("C3PO_DEBUG"):
-                print(f"[c3po:debug] Unexpected response: {result}", file=sys.stderr)
+            return json.loads(resp.read())
     except urllib.error.URLError as e:
         if os.environ.get("C3PO_DEBUG"):
             print(f"[c3po:debug] URLError registering: {e.reason}", file=sys.stderr)
@@ -125,6 +111,9 @@ def main() -> None:
         registration = register_with_coordinator()
 
         if registration:
+            # The coordinator returns the assigned agent_id (may have collision suffix)
+            assigned_id = registration.get("id", f"{AGENT_ID}/{PROJECT_NAME}")
+
             # Get agent count from health endpoint
             req = urllib.request.Request(
                 f"{COORDINATOR_URL}/api/health",
@@ -135,16 +124,13 @@ def main() -> None:
 
             agents_online = health.get("agents_online", 0)
 
-            # Output context for Claude
-            # Full agent ID is machine/project (assembled by coordinator)
-            full_agent_id = f"{AGENT_ID}/{PROJECT_NAME}" if PROJECT_NAME else AGENT_ID
+            # Output context for Claude - the assigned_id is critical
+            # Claude must use this as agent_id parameter in MCP tool calls
             print(f"[c3po] Connected to coordinator at {COORDINATOR_URL}")
-            print(f"[c3po] Agent: {full_agent_id}")
+            print(f"[c3po] Your agent ID: {assigned_id}")
+            print(f"[c3po] IMPORTANT: Pass agent_id=\"{assigned_id}\" "
+                  f"to all c3po MCP tool calls (send_request, get_pending_requests, etc.)")
             print(f"[c3po] {agents_online} agent(s) currently online")
-            print(
-                "[c3po] Use list_agents to see available agents, "
-                "send_request to collaborate."
-            )
         else:
             print(f"[c3po] Could not register with coordinator at {COORDINATOR_URL}")
             print(f"[c3po] Running in local mode. Set C3PO_DEBUG=1 for more details.")

@@ -46,20 +46,18 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        """Handle POST requests (MCP calls)."""
+        """Handle POST requests (REST API)."""
         import time
 
         if self.response_delay:
             time.sleep(self.response_delay)
 
-        if self.path == "/mcp":
+        if self.path == "/api/register":
             self.send_response(self.response_code)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             if self.response_code == 200:
-                # Return MCP-style response with result
-                response = {"result": self.register_response}
-                self.wfile.write(json.dumps(response).encode())
+                self.wfile.write(json.dumps(self.register_response).encode())
             else:
                 self.wfile.write(b'{"error": "test error"}')
         else:
@@ -121,10 +119,9 @@ class TestRegisterAgentHook:
 
         assert exit_code == 0
         assert "[c3po] Connected to coordinator" in stdout
-        assert "test-agent" in stdout
+        assert "Your agent ID: test-agent" in stdout
+        assert "agent_id=" in stdout  # Instruction to pass agent_id
         assert "3 agent(s) currently online" in stdout
-        assert "list_agents" in stdout
-        assert "send_request" in stdout
 
     def test_outputs_local_mode_when_coordinator_unavailable(self):
         """Hook should indicate local mode when coordinator is not reachable."""
@@ -189,13 +186,21 @@ class TestRegisterAgentHook:
         assert "[c3po]" in result.stdout
 
     def test_uses_cwd_as_default_agent_id(self, mock_coordinator, tmp_path, monkeypatch):
-        """Hook should use current directory name as default agent ID."""
+        """Hook should use current directory name as default agent ID.
+
+        The coordinator constructs agent_id as machine/project from headers.
+        We simulate the coordinator returning an ID that includes the project name.
+        """
         # Change to a temp directory with known name
         test_dir = tmp_path / "my-test-project"
         test_dir.mkdir()
         monkeypatch.chdir(test_dir)
 
         MockCoordinatorHandler.health_response = {"status": "ok", "agents_online": 0}
+        # Coordinator would return machine/project as the agent ID
+        MockCoordinatorHandler.register_response = {
+            "id": "test-machine/my-test-project", "status": "online", "capabilities": []
+        }
 
         exit_code, stdout, stderr = run_hook(
             env={

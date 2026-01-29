@@ -145,6 +145,46 @@ async def api_health(request):
         )
 
 
+@mcp.custom_route("/api/register", methods=["POST"])
+async def api_register(request):
+    """Register an agent via REST API (used by hooks).
+
+    Hooks can't use MCP (requires session handshake), so this provides
+    the same registration functionality via a simple REST endpoint.
+
+    Requires X-Agent-ID header, optionally X-Project-Name and X-Session-ID.
+    Returns the assigned agent_id (may differ from requested if collision resolved).
+    """
+    base_id = request.headers.get("x-agent-id")
+    project_name = request.headers.get("x-project-name")
+    session_id = request.headers.get("x-session-id")
+
+    if not base_id:
+        return JSONResponse(
+            {"error": "Missing X-Agent-ID header"},
+            status_code=400,
+        )
+
+    # Construct full agent_id from components
+    agent_id = _construct_agent_id(base_id, project_name)
+
+    # Validate agent_id format
+    if not AGENT_ID_PATTERN.match(agent_id):
+        return JSONResponse(
+            {"error": "Invalid agent ID format"},
+            status_code=400,
+        )
+
+    try:
+        result = agent_manager.register_agent(agent_id, session_id)
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500,
+        )
+
+
 def _construct_agent_id(base_id: str, project_name: Optional[str]) -> str:
     """Construct full agent_id from components.
 
@@ -439,6 +479,25 @@ def _wait_for_request_impl(
     return result
 
 
+def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> str:
+    """Resolve the effective agent_id for a tool call.
+
+    Priority:
+    1. Explicit agent_id parameter (from Claude, who learned it from hook output)
+    2. Header-based agent_id (from middleware auto-registration)
+
+    Args:
+        ctx: MCP context with state from middleware
+        explicit_agent_id: Optional agent_id passed by Claude
+
+    Returns:
+        The effective agent_id to use
+    """
+    if explicit_agent_id and explicit_agent_id.strip():
+        return explicit_agent_id.strip()
+    return ctx.get_state("agent_id")
+
+
 # Register tools with MCP server
 @mcp.tool()
 def ping() -> dict:
@@ -480,6 +539,7 @@ def send_request(
     target: str,
     message: str,
     context: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> dict:
     """Send a request to another agent.
 
@@ -488,18 +548,22 @@ def send_request(
         target: The ID of the agent to send the request to
         message: The request message
         context: Optional context or background for the request
+        agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
         Request data including id, status, and timestamp
     """
-    from_agent = ctx.get_state("agent_id")
+    from_agent = _resolve_agent_id(ctx, agent_id)
     return _send_request_impl(
         message_manager, agent_manager, from_agent, target, message, context
     )
 
 
 @mcp.tool()
-def get_pending_requests(ctx: Context) -> list[dict]:
+def get_pending_requests(
+    ctx: Context,
+    agent_id: Optional[str] = None,
+) -> list[dict]:
     """Get all pending requests for this agent.
 
     This consumes the requests - they will not be returned again.
@@ -507,12 +571,13 @@ def get_pending_requests(ctx: Context) -> list[dict]:
 
     Args:
         ctx: MCP context (injected automatically)
+        agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
         List of pending request dicts with id, from_agent, message, etc.
     """
-    agent_id = ctx.get_state("agent_id")
-    return _get_pending_requests_impl(message_manager, agent_id)
+    effective_id = _resolve_agent_id(ctx, agent_id)
+    return _get_pending_requests_impl(message_manager, effective_id)
 
 
 @mcp.tool()
@@ -521,6 +586,7 @@ def respond_to_request(
     request_id: str,
     response: str,
     status: str = "success",
+    agent_id: Optional[str] = None,
 ) -> dict:
     """Respond to a request from another agent.
 
@@ -529,11 +595,12 @@ def respond_to_request(
         request_id: The ID of the request to respond to
         response: Your response message
         status: Response status (default "success", can be "error" for failures)
+        agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
         Response data including request_id, status, and timestamp
     """
-    from_agent = ctx.get_state("agent_id")
+    from_agent = _resolve_agent_id(ctx, agent_id)
     return _respond_to_request_impl(
         message_manager, from_agent, request_id, response, status
     )
@@ -544,6 +611,7 @@ def wait_for_response(
     ctx: Context,
     request_id: str,
     timeout: int = 60,
+    agent_id: Optional[str] = None,
 ) -> dict:
     """Wait for a response to a previously sent request.
 
@@ -554,18 +622,20 @@ def wait_for_response(
         ctx: MCP context (injected automatically)
         request_id: The ID of the request to wait for
         timeout: Maximum seconds to wait (default 60)
+        agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
         Response data if received, or timeout indicator
     """
-    agent_id = ctx.get_state("agent_id")
-    return _wait_for_response_impl(message_manager, agent_id, request_id, timeout)
+    effective_id = _resolve_agent_id(ctx, agent_id)
+    return _wait_for_response_impl(message_manager, effective_id, request_id, timeout)
 
 
 @mcp.tool()
 def wait_for_request(
     ctx: Context,
     timeout: int = 60,
+    agent_id: Optional[str] = None,
 ) -> dict:
     """Wait for an incoming request from another agent.
 
@@ -576,12 +646,13 @@ def wait_for_request(
     Args:
         ctx: MCP context (injected automatically)
         timeout: Maximum seconds to wait (default 60)
+        agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
         Request data if received, or timeout indicator
     """
-    agent_id = ctx.get_state("agent_id")
-    return _wait_for_request_impl(message_manager, agent_id, timeout)
+    effective_id = _resolve_agent_id(ctx, agent_id)
+    return _wait_for_request_impl(message_manager, effective_id, timeout)
 
 
 def main():
