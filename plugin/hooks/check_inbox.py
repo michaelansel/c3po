@@ -57,7 +57,46 @@ COORDINATOR_URL = get_coordinator_url()
 AGENT_ID = os.environ.get("C3PO_AGENT_ID", os.path.basename(os.getcwd()))
 
 
+def _get_agent_id_file() -> str:
+    """Get the path to the agent ID file for this session."""
+    ppid = os.getppid()
+    return os.path.join(os.environ.get("TMPDIR", "/tmp"), f"c3po-agent-id-{ppid}")
+
+
+def _read_agent_id() -> str | None:
+    """Read the assigned agent_id from the session file."""
+    try:
+        with open(_get_agent_id_file()) as f:
+            return f.read().strip() or None
+    except FileNotFoundError:
+        return None
+
+
+def _heartbeat() -> None:
+    """Ping the coordinator to refresh last_seen for this agent.
+
+    The Stop hook is the most reliable periodic signal we get from
+    Claude Code (fires every turn), so we use it as a heartbeat to
+    keep the agent marked as online.
+    """
+    assigned_id = _read_agent_id() or AGENT_ID
+    try:
+        req = urllib.request.Request(
+            f"{COORDINATOR_URL}/api/register",
+            data=b"",
+            headers={"X-Agent-ID": assigned_id},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass  # Best effort - don't block stop
+
+
 def main() -> None:
+    # Refresh last_seen so the agent stays marked as online.
+    # The Stop hook fires every turn, making it a natural heartbeat.
+    _heartbeat()
+
     # Read hook input from stdin
     try:
         stdin_data = json.load(sys.stdin)

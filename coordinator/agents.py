@@ -11,7 +11,7 @@ class AgentManager:
     """Manages agent registration and status using Redis."""
 
     AGENTS_KEY = "c3po:agents"
-    AGENT_TIMEOUT_SECONDS = 90  # Consider agent offline after this
+    AGENT_TIMEOUT_SECONDS = 900  # Consider agent offline after 15 minutes
 
     def __init__(self, redis_client: redis.Redis):
         """Initialize with Redis client.

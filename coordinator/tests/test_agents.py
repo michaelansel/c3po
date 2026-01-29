@@ -99,9 +99,9 @@ class TestListAgents:
         # Register agent
         agent_manager.register_agent("agent-a")
 
-        # Manually set last_seen to old time
+        # Manually set last_seen to old time (beyond timeout)
         old_time = (
-            datetime.now(timezone.utc) - timedelta(seconds=100)
+            datetime.now(timezone.utc) - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + 10)
         ).isoformat()
         data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, "agent-a"))
         data["last_seen"] = old_time
@@ -198,9 +198,9 @@ class TestCollisionHandling:
         # Register second agent (gets -2)
         agent_manager.register_agent("agent-a", session_id="session-2")
 
-        # Make agent-a-2 offline
+        # Make agent-a-2 offline (beyond timeout)
         old_time = (
-            datetime.now(timezone.utc) - timedelta(seconds=100)
+            datetime.now(timezone.utc) - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + 10)
         ).isoformat()
         data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, "agent-a-2"))
         data["last_seen"] = old_time
@@ -223,9 +223,9 @@ class TestCollisionHandling:
         """New session can reuse ID of offline agent."""
         agent_manager.register_agent("agent-a", session_id="session-1")
 
-        # Make agent offline
+        # Make agent offline (beyond timeout)
         old_time = (
-            datetime.now(timezone.utc) - timedelta(seconds=100)
+            datetime.now(timezone.utc) - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + 10)
         ).isoformat()
         data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, "agent-a"))
         data["last_seen"] = old_time
