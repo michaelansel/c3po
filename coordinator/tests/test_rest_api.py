@@ -93,7 +93,7 @@ class TestPendingEndpoint:
     async def test_pending_returns_empty_for_unknown_agent(self, client):
         """Pending endpoint should return empty for unknown agent."""
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "unknown-agent"}
+            "/api/pending", headers={"X-Agent-ID": "unknown-agent/project"}
         )
 
         assert response.status_code == 200
@@ -102,22 +102,32 @@ class TestPendingEndpoint:
         assert data["requests"] == []
 
     @pytest.mark.asyncio
+    async def test_pending_rejects_bare_machine_name(self, client):
+        """Pending endpoint should reject bare machine name without project."""
+        response = await client.get(
+            "/api/pending", headers={"X-Agent-ID": "bare-machine"}
+        )
+
+        assert response.status_code == 400
+        assert "Bare machine name" in response.json()["error"]
+
+    @pytest.mark.asyncio
     async def test_pending_returns_count_without_consuming(
         self, client, message_manager, agent_manager
     ):
         """Pending endpoint should return count without consuming messages."""
         # Register agents
-        agent_manager.register_agent("sender")
-        agent_manager.register_agent("receiver")
+        agent_manager.register_agent("sender/proj")
+        agent_manager.register_agent("receiver/proj")
 
         # Send a request
         message_manager.send_request(
-            "sender", "receiver", "Test message", context="Test context"
+            "sender/proj", "receiver/proj", "Test message", context="Test context"
         )
 
         # Check pending - should show 1
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "receiver"}
+            "/api/pending", headers={"X-Agent-ID": "receiver/proj"}
         )
         assert response.status_code == 200
         data = response.json()
@@ -127,7 +137,7 @@ class TestPendingEndpoint:
 
         # Check again - should still show 1 (not consumed)
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "receiver"}
+            "/api/pending", headers={"X-Agent-ID": "receiver/proj"}
         )
         data = response.json()
         assert data["count"] == 1
@@ -137,16 +147,16 @@ class TestPendingEndpoint:
         self, client, message_manager, agent_manager
     ):
         """Pending endpoint should return all pending requests."""
-        agent_manager.register_agent("sender")
-        agent_manager.register_agent("receiver")
+        agent_manager.register_agent("sender/proj")
+        agent_manager.register_agent("receiver/proj")
 
         # Send multiple requests
-        message_manager.send_request("sender", "receiver", "Message 1")
-        message_manager.send_request("sender", "receiver", "Message 2")
-        message_manager.send_request("sender", "receiver", "Message 3")
+        message_manager.send_request("sender/proj", "receiver/proj", "Message 1")
+        message_manager.send_request("sender/proj", "receiver/proj", "Message 2")
+        message_manager.send_request("sender/proj", "receiver/proj", "Message 3")
 
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "receiver"}
+            "/api/pending", headers={"X-Agent-ID": "receiver/proj"}
         )
 
         assert response.status_code == 200
@@ -176,32 +186,32 @@ class TestUnregisterEndpoint:
     async def test_unregister_removes_registered_agent(self, client, agent_manager):
         """Unregister endpoint should remove a registered agent."""
         # Register an agent first
-        agent_manager.register_agent("agent-to-remove")
-        assert agent_manager.get_agent("agent-to-remove") is not None
+        agent_manager.register_agent("machine/to-remove")
+        assert agent_manager.get_agent("machine/to-remove") is not None
 
         # Unregister the agent
         response = await client.post(
-            "/api/unregister", headers={"X-Agent-ID": "agent-to-remove"}
+            "/api/unregister", headers={"X-Agent-ID": "machine/to-remove"}
         )
 
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
         assert "unregistered" in data["message"]
-        assert "agent-to-remove" in data["message"]
+        assert "machine/to-remove" in data["message"]
 
         # Verify agent is no longer registered
-        assert agent_manager.get_agent("agent-to-remove") is None
+        assert agent_manager.get_agent("machine/to-remove") is None
 
     @pytest.mark.asyncio
     async def test_unregister_unknown_agent_returns_ok(self, client, agent_manager):
         """Unregister endpoint should succeed for unknown agent (idempotent)."""
         # Verify agent doesn't exist
-        assert agent_manager.get_agent("nonexistent-agent") is None
+        assert agent_manager.get_agent("machine/nonexistent") is None
 
         # Unregister should still succeed
         response = await client.post(
-            "/api/unregister", headers={"X-Agent-ID": "nonexistent-agent"}
+            "/api/unregister", headers={"X-Agent-ID": "machine/nonexistent"}
         )
 
         assert response.status_code == 200
@@ -213,35 +223,35 @@ class TestUnregisterEndpoint:
     async def test_unregister_does_not_affect_other_agents(self, client, agent_manager):
         """Unregister should only remove the specified agent."""
         # Register multiple agents
-        agent_manager.register_agent("agent-1")
-        agent_manager.register_agent("agent-2")
-        agent_manager.register_agent("agent-3")
+        agent_manager.register_agent("machine/agent-1")
+        agent_manager.register_agent("machine/agent-2")
+        agent_manager.register_agent("machine/agent-3")
 
         # Unregister one
         response = await client.post(
-            "/api/unregister", headers={"X-Agent-ID": "agent-2"}
+            "/api/unregister", headers={"X-Agent-ID": "machine/agent-2"}
         )
 
         assert response.status_code == 200
 
         # Check only agent-2 was removed
-        assert agent_manager.get_agent("agent-1") is not None
-        assert agent_manager.get_agent("agent-2") is None
-        assert agent_manager.get_agent("agent-3") is not None
+        assert agent_manager.get_agent("machine/agent-1") is not None
+        assert agent_manager.get_agent("machine/agent-2") is None
+        assert agent_manager.get_agent("machine/agent-3") is not None
 
     @pytest.mark.asyncio
     async def test_unregister_reflects_in_agent_count(self, client, agent_manager):
         """Unregistered agent should be reflected in health endpoint count."""
         # Register agents
-        agent_manager.register_agent("agent-1")
-        agent_manager.register_agent("agent-2")
+        agent_manager.register_agent("machine/agent-1")
+        agent_manager.register_agent("machine/agent-2")
 
         # Check initial count
         response = await client.get("/api/health")
         assert response.json()["agents_online"] == 2
 
         # Unregister one
-        await client.post("/api/unregister", headers={"X-Agent-ID": "agent-1"})
+        await client.post("/api/unregister", headers={"X-Agent-ID": "machine/agent-1"})
 
         # Check updated count
         response = await client.get("/api/health")
@@ -255,7 +265,7 @@ class TestInputValidation:
     async def test_pending_rejects_invalid_agent_id_format(self, client):
         """Pending endpoint should reject invalid agent ID format."""
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "-invalid-start"}
+            "/api/pending", headers={"X-Agent-ID": "-invalid/proj"}
         )
 
         assert response.status_code == 400
@@ -266,7 +276,7 @@ class TestInputValidation:
     async def test_pending_accepts_valid_agent_id(self, client):
         """Pending endpoint should accept valid agent ID format."""
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "valid-agent_123"}
+            "/api/pending", headers={"X-Agent-ID": "valid-agent/proj_123"}
         )
 
         assert response.status_code == 200
@@ -277,7 +287,7 @@ class TestInputValidation:
     async def test_unregister_rejects_invalid_agent_id_format(self, client):
         """Unregister endpoint should reject invalid agent ID format."""
         response = await client.post(
-            "/api/unregister", headers={"X-Agent-ID": " spaces-not-allowed"}
+            "/api/unregister", headers={"X-Agent-ID": " spaces/not-allowed"}
         )
 
         assert response.status_code == 400
@@ -288,7 +298,7 @@ class TestInputValidation:
     async def test_unregister_accepts_valid_agent_id(self, client):
         """Unregister endpoint should accept valid agent ID format."""
         response = await client.post(
-            "/api/unregister", headers={"X-Agent-ID": "valid.agent-1"}
+            "/api/unregister", headers={"X-Agent-ID": "valid.agent/proj-1"}
         )
 
         assert response.status_code == 200

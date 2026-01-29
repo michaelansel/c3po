@@ -96,7 +96,11 @@ class AgentIdentityMiddleware(Middleware):
             if existing:
                 agent_id = existing["id"]
             else:
-                agent_id = base_id
+                raise ToolError(
+                    f"Cannot resolve agent identity: no X-Project-Name header "
+                    f"and no online agent found matching base ID '{base_id}'. "
+                    f"Ensure the SessionStart hook has registered this agent first."
+                )
 
         # Auto-register/update heartbeat on each tool call
         # This may return a different agent_id if collision was resolved
@@ -166,7 +170,10 @@ async def api_register(request):
         )
 
     # Construct full agent_id from components
-    agent_id = _construct_agent_id(base_id, project_name)
+    try:
+        agent_id = _construct_agent_id(base_id, project_name)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
 
     # Validate agent_id format
     if not AGENT_ID_PATTERN.match(agent_id):
@@ -188,15 +195,27 @@ async def api_register(request):
 def _construct_agent_id(base_id: str, project_name: Optional[str]) -> str:
     """Construct full agent_id from components.
 
+    If project_name is provided, returns "base_id/project_name".
+    Otherwise returns base_id as-is (caller already has a composite ID,
+    e.g. from the session temp file).
+
     Args:
-        base_id: Machine/base identifier
-        project_name: Optional project name
+        base_id: Machine/base identifier (may already include /project)
+        project_name: Optional project name to append
 
     Returns:
-        Full agent_id in format "machine/project" or just "machine"
+        Full agent_id in format "machine/project"
+
+    Raises:
+        ValueError: If result would be a bare machine name (no slash)
     """
     if project_name and project_name.strip():
         return f"{base_id}/{project_name.strip()}"
+    if "/" not in base_id:
+        raise ValueError(
+            f"Bare machine name '{base_id}' is not a valid agent ID. "
+            f"Provide X-Project-Name header or use a composite ID (machine/project)."
+        )
     return base_id
 
 
@@ -218,7 +237,10 @@ async def api_pending(request):
         )
 
     # Construct full agent_id from components
-    agent_id = _construct_agent_id(base_id, project_name)
+    try:
+        agent_id = _construct_agent_id(base_id, project_name)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
 
     # Validate agent_id format (same rules as MCP tools)
     if not AGENT_ID_PATTERN.match(agent_id):
@@ -258,7 +280,10 @@ async def api_unregister(request):
         )
 
     # Construct full agent_id from components
-    agent_id = _construct_agent_id(base_id, project_name)
+    try:
+        agent_id = _construct_agent_id(base_id, project_name)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
 
     # Validate agent_id format (same rules as MCP tools)
     if not AGENT_ID_PATTERN.match(agent_id):
