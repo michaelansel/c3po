@@ -16,11 +16,11 @@ error() { echo -e "${RED}[plugin-test]${NC} $1" >&2; }
 fail() { error "$1"; exit 1; }
 
 COORDINATOR_URL="${C3PO_COORDINATOR_URL:-http://c3po-coordinator:8420}"
-AGENT_ID="${C3PO_AGENT_ID:-plugin-test-agent}"
+MACHINE_ID="${C3PO_AGENT_ID:-plugin-test-machine}"
 
 log "=== C3PO Plugin Installation Test ==="
 log "Coordinator URL: $COORDINATOR_URL"
-log "Agent ID: $AGENT_ID"
+log "Machine ID: $MACHINE_ID"
 
 # Step 0: Verify we're in a clean state
 log "Step 0: Verifying clean state..."
@@ -112,7 +112,13 @@ log "setup.py runs without errors"
 
 # Step 6: Configure MCP server manually (simulating what setup.py would do)
 log "Step 6: Configuring MCP server..."
-claude mcp add c3po "$COORDINATOR_URL/mcp" -t http -s user -H "X-Agent-ID: $AGENT_ID" || fail "Failed to add MCP server"
+# Headers: X-Agent-ID (machine), X-Project-Name (project), X-Session-ID (session tracking)
+# Coordinator constructs full agent_id as: machine/project
+claude mcp add c3po "$COORDINATOR_URL/mcp" -t http -s user \
+    -H "X-Agent-ID: $MACHINE_ID" \
+    -H "X-Project-Name: test-project" \
+    -H "X-Session-ID: \${C3PO_SESSION_ID:-}" \
+    || fail "Failed to add MCP server"
 log "MCP server configured"
 
 # Step 7: Verify MCP server is configured

@@ -60,18 +60,34 @@ message_manager = MessageManager(redis_client)
 
 
 class AgentIdentityMiddleware(Middleware):
-    """Extract agent identity from X-Agent-ID header and auto-register."""
+    """Extract agent identity from headers and auto-register.
+
+    Constructs full agent_id from components:
+    - X-Agent-ID: Machine/base identifier (required)
+    - X-Project-Name: Project name (optional, appended to agent_id)
+    - X-Session-ID: Session identifier (for same-session detection)
+
+    Full agent_id format: "{machine}/{project}" or just "{machine}" if no project.
+    """
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         headers = get_http_headers()
-        agent_id = headers.get("x-agent-id")
+        base_id = headers.get("x-agent-id")
+        project_name = headers.get("x-project-name")
         session_id = headers.get("x-session-id")
 
-        if not agent_id:
+        if not base_id:
             raise ToolError(
                 "Missing X-Agent-ID header. "
                 "Set this header to identify your agent."
             )
+
+        # Construct full agent_id from components
+        # Format: machine/project (e.g., "macbook/myproject")
+        if project_name and project_name.strip():
+            agent_id = f"{base_id}/{project_name.strip()}"
+        else:
+            agent_id = base_id
 
         # Auto-register/update heartbeat on each tool call
         # This may return a different agent_id if collision was resolved
@@ -81,6 +97,8 @@ class AgentIdentityMiddleware(Middleware):
         # Store actual agent_id in context for tools to use
         context.fastmcp_context.set_state("agent_id", actual_agent_id)
         context.fastmcp_context.set_state("requested_agent_id", agent_id)
+        context.fastmcp_context.set_state("base_agent_id", base_id)
+        context.fastmcp_context.set_state("project_name", project_name)
         context.fastmcp_context.set_state("session_id", session_id)
 
         return await call_next(context)
@@ -118,24 +136,45 @@ async def api_health(request):
         )
 
 
+def _construct_agent_id(base_id: str, project_name: Optional[str]) -> str:
+    """Construct full agent_id from components.
+
+    Args:
+        base_id: Machine/base identifier
+        project_name: Optional project name
+
+    Returns:
+        Full agent_id in format "machine/project" or just "machine"
+    """
+    if project_name and project_name.strip():
+        return f"{base_id}/{project_name.strip()}"
+    return base_id
+
+
 @mcp.custom_route("/api/pending", methods=["GET"])
 async def api_pending(request):
     """Check pending requests for an agent without consuming them.
 
-    Requires X-Agent-ID header. Used by Stop hooks to check inbox.
+    Requires X-Agent-ID header, optionally X-Project-Name.
+    Used by Stop hooks to check inbox.
     Does NOT consume messages - just peeks at the inbox.
     """
-    agent_id = request.headers.get("x-agent-id")
-    if not agent_id:
+    base_id = request.headers.get("x-agent-id")
+    project_name = request.headers.get("x-project-name")
+
+    if not base_id:
         return JSONResponse(
             {"error": "Missing X-Agent-ID header"},
             status_code=400,
         )
 
+    # Construct full agent_id from components
+    agent_id = _construct_agent_id(base_id, project_name)
+
     # Validate agent_id format (same rules as MCP tools)
     if not AGENT_ID_PATTERN.match(agent_id):
         return JSONResponse(
-            {"error": "Invalid X-Agent-ID format"},
+            {"error": "Invalid agent ID format"},
             status_code=400,
         )
 
@@ -156,20 +195,26 @@ async def api_pending(request):
 async def api_unregister(request):
     """Unregister an agent when it disconnects gracefully.
 
-    Requires X-Agent-ID header. Called by SessionEnd hook.
+    Requires X-Agent-ID header, optionally X-Project-Name.
+    Called by SessionEnd hook.
     Removes the agent from the registry so list_agents doesn't show stale entries.
     """
-    agent_id = request.headers.get("x-agent-id")
-    if not agent_id:
+    base_id = request.headers.get("x-agent-id")
+    project_name = request.headers.get("x-project-name")
+
+    if not base_id:
         return JSONResponse(
             {"error": "Missing X-Agent-ID header"},
             status_code=400,
         )
 
+    # Construct full agent_id from components
+    agent_id = _construct_agent_id(base_id, project_name)
+
     # Validate agent_id format (same rules as MCP tools)
     if not AGENT_ID_PATTERN.match(agent_id):
         return JSONResponse(
-            {"error": "Invalid X-Agent-ID format"},
+            {"error": "Invalid agent ID format"},
             status_code=400,
         )
 

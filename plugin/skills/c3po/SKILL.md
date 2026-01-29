@@ -41,7 +41,7 @@ Output format on success:
 ```
 C3PO Setup Complete!
   Coordinator: http://nas.local:8420
-  Agent ID: my-project
+  Machine ID: macbook (project added automatically per-session)
 
 Next steps:
   1. Restart Claude Code to connect
@@ -61,10 +61,10 @@ Output format:
 ```
 C3PO Status:
   Coordinator: [URL] (connected/unavailable)
-  Agent ID: [your-agent-id]
+  Agent ID: [machine/project]
   Online agents: [count]
-    - agent-1 (online)
-    - agent-2 (offline)
+    - macbook/project-a (online)
+    - server/homeassistant (offline)
 ```
 
 ### `/c3po agents`
@@ -97,10 +97,14 @@ Response from meshtastic: "Nodes online: node-1234, node-5678"
 
 ## Environment Variables
 
-The coordinator URL and agent ID are configured via environment variables:
+The coordinator URL and agent ID components are configured via environment variables:
 
 - `C3PO_COORDINATOR_URL` - Coordinator URL (default: `http://localhost:8420`)
-- `C3PO_AGENT_ID` - Your agent identifier (default: current folder name)
+- `C3PO_AGENT_ID` - Machine identifier, base of agent ID (default: hostname)
+- `C3PO_PROJECT_NAME` - Project name override (default: current directory name)
+- `C3PO_SESSION_ID` - Session identifier for same-session detection
+
+The full agent ID is constructed as `{machine}/{project}` (e.g., `macbook/myproject`).
 
 ## Error Handling
 
@@ -116,11 +120,11 @@ User: /c3po status
 
 C3PO Status:
   Coordinator: http://localhost:8420 (connected)
-  Agent ID: homeassistant
+  Agent ID: raspi/homeassistant
   Online agents: 3
-    - homeassistant (online)
-    - meshtastic (online)
-    - mediaserver (offline)
+    - raspi/homeassistant (online)
+    - raspi/meshtastic (online)
+    - server/mediaserver (offline)
 ```
 
 Ask another agent for help:

@@ -11,8 +11,8 @@ Exit codes:
 
 Environment variables:
 - C3PO_COORDINATOR_URL: Coordinator URL (default: http://localhost:8420)
-- C3PO_AGENT_ID: Agent identifier (default: machine/project format)
-- C3PO_MACHINE_NAME: Machine name (default: hostname)
+- C3PO_AGENT_ID: Machine/agent identifier (default: hostname)
+- C3PO_MACHINE_NAME: Machine name override (default: hostname)
 """
 
 import json
@@ -25,10 +25,12 @@ import urllib.error
 # Configuration from environment
 COORDINATOR_URL = os.environ.get("C3PO_COORDINATOR_URL", "http://localhost:8420")
 
-# Build agent ID: machine/project format
+# Machine ID: defaults to hostname (matches user-scope MCP config)
 MACHINE_NAME = os.environ.get("C3PO_MACHINE_NAME", platform.node().split('.')[0])
+AGENT_ID = os.environ.get("C3PO_AGENT_ID", MACHINE_NAME)
+
+# Project context (for display, not part of agent ID)
 PROJECT_NAME = os.path.basename(os.getcwd())
-AGENT_ID = os.environ.get("C3PO_AGENT_ID", f"{MACHINE_NAME}/{PROJECT_NAME}")
 
 # Session ID: unique per Claude Code process (parent PID since hook is subprocess)
 SESSION_ID = str(os.getppid())
@@ -36,6 +38,11 @@ SESSION_ID = str(os.getppid())
 
 def register_with_coordinator() -> dict | None:
     """Register this session with the coordinator via MCP.
+
+    Sends headers that coordinator uses to construct full agent_id:
+    - X-Agent-ID: Machine identifier (base)
+    - X-Project-Name: Project name (appended to make full agent_id)
+    - X-Session-ID: Session identifier (for same-session detection)
 
     Returns:
         Registration result dict or None if failed
@@ -56,6 +63,7 @@ def register_with_coordinator() -> dict | None:
         headers={
             "Content-Type": "application/json",
             "X-Agent-ID": AGENT_ID,
+            "X-Project-Name": PROJECT_NAME,
             "X-Session-ID": SESSION_ID,
         },
     )
@@ -97,8 +105,10 @@ def main() -> None:
             agents_online = health.get("agents_online", 0)
 
             # Output context for Claude
+            # Full agent ID is machine/project (assembled by coordinator)
+            full_agent_id = f"{AGENT_ID}/{PROJECT_NAME}" if PROJECT_NAME else AGENT_ID
             print(f"[c3po] Connected to coordinator at {COORDINATOR_URL}")
-            print(f"[c3po] Agent: {AGENT_ID}")
+            print(f"[c3po] Agent: {full_agent_id}")
             print(f"[c3po] {agents_online} agent(s) currently online")
             print(
                 "[c3po] Use list_agents to see available agents, "

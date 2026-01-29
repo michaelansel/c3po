@@ -130,23 +130,24 @@ def check_coordinator(url: str) -> dict | None:
     return None
 
 
-def get_default_agent_id() -> str:
-    """Generate default agent ID in machine/project format."""
+def get_default_machine_id() -> str:
+    """Generate default machine ID from hostname."""
     import platform
-    machine = platform.node().split('.')[0]  # hostname without domain
-    project = os.path.basename(os.getcwd())
-    return f"{machine}/{project}"
+    return platform.node().split('.')[0]  # hostname without domain
 
 
-def add_mcp_server(url: str, agent_id: str) -> bool:
+def add_mcp_server(url: str, machine_id: str) -> bool:
     """Add c3po MCP server to Claude Code config.
 
-    Configures with:
-    - X-Agent-ID: Uses env var with fallback to provided agent_id
-    - X-Session-ID: Uses env var (for per-session tracking)
+    Configures headers that the coordinator uses to construct the full agent ID:
+    - X-Agent-ID: Machine identifier (base for agent ID)
+    - X-Project-Name: Project name from cwd (coordinator appends to agent ID)
+    - X-Session-ID: Session identifier (for same-session detection)
     """
-    # Use env var expansion so users can override, but default to the provided agent_id
-    agent_id_header = f"${{C3PO_AGENT_ID:-{agent_id}}}"
+    # Use env var expansion so users can override
+    agent_id_header = f"${{C3PO_AGENT_ID:-{machine_id}}}"
+    # Project name from PWD basename - coordinator will append to make full agent ID
+    project_header = "${C3PO_PROJECT_NAME:-${PWD##*/}}"
     session_id_header = "${C3PO_SESSION_ID:-}"
 
     try:
@@ -157,6 +158,7 @@ def add_mcp_server(url: str, agent_id: str) -> bool:
                 "-t", "http",
                 "-s", "user",
                 "-H", f"X-Agent-ID: {agent_id_header}",
+                "-H", f"X-Project-Name: {project_header}",
                 "-H", f"X-Session-ID: {session_id_header}"
             ],
             capture_output=True,
@@ -238,32 +240,33 @@ def run_setup() -> int:
             agents = health.get("agents_online", 0)
             log(f"Coordinator online! {agents} agent(s) currently connected.")
 
-    # Get agent ID (auto-generate a good default)
+    # Get machine ID (auto-generate from hostname)
     print()
-    default_agent_id = get_default_agent_id()
-    info(f"Agent ID will be: {default_agent_id}")
-    info("(Format: machine/project - override with C3PO_AGENT_ID env var)")
+    default_machine_id = get_default_machine_id()
+    info(f"Machine ID will be: {default_machine_id}")
+    info("(Based on hostname - override with C3PO_AGENT_ID env var)")
+    info("(Project context is added automatically per-session)")
     print()
 
-    response = prompt("Use a different agent ID? (y/N)", "n").lower()
+    response = prompt("Use a different machine ID? (y/N)", "n").lower()
     if response == "y":
-        agent_id = None
-        while not agent_id:
-            id_input = prompt("Agent ID", default_agent_id)
-            agent_id = validate_agent_id(id_input)
-            if not agent_id:
-                error("Invalid agent ID. Must be 1-64 chars, alphanumeric start, may contain ._-/")
+        machine_id = None
+        while not machine_id:
+            id_input = prompt("Machine ID", default_machine_id)
+            machine_id = validate_agent_id(id_input)
+            if not machine_id:
+                error("Invalid machine ID. Must be 1-64 chars, alphanumeric start, may contain ._-/")
     else:
-        agent_id = default_agent_id
+        machine_id = default_machine_id
 
     # Configure MCP server
     print()
     log("Configuring Claude Code...")
 
-    if not add_mcp_server(coordinator_url, agent_id):
+    if not add_mcp_server(coordinator_url, machine_id):
         error("Failed to configure MCP server.")
         error("You can try manual setup with:")
-        print(f"  claude mcp add c3po {coordinator_url}/mcp -t http -s user -H \"X-Agent-ID: {agent_id}\"")
+        print(f"  claude mcp add c3po {coordinator_url}/mcp -t http -s user -H \"X-Agent-ID: {machine_id}\"")
         return 1
 
     # Success!
@@ -273,12 +276,12 @@ def run_setup() -> int:
     print(f"{GREEN}{'═' * 60}{NC}")
     print()
     print(f"  Coordinator: {coordinator_url}")
-    print(f"  Agent ID:    {agent_id}")
+    print(f"  Machine ID:  {machine_id}")
     print()
     print("  Next steps:")
     print("    1. Restart Claude Code to connect")
     print("    2. Use 'list_agents' tool to see online agents")
-    print("    3. Use '/coordinate status' to check connection")
+    print("    3. Use '/c3po status' to check connection")
     print()
     print(f"{GREEN}{'═' * 60}{NC}")
 
