@@ -1,0 +1,46 @@
+services:
+  coordinator:
+    build:
+      context: ../../coordinator
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/api/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  host-a:
+    build:
+      context: ../..
+      dockerfile: tests/acceptance/Dockerfile.cc-agent
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - C3PO_COORDINATOR_URL=http://coordinator:8420
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+  host-b:
+    build:
+      context: ../..
+      dockerfile: tests/acceptance/Dockerfile.cc-agent
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - C3PO_COORDINATOR_URL=http://coordinator:8420
+    depends_on:
+      coordinator:
+        condition: service_healthy
