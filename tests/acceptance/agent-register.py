@@ -52,7 +52,7 @@ async def run_agent():
         return
 
     url = f"{COORDINATOR_URL}/mcp"
-    headers = {"X-Agent-ID": AGENT_ID}
+    headers = {"X-Agent-ID": AGENT_ID, "X-Project-Name": "acceptance-test"}
 
     try:
         async with streamablehttp_client(url, headers=headers) as (read_stream, write_stream, _):

@@ -34,16 +34,20 @@ async def run_test():
     url = f"{COORDINATOR_URL}/mcp"
 
     # Use unique agent IDs for this test to avoid collision with persistent agents
-    alice_id = "test-alice"
-    bob_id = "test-bob"
+    # Headers use base ID; middleware constructs full ID as base/project
+    alice_base = "test-alice"
+    bob_base = "test-bob"
+    project = "acceptance-test"
+    alice_id = f"{alice_base}/{project}"
+    bob_id = f"{bob_base}/{project}"
 
     # Generate unique session IDs to ensure consistent agent identity across tool calls
     import uuid
     alice_session = str(uuid.uuid4())
     bob_session = str(uuid.uuid4())
 
-    alice_headers = {"X-Agent-ID": alice_id, "X-Session-ID": alice_session}
-    bob_headers = {"X-Agent-ID": bob_id, "X-Session-ID": bob_session}
+    alice_headers = {"X-Agent-ID": alice_base, "X-Project-Name": project, "X-Session-ID": alice_session}
+    bob_headers = {"X-Agent-ID": bob_base, "X-Project-Name": project, "X-Session-ID": bob_session}
 
     # We need to keep sessions open for the full test, so we'll nest them
     log(f"Creating sessions for {alice_id} and {bob_id}...")

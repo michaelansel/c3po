@@ -138,6 +138,7 @@ if ! echo "$AGENTS" | grep -q '"agents_online":2'; then
         -H "Content-Type: application/json" \
         -H "Accept: application/json, text/event-stream" \
         -H "X-Agent-ID: test" \
+        -H "X-Project-Name: acceptance-test" \
         -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}'
     echo
     warn "Agent A logs:"
