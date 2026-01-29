@@ -65,8 +65,17 @@ def register_with_coordinator() -> dict | None:
             result = json.loads(resp.read())
             if "result" in result:
                 return result["result"]
-    except Exception:
-        pass
+            if os.environ.get("C3PO_DEBUG"):
+                print(f"[c3po:debug] Unexpected response: {result}", file=sys.stderr)
+    except urllib.error.URLError as e:
+        if os.environ.get("C3PO_DEBUG"):
+            print(f"[c3po:debug] URLError registering: {e.reason}", file=sys.stderr)
+    except urllib.error.HTTPError as e:
+        if os.environ.get("C3PO_DEBUG"):
+            print(f"[c3po:debug] HTTPError registering: {e.code} {e.read().decode()}", file=sys.stderr)
+    except Exception as e:
+        if os.environ.get("C3PO_DEBUG"):
+            print(f"[c3po:debug] Exception registering: {type(e).__name__}: {e}", file=sys.stderr)
     return None
 
 
@@ -96,16 +105,29 @@ def main() -> None:
                 "send_request to collaborate."
             )
         else:
-            print(f"[c3po] Could not register with coordinator. Running in local mode.")
+            print(f"[c3po] Could not register with coordinator at {COORDINATOR_URL}")
+            print(f"[c3po] Running in local mode. Set C3PO_DEBUG=1 for more details.")
 
     except urllib.error.URLError as e:
-        print(f"[c3po] Coordinator not available ({e.reason}). Running in local mode.")
+        print(f"[c3po] Coordinator not available at {COORDINATOR_URL}")
+        if os.environ.get("C3PO_DEBUG"):
+            print(f"[c3po:debug] URLError: {e.reason}", file=sys.stderr)
+        print(f"[c3po] Running in local mode.")
     except urllib.error.HTTPError as e:
-        print(f"[c3po] Coordinator error ({e.code}). Running in local mode.")
-    except json.JSONDecodeError:
-        print("[c3po] Invalid coordinator response. Running in local mode.")
+        print(f"[c3po] Coordinator error ({e.code}) at {COORDINATOR_URL}")
+        if os.environ.get("C3PO_DEBUG"):
+            print(f"[c3po:debug] HTTPError: {e.read().decode()}", file=sys.stderr)
+        print(f"[c3po] Running in local mode.")
+    except json.JSONDecodeError as e:
+        print(f"[c3po] Invalid coordinator response from {COORDINATOR_URL}")
+        if os.environ.get("C3PO_DEBUG"):
+            print(f"[c3po:debug] JSONDecodeError: {e}", file=sys.stderr)
+        print(f"[c3po] Running in local mode.")
     except Exception as e:
-        print(f"[c3po] Coordinator check failed ({e}). Running in local mode.")
+        print(f"[c3po] Coordinator check failed for {COORDINATOR_URL}")
+        if os.environ.get("C3PO_DEBUG"):
+            print(f"[c3po:debug] Exception: {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"[c3po] Running in local mode.")
 
     # Always exit successfully - don't block session start
     sys.exit(0)

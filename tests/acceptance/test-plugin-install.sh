@@ -95,11 +95,11 @@ if ! grep -q '"Setup"' "$PLUGIN_CACHE/hooks/hooks.json"; then
 fi
 log "Setup hook configured"
 
-# Check coordinate skill exists
-if [ ! -f "$PLUGIN_CACHE/skills/coordinate/SKILL.md" ]; then
-    fail "coordinate skill not found in plugin"
+# Check c3po skill exists
+if [ ! -f "$PLUGIN_CACHE/skills/c3po/SKILL.md" ]; then
+    fail "c3po skill not found in plugin"
 fi
-log "coordinate skill found"
+log "c3po skill found"
 
 # Step 5: Test setup.py directly (non-interactive mode should exit cleanly)
 log "Step 5: Testing setup.py (non-interactive mode)..."

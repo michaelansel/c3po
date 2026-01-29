@@ -1,24 +1,24 @@
 ---
-name: coordinate
-description: Multi-agent coordination - use /coordinate setup to configure, /coordinate status to check connection, /coordinate send to message other agents
+name: c3po
+description: Multi-agent coordination - use /c3po setup to configure, /c3po status to check connection, /c3po send to message other agents
 ---
 
-# /coordinate
+# /c3po
 
 Multi-agent coordination for Claude Code instances.
 
 ## Usage
 
-- `/coordinate setup` - Configure C3PO coordinator connection (interactive)
-- `/coordinate status` - Check connection and list online agents
-- `/coordinate agents` - List all agents with their status
-- `/coordinate send <agent> <message>` - Send a quick message to another agent
+- `/c3po setup` - Configure C3PO coordinator connection (interactive)
+- `/c3po status` - Check connection and list online agents
+- `/c3po agents` - List all agents with their status
+- `/c3po send <agent> <message>` - Send a quick message to another agent
 
 ## Implementation
 
 When the user runs this skill, parse the command and use the appropriate MCP tools from the c3po server:
 
-### `/coordinate setup`
+### `/c3po setup`
 
 Guide the user through configuring their C3PO coordinator connection. This is an interactive process.
 
@@ -40,12 +40,12 @@ C3PO Setup Complete!
 Next steps:
   1. Restart Claude Code to connect
   2. Use 'list_agents' to see online agents
-  3. Run '/coordinate status' to check connection
+  3. Run '/c3po status' to check connection
 ```
 
 Note: Users can also run `claude --init` to trigger the Setup hook which provides a similar interactive experience.
 
-### `/coordinate status`
+### `/c3po status`
 
 1. Call `ping` tool to verify coordinator connection
 2. Call `list_agents` tool to get online agents
@@ -61,7 +61,7 @@ C3PO Status:
     - agent-2 (offline)
 ```
 
-### `/coordinate agents`
+### `/c3po agents`
 
 1. Call `list_agents` tool
 2. Display all agents with their status and last seen time
@@ -74,7 +74,7 @@ Registered Agents:
   agent-3: online (last seen: just now)
 ```
 
-### `/coordinate send <agent> <message>`
+### `/c3po send <agent> <message>`
 
 1. Call `send_request` tool with target=agent and message=message
 2. Call `wait_for_response` with the returned request_id and a 60s timeout
@@ -82,7 +82,7 @@ Registered Agents:
 
 Example:
 ```
-User: /coordinate send meshtastic "What nodes are online?"
+User: /c3po send meshtastic "What nodes are online?"
 
 Response:
 Sent request to meshtastic. Waiting for response...
@@ -106,7 +106,7 @@ The coordinator URL and agent ID are configured via environment variables:
 
 Check who's online:
 ```
-User: /coordinate status
+User: /c3po status
 
 C3PO Status:
   Coordinator: http://localhost:8420 (connected)
@@ -119,7 +119,7 @@ C3PO Status:
 
 Ask another agent for help:
 ```
-User: /coordinate send meshtastic "What MQTT topics do you publish to?"
+User: /c3po send meshtastic "What MQTT topics do you publish to?"
 
 Sent request to meshtastic. Waiting for response...
 Response from meshtastic: "I publish to mesh/node/# for node status and mesh/msg/# for messages."
