@@ -336,8 +336,8 @@ class MessageManager:
                 return response
 
             # Not our response, put it back for another waiter
-            # (push to front since it was originally at front)
-            self.redis.lpush(response_key, json.dumps(response))
+            # Use rpush to maintain FIFO order (append to end of queue)
+            self.redis.rpush(response_key, json.dumps(response))
 
     def wait_for_request(
         self,
