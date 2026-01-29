@@ -18,6 +18,7 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
 
     # Class-level response configuration
     health_response = {"status": "ok", "agents_online": 0}
+    register_response = {"id": "test-agent", "status": "online", "capabilities": []}
     response_code = 200
     response_delay = 0
 
@@ -44,12 +45,34 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_POST(self):
+        """Handle POST requests (MCP calls)."""
+        import time
+
+        if self.response_delay:
+            time.sleep(self.response_delay)
+
+        if self.path == "/mcp":
+            self.send_response(self.response_code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            if self.response_code == 200:
+                # Return MCP-style response with result
+                response = {"result": self.register_response}
+                self.wfile.write(json.dumps(response).encode())
+            else:
+                self.wfile.write(b'{"error": "test error"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
 
 @pytest.fixture
 def mock_coordinator():
     """Start a mock coordinator server."""
     # Reset to defaults
     MockCoordinatorHandler.health_response = {"status": "ok", "agents_online": 0}
+    MockCoordinatorHandler.register_response = {"id": "test-agent", "status": "online", "capabilities": []}
     MockCoordinatorHandler.response_code = 200
     MockCoordinatorHandler.response_delay = 0
 

@@ -14,13 +14,45 @@ Environment variables:
 - C3PO_AGENT_ID: Agent identifier (default: current directory name)
 """
 
+import json
 import os
 import sys
 import urllib.request
 import urllib.error
 
-# Configuration from environment
-COORDINATOR_URL = os.environ.get("C3PO_COORDINATOR_URL", "http://localhost:8420")
+
+def get_coordinator_url() -> str:
+    """Get coordinator URL from environment or claude.json MCP config.
+
+    Priority:
+    1. C3PO_COORDINATOR_URL environment variable (allows override)
+    2. MCP server URL from ~/.claude.json
+    3. Fallback to localhost
+    """
+    # First check environment (allows override)
+    if url := os.environ.get("C3PO_COORDINATOR_URL"):
+        return url
+
+    # Try to read from ~/.claude.json MCP config
+    claude_json = os.path.expanduser("~/.claude.json")
+    try:
+        with open(claude_json) as f:
+            config = json.load(f)
+        mcp_servers = config.get("mcpServers", {})
+        c3po_config = mcp_servers.get("c3po", {})
+        url = c3po_config.get("url", "")
+        if url:
+            # URL is like "http://host:port/mcp", strip /mcp suffix
+            return url.rsplit("/mcp", 1)[0]
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+
+    # Fallback to localhost
+    return "http://localhost:8420"
+
+
+# Configuration
+COORDINATOR_URL = get_coordinator_url()
 AGENT_ID = os.environ.get("C3PO_AGENT_ID", os.path.basename(os.getcwd()))
 
 
