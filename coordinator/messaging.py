@@ -319,7 +319,7 @@ class MessageManager:
 
             # BLPOP returns (key, value) or None on timeout
             # Use at least 1 second timeout (0 means wait forever in Redis)
-            blpop_timeout = max(1, int(min(remaining, 1)))
+            blpop_timeout = max(1, int(min(remaining, 10)))
             result = self.redis.blpop(response_key, timeout=blpop_timeout)
 
             if result is None:
