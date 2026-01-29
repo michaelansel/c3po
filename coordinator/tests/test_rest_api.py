@@ -158,3 +158,91 @@ class TestPendingEndpoint:
         assert data["requests"][0]["message"] == "Message 1"
         assert data["requests"][1]["message"] == "Message 2"
         assert data["requests"][2]["message"] == "Message 3"
+
+
+class TestUnregisterEndpoint:
+    """Tests for /api/unregister endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_unregister_requires_agent_id_header(self, client):
+        """Unregister endpoint should require X-Agent-ID header."""
+        response = await client.post("/api/unregister")
+
+        assert response.status_code == 400
+        data = response.json()
+        assert "Missing X-Agent-ID header" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_unregister_removes_registered_agent(self, client, agent_manager):
+        """Unregister endpoint should remove a registered agent."""
+        # Register an agent first
+        agent_manager.register_agent("agent-to-remove")
+        assert agent_manager.get_agent("agent-to-remove") is not None
+
+        # Unregister the agent
+        response = await client.post(
+            "/api/unregister", headers={"X-Agent-ID": "agent-to-remove"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert "unregistered" in data["message"]
+        assert "agent-to-remove" in data["message"]
+
+        # Verify agent is no longer registered
+        assert agent_manager.get_agent("agent-to-remove") is None
+
+    @pytest.mark.asyncio
+    async def test_unregister_unknown_agent_returns_ok(self, client, agent_manager):
+        """Unregister endpoint should succeed for unknown agent (idempotent)."""
+        # Verify agent doesn't exist
+        assert agent_manager.get_agent("nonexistent-agent") is None
+
+        # Unregister should still succeed
+        response = await client.post(
+            "/api/unregister", headers={"X-Agent-ID": "nonexistent-agent"}
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert "not registered" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_unregister_does_not_affect_other_agents(self, client, agent_manager):
+        """Unregister should only remove the specified agent."""
+        # Register multiple agents
+        agent_manager.register_agent("agent-1")
+        agent_manager.register_agent("agent-2")
+        agent_manager.register_agent("agent-3")
+
+        # Unregister one
+        response = await client.post(
+            "/api/unregister", headers={"X-Agent-ID": "agent-2"}
+        )
+
+        assert response.status_code == 200
+
+        # Check only agent-2 was removed
+        assert agent_manager.get_agent("agent-1") is not None
+        assert agent_manager.get_agent("agent-2") is None
+        assert agent_manager.get_agent("agent-3") is not None
+
+    @pytest.mark.asyncio
+    async def test_unregister_reflects_in_agent_count(self, client, agent_manager):
+        """Unregistered agent should be reflected in health endpoint count."""
+        # Register agents
+        agent_manager.register_agent("agent-1")
+        agent_manager.register_agent("agent-2")
+
+        # Check initial count
+        response = await client.get("/api/health")
+        assert response.json()["agents_online"] == 2
+
+        # Unregister one
+        await client.post("/api/unregister", headers={"X-Agent-ID": "agent-1"})
+
+        # Check updated count
+        response = await client.get("/api/health")
+        assert response.json()["agents_online"] == 1

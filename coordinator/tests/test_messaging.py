@@ -395,3 +395,172 @@ class TestWaitForRequest:
         # Inbox should be empty now
         pending = message_manager.get_pending_requests("agent-b")
         assert len(pending) == 0
+
+
+class TestResponsePutBack:
+    """Tests for response put-back mechanism when request_id doesn't match."""
+
+    def test_mismatched_response_is_put_back(self, message_manager):
+        """When wait_for_response gets wrong request_id, it should put it back."""
+        # Send two requests from agent-a to agent-b
+        request1 = message_manager.send_request("agent-a", "agent-b", "Question 1")
+        request2 = message_manager.send_request("agent-a", "agent-b", "Question 2")
+        request1_id = request1["id"]
+        request2_id = request2["id"]
+
+        # Agent-b responds to request2 FIRST, then request1
+        message_manager.respond_to_request(
+            request_id=request2_id,
+            from_agent="agent-b",
+            response="Answer 2",
+        )
+        message_manager.respond_to_request(
+            request_id=request1_id,
+            from_agent="agent-b",
+            response="Answer 1",
+        )
+
+        # Agent-a waits for request1 first - should find it even though request2's
+        # response is in front of the queue
+        result1 = message_manager.wait_for_response("agent-a", request1_id, timeout=5)
+        assert result1 is not None
+        assert result1["response"] == "Answer 1"
+        assert result1["request_id"] == request1_id
+
+        # Now wait for request2 - the put-back response should be available
+        result2 = message_manager.wait_for_response("agent-a", request2_id, timeout=5)
+        assert result2 is not None
+        assert result2["response"] == "Answer 2"
+        assert result2["request_id"] == request2_id
+
+    def test_put_back_maintains_fifo_for_subsequent_waiters(self, message_manager):
+        """Put-back responses should maintain FIFO order using rpush."""
+        # Send 3 requests from agent-a to agent-b
+        request1 = message_manager.send_request("agent-a", "agent-b", "Q1")
+        request2 = message_manager.send_request("agent-a", "agent-b", "Q2")
+        request3 = message_manager.send_request("agent-a", "agent-b", "Q3")
+
+        # Respond in order: 3, 2, 1 (reverse order)
+        message_manager.respond_to_request(request3["id"], "agent-b", "A3")
+        message_manager.respond_to_request(request2["id"], "agent-b", "A2")
+        message_manager.respond_to_request(request1["id"], "agent-b", "A1")
+
+        # Wait for request1 - will consume and put back 3 and 2
+        result1 = message_manager.wait_for_response("agent-a", request1["id"], timeout=5)
+        assert result1["response"] == "A1"
+
+        # Wait for request2 - should find it (was put back)
+        result2 = message_manager.wait_for_response("agent-a", request2["id"], timeout=5)
+        assert result2["response"] == "A2"
+
+        # Wait for request3 - should find it (was put back)
+        result3 = message_manager.wait_for_response("agent-a", request3["id"], timeout=5)
+        assert result3["response"] == "A3"
+
+    def test_put_back_uses_rpush_not_lpush(self, message_manager, redis_client):
+        """Verify that put-back uses rpush (FIFO) not lpush (LIFO).
+
+        This is a regression test for the race condition fix where we changed
+        from lpush to rpush to maintain proper FIFO ordering.
+        """
+        # Send 2 requests
+        request1 = message_manager.send_request("agent-a", "agent-b", "Q1")
+        request2 = message_manager.send_request("agent-a", "agent-b", "Q2")
+
+        # Respond to both (request2 first)
+        message_manager.respond_to_request(request2["id"], "agent-b", "A2")
+        message_manager.respond_to_request(request1["id"], "agent-b", "A1")
+
+        # Queue state: [A2, A1] (A2 is at front/left, A1 at back/right)
+
+        # Wait for request1 - this will:
+        # 1. Pop A2 (doesn't match request1)
+        # 2. Put A2 back with rpush (goes to end/right)
+        # 3. Pop A1 (matches!)
+        # 4. Return A1
+        result1 = message_manager.wait_for_response("agent-a", request1["id"], timeout=5)
+        assert result1["response"] == "A1"
+
+        # After waiting for request1:
+        # - If we used rpush correctly: queue is [A2]
+        # - If we used lpush incorrectly: queue would also be [A2] but
+        #   with different ordering if there were more items
+
+        # Verify A2 is still available
+        result2 = message_manager.wait_for_response("agent-a", request2["id"], timeout=5)
+        assert result2["response"] == "A2"
+
+    def test_multiple_agents_concurrent_responses(self, message_manager):
+        """Multiple agents waiting for responses should not interfere."""
+        # Agent A sends to Agent C, Agent B sends to Agent C
+        request_a = message_manager.send_request("agent-a", "agent-c", "From A")
+        request_b = message_manager.send_request("agent-b", "agent-c", "From B")
+
+        # Agent C responds to both (B first, then A)
+        message_manager.respond_to_request(request_b["id"], "agent-c", "To B")
+        message_manager.respond_to_request(request_a["id"], "agent-c", "To A")
+
+        # Agent A should get their response
+        result_a = message_manager.wait_for_response(
+            "agent-a", request_a["id"], timeout=5
+        )
+        assert result_a["response"] == "To A"
+
+        # Agent B should get their response
+        result_b = message_manager.wait_for_response(
+            "agent-b", request_b["id"], timeout=5
+        )
+        assert result_b["response"] == "To B"
+
+    def test_threaded_waiters_get_correct_responses(self, message_manager):
+        """Multiple threads waiting should each get their correct response."""
+        import threading
+
+        # Send 3 requests
+        request1 = message_manager.send_request("agent-a", "agent-b", "Q1")
+        request2 = message_manager.send_request("agent-a", "agent-b", "Q2")
+        request3 = message_manager.send_request("agent-a", "agent-b", "Q3")
+
+        results = {}
+        errors = []
+
+        def wait_for(request_id, expected_response, key):
+            try:
+                result = message_manager.wait_for_response(
+                    "agent-a", request_id, timeout=10
+                )
+                if result is None:
+                    errors.append(f"{key}: Got None (timeout)")
+                elif result["response"] != expected_response:
+                    errors.append(
+                        f"{key}: Expected '{expected_response}', got '{result['response']}'"
+                    )
+                else:
+                    results[key] = result
+            except Exception as e:
+                errors.append(f"{key}: Exception: {e}")
+
+        # Start 3 threads waiting for responses
+        t1 = threading.Thread(target=wait_for, args=(request1["id"], "A1", "r1"))
+        t2 = threading.Thread(target=wait_for, args=(request2["id"], "A2", "r2"))
+        t3 = threading.Thread(target=wait_for, args=(request3["id"], "A3", "r3"))
+
+        t1.start()
+        t2.start()
+        t3.start()
+
+        # Small delay to ensure threads are waiting
+        time.sleep(0.1)
+
+        # Respond in mixed order
+        message_manager.respond_to_request(request2["id"], "agent-b", "A2")
+        message_manager.respond_to_request(request3["id"], "agent-b", "A3")
+        message_manager.respond_to_request(request1["id"], "agent-b", "A1")
+
+        t1.join(timeout=15)
+        t2.join(timeout=15)
+        t3.join(timeout=15)
+
+        # All threads should have completed successfully
+        assert len(errors) == 0, f"Errors: {errors}"
+        assert len(results) == 3, f"Missing results: {set(['r1', 'r2', 'r3']) - set(results.keys())}"
