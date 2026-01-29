@@ -67,6 +67,22 @@ PROJECT_NAME = os.path.basename(os.getcwd())
 SESSION_ID = str(os.getppid())
 
 
+def _get_agent_id_file() -> str:
+    """Get the path to the agent ID file for this session."""
+    ppid = os.getppid()
+    return os.path.join(os.environ.get("TMPDIR", "/tmp"), f"c3po-agent-id-{ppid}")
+
+
+def _save_agent_id(agent_id: str) -> None:
+    """Save the assigned agent_id for PreToolUse hook to read."""
+    try:
+        path = _get_agent_id_file()
+        with open(path, "w") as f:
+            f.write(agent_id)
+    except OSError:
+        pass  # Best effort
+
+
 def register_with_coordinator() -> dict | None:
     """Register this session with the coordinator via REST API.
 
@@ -114,6 +130,9 @@ def main() -> None:
             # The coordinator returns the assigned agent_id (may have collision suffix)
             assigned_id = registration.get("id", f"{AGENT_ID}/{PROJECT_NAME}")
 
+            # Save assigned agent_id for PreToolUse hook to inject
+            _save_agent_id(assigned_id)
+
             # Get agent count from health endpoint
             req = urllib.request.Request(
                 f"{COORDINATOR_URL}/api/health",
@@ -124,12 +143,9 @@ def main() -> None:
 
             agents_online = health.get("agents_online", 0)
 
-            # Output context for Claude - the assigned_id is critical
-            # Claude must use this as agent_id parameter in MCP tool calls
+            # Output context for Claude
             print(f"[c3po] Connected to coordinator at {COORDINATOR_URL}")
             print(f"[c3po] Your agent ID: {assigned_id}")
-            print(f"[c3po] IMPORTANT: Pass agent_id=\"{assigned_id}\" "
-                  f"to all c3po MCP tool calls (send_request, get_pending_requests, etc.)")
             print(f"[c3po] {agents_online} agent(s) currently online")
         else:
             print(f"[c3po] Could not register with coordinator at {COORDINATOR_URL}")

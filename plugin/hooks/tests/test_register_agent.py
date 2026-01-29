@@ -120,7 +120,6 @@ class TestRegisterAgentHook:
         assert exit_code == 0
         assert "[c3po] Connected to coordinator" in stdout
         assert "Your agent ID: test-agent" in stdout
-        assert "agent_id=" in stdout  # Instruction to pass agent_id
         assert "3 agent(s) currently online" in stdout
 
     def test_outputs_local_mode_when_coordinator_unavailable(self):
