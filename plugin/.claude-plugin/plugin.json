@@ -2,6 +2,9 @@
   "name": "c3po",
   "description": "Multi-agent coordination for Claude Code",
   "version": "0.1.0",
+  "author": {
+    "name": "Michael Ansel"
+  },
   "hooks": "./hooks/hooks.json",
   "skills": "./skills"
 }

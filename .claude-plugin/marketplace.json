@@ -1,0 +1,14 @@
+{
+  "name": "c3po",
+  "owner": {
+    "name": "Michael Ansel"
+  },
+  "plugins": [
+    {
+      "name": "c3po",
+      "source": "./plugin",
+      "description": "Multi-agent coordination for Claude Code",
+      "version": "0.1.0"
+    }
+  ]
+}
