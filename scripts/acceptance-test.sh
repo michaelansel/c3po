@@ -23,7 +23,7 @@ error() { echo -e "${RED}[test]${NC} $1" >&2; }
 # Cleanup function
 cleanup() {
     log "Cleaning up containers..."
-    finch rm -f c3po-coordinator c3po-agent-a c3po-agent-b 2>/dev/null || true
+    finch rm -f c3po-coordinator c3po-agent-a c3po-agent-b c3po-plugin-test 2>/dev/null || true
     finch rm -f c3po-redis 2>/dev/null || true
     finch network rm c3po-test-net 2>/dev/null || true
 }
@@ -154,5 +154,21 @@ finch run --rm \
     -v "$REPO_ROOT/tests/acceptance:/tests:ro" \
     c3po-agent-test \
     python /tests/test-communication.py
+
+log "=== Coordinator tests passed! ==="
+
+# Step 10: Run plugin installation test
+log "Building plugin test image..."
+finch build -t c3po-plugin-test -f "$REPO_ROOT/tests/acceptance/Dockerfile.plugin-test" "$REPO_ROOT"
+
+log "Running plugin installation test..."
+# Note: ANTHROPIC_API_KEY is optional - if not set, the MCP connection test is skipped
+finch run --rm \
+    --name c3po-plugin-test \
+    --network c3po-test-net \
+    -e C3PO_COORDINATOR_URL=http://c3po-coordinator:8420 \
+    -e C3PO_AGENT_ID=plugin-test-agent \
+    ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"} \
+    c3po-plugin-test
 
 log "=== All tests passed! ==="
