@@ -12,6 +12,7 @@ class MessageManager:
     """Manages message queues using Redis."""
 
     INBOX_PREFIX = "c3po:inbox:"
+    NOTIFY_PREFIX = "c3po:notify:"
     RATE_LIMIT_PREFIX = "c3po:rate:"
 
     # Configuration
@@ -124,6 +125,11 @@ class MessageManager:
 
         # Set TTL on inbox key (24h default) - prevents stale messages accumulating
         self.redis.expire(inbox_key, self.MESSAGE_TTL_SECONDS)
+
+        # Push a lightweight notification signal so wait_for_request wakes up
+        notify_key = f"{self.NOTIFY_PREFIX}{to_agent}"
+        self.redis.rpush(notify_key, "1")
+        self.redis.expire(notify_key, self.MESSAGE_TTL_SECONDS)
 
         return request_data
 
@@ -332,30 +338,32 @@ class MessageManager:
         agent_id: str,
         timeout: int = 60,
     ) -> Optional[dict]:
-        """Wait for an incoming request using blocking Redis BLPOP.
+        """Wait for notification that a request is available, without consuming it.
 
-        This is an alternative to polling get_pending_requests.
-        Blocks until a request arrives or timeout.
+        Blocks on a notification channel until a signal arrives or timeout.
+        The actual message remains in the inbox for get_pending_requests to consume.
+        Uses a polling loop with max 10-second BLPOP intervals for HTTP health.
 
         Args:
             agent_id: The agent waiting for requests
             timeout: Timeout in seconds (default 60)
 
         Returns:
-            Request dict if received, or None if timeout
+            Dict with status="ready" and pending count if notified, or None if timeout
         """
-        inbox_key = f"{self.INBOX_PREFIX}{agent_id}"
+        notify_key = f"{self.NOTIFY_PREFIX}{agent_id}"
+        deadline = datetime.now(timezone.utc).timestamp() + timeout
 
-        # BLPOP returns (key, value) or None on timeout
-        # timeout=0 means block forever, so ensure at least 1 second
-        blpop_timeout = max(1, timeout)
-        result = self.redis.blpop(inbox_key, timeout=blpop_timeout)
+        while True:
+            remaining = deadline - datetime.now(timezone.utc).timestamp()
+            if remaining <= 0:
+                return None
 
-        if result is None:
-            return None
+            # Use at least 1 second timeout (0 means wait forever in Redis)
+            blpop_timeout = max(1, int(min(remaining, 10)))
+            result = self.redis.blpop(notify_key, timeout=blpop_timeout)
 
-        _, data = result
-        if isinstance(data, bytes):
-            data = data.decode()
-
-        return json.loads(data)
+            if result is not None:
+                # Got a notification — peek at inbox for count
+                pending = self.peek_pending_requests(agent_id)
+                return {"status": "ready", "pending": len(pending)}

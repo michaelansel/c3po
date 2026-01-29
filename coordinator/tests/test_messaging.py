@@ -327,20 +327,19 @@ class TestResponseHandling:
 
 
 class TestWaitForRequest:
-    """Tests for wait_for_request blocking behavior."""
+    """Tests for wait_for_request notification behavior."""
 
     def test_wait_for_request_returns_when_request_arrives(self, message_manager):
-        """wait_for_request should return when a request arrives."""
+        """wait_for_request should return ready notification when a request arrives."""
         # Send a request first
         message_manager.send_request("agent-a", "agent-b", "Hello!")
 
-        # Now wait should return immediately
+        # Now wait should return immediately with a notification
         result = message_manager.wait_for_request("agent-b", timeout=5)
 
         assert result is not None
-        assert result["from_agent"] == "agent-a"
-        assert result["to_agent"] == "agent-b"
-        assert result["message"] == "Hello!"
+        assert result["status"] == "ready"
+        assert result["pending"] >= 1
 
     def test_wait_for_request_times_out_correctly(self, message_manager):
         """wait_for_request should return None on timeout."""
@@ -353,24 +352,24 @@ class TestWaitForRequest:
         assert elapsed >= 1  # Should have waited at least 1 second
 
     def test_wait_for_request_multiple_queued_return_in_order(self, message_manager):
-        """Multiple queued requests should return in FIFO order."""
+        """Multiple queued requests: wait_for_request notifies, get_pending_requests consumes in FIFO."""
         # Queue multiple requests
         message_manager.send_request("agent-a", "agent-b", "first")
         message_manager.send_request("agent-c", "agent-b", "second")
         message_manager.send_request("agent-d", "agent-b", "third")
 
-        # Wait should return them in order
-        result1 = message_manager.wait_for_request("agent-b", timeout=1)
-        result2 = message_manager.wait_for_request("agent-b", timeout=1)
-        result3 = message_manager.wait_for_request("agent-b", timeout=1)
+        # Wait should return a notification with pending >= 1
+        result = message_manager.wait_for_request("agent-b", timeout=1)
+        assert result is not None
+        assert result["status"] == "ready"
+        assert result["pending"] >= 1
 
-        assert result1["message"] == "first"
-        assert result2["message"] == "second"
-        assert result3["message"] == "third"
-
-        # Fourth wait should timeout
-        result4 = message_manager.wait_for_request("agent-b", timeout=1)
-        assert result4 is None
+        # Now consume them via get_pending_requests and verify FIFO order
+        pending = message_manager.get_pending_requests("agent-b")
+        assert len(pending) == 3
+        assert pending[0]["message"] == "first"
+        assert pending[1]["message"] == "second"
+        assert pending[2]["message"] == "third"
 
     def test_wait_for_request_tool_returns_timeout_dict(self, message_manager):
         """_wait_for_request_impl should return timeout dict on timeout."""
@@ -383,18 +382,42 @@ class TestWaitForRequest:
         assert result["status"] == "timeout"
         assert "No request received" in result["message"]
 
-    def test_wait_for_request_consumes_request(self, message_manager):
-        """wait_for_request should consume the request (not leave it in inbox)."""
-        message_manager.send_request("agent-a", "agent-b", "consume me")
+    def test_wait_for_request_does_not_consume_request(self, message_manager):
+        """wait_for_request should NOT consume the request (it stays in inbox)."""
+        message_manager.send_request("agent-a", "agent-b", "still here")
 
-        # Wait gets the request
+        # Wait gets the notification
         result = message_manager.wait_for_request("agent-b", timeout=1)
         assert result is not None
-        assert result["message"] == "consume me"
+        assert result["status"] == "ready"
 
-        # Inbox should be empty now
+        # Inbox should still have the message
         pending = message_manager.get_pending_requests("agent-b")
-        assert len(pending) == 0
+        assert len(pending) == 1
+        assert pending[0]["message"] == "still here"
+
+    def test_send_request_pushes_notification(self, message_manager, redis_client):
+        """send_request should push a notification signal to the notify key."""
+        message_manager.send_request("agent-a", "agent-b", "hello")
+
+        notify_key = f"{message_manager.NOTIFY_PREFIX}agent-b"
+        length = redis_client.llen(notify_key)
+        assert length == 1
+
+    def test_wait_for_request_notification_loss_does_not_lose_message(
+        self, message_manager, redis_client
+    ):
+        """If the notification signal is lost, the message should still be in the inbox."""
+        message_manager.send_request("agent-a", "agent-b", "important")
+
+        # Manually consume the notification signal (simulating connection drop)
+        notify_key = f"{message_manager.NOTIFY_PREFIX}agent-b"
+        redis_client.lpop(notify_key)
+
+        # Notification is gone, but message should still be in inbox
+        pending = message_manager.get_pending_requests("agent-b")
+        assert len(pending) == 1
+        assert pending[0]["message"] == "important"
 
 
 class TestResponsePutBack:

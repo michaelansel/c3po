@@ -376,6 +376,60 @@ async def phase_6():
                     f"wait_for_request crashed immediately: {e}",
                 ) and passed
 
+    # Step 3: wait_for_request notification then consume via get_pending_requests
+    log("Step 3: wait_for_request returns ready, then get_pending_requests consumes")
+
+    agent_waiter_base = f"blocking-waiter-{uuid.uuid4().hex[:8]}"
+    agent_sender_base = f"blocking-sender-{uuid.uuid4().hex[:8]}"
+    waiter_full = f"{agent_waiter_base}/acceptance-test"
+
+    headers_waiter = {
+        "X-Agent-ID": agent_waiter_base,
+        "X-Project-Name": "acceptance-test",
+        "X-Session-ID": str(uuid.uuid4()),
+    }
+    headers_sender = {
+        "X-Agent-ID": agent_sender_base,
+        "X-Project-Name": "acceptance-test",
+        "X-Session-ID": str(uuid.uuid4()),
+    }
+
+    async with streamablehttp_client(url, headers=headers_waiter) as (rw, ww, _):
+        async with ClientSession(rw, ww) as sess_waiter:
+            await sess_waiter.initialize()
+            await sess_waiter.call_tool("ping", {})
+
+            async with streamablehttp_client(url, headers=headers_sender) as (rs, ws, _):
+                async with ClientSession(rs, ws) as sess_sender:
+                    await sess_sender.initialize()
+                    await sess_sender.call_tool("ping", {})
+
+                    # Sender sends a request to waiter
+                    send_result = await sess_sender.call_tool("send_request", {
+                        "target": waiter_full,
+                        "message": "notification test",
+                    })
+
+                    # Waiter calls wait_for_request — should return ready
+                    result = await sess_waiter.call_tool("wait_for_request", {
+                        "timeout": 10,
+                    })
+                    result_text = str(result)
+                    passed = assert_true(
+                        "ready" in result_text.lower(),
+                        "wait_for_request returns ready status when message available",
+                        f"Expected ready status, got: {result_text}",
+                    ) and passed
+
+                    # Now consume via get_pending_requests
+                    result = await sess_waiter.call_tool("get_pending_requests", {})
+                    result_text = str(result)
+                    passed = assert_true(
+                        "notification test" in result_text,
+                        "get_pending_requests returns the message after wait_for_request",
+                        f"Message not found in pending: {result_text}",
+                    ) and passed
+
     return passed
 
 

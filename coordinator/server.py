@@ -492,7 +492,11 @@ def _wait_for_request_impl(
     agent_id: str,
     timeout: int = 60,
 ) -> dict:
-    """Wait for an incoming request (blocking)."""
+    """Wait for an incoming request notification (blocking).
+
+    Returns a notification dict with status="ready" and pending count,
+    NOT the message itself. Use get_pending_requests to consume messages.
+    """
     result = msg_manager.wait_for_request(agent_id, timeout)
     if result is None:
         return {
