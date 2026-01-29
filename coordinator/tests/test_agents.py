@@ -150,14 +150,20 @@ class TestRemoveAgent:
 class TestCollisionHandling:
     """Tests for agent ID collision handling."""
 
-    def test_collision_without_session_id(self, agent_manager):
-        """Without session_id, re-registration is treated as collision if online."""
-        first = agent_manager.register_agent("agent-a")
-        second = agent_manager.register_agent("agent-a")
+    def test_no_session_id_updates_existing_online_agent(self, agent_manager):
+        """Without session_id, re-registration to online agent updates heartbeat.
 
-        # Without session_id, we can't tell if it's the same session,
-        # so treat as collision if agent is online
-        assert second["id"] == "agent-a-2"
+        This handles MCP calls that can't include dynamic session IDs.
+        The assumption is that if an agent is online and a call comes in
+        with no session_id, it's from the same Claude Code instance.
+        """
+        first = agent_manager.register_agent("agent-a", session_id="session-123")
+        second = agent_manager.register_agent("agent-a")  # No session_id (MCP call)
+
+        # Should keep the same ID (assumed to be same session)
+        assert second["id"] == "agent-a"
+        # Original session_id preserved
+        assert second["session_id"] == "session-123"
 
     def test_same_session_reconnect_keeps_id(self, agent_manager):
         """Same session reconnecting should keep the same agent ID."""

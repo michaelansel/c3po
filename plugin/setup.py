@@ -148,7 +148,9 @@ def add_mcp_server(url: str, machine_id: str) -> bool:
     agent_id_header = f"${{C3PO_AGENT_ID:-{machine_id}}}"
     # Project name from PWD basename - coordinator will append to make full agent ID
     project_header = "${C3PO_PROJECT_NAME:-${PWD##*/}}"
-    session_id_header = "${C3PO_SESSION_ID:-}"
+    # Session ID: use env var if set, otherwise use $$ (current process PID)
+    # This provides per-instance uniqueness for collision detection
+    session_id_header = "${C3PO_SESSION_ID:-$$}"
 
     try:
         result = subprocess.run(

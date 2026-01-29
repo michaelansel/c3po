@@ -68,6 +68,9 @@ class AgentIdentityMiddleware(Middleware):
     - X-Session-ID: Session identifier (for same-session detection)
 
     Full agent_id format: "{machine}/{project}" or just "{machine}" if no project.
+
+    When project_name is missing (MCP calls from static config), we look for
+    an existing online agent with the same base_id and use that.
     """
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
@@ -87,7 +90,13 @@ class AgentIdentityMiddleware(Middleware):
         if project_name and project_name.strip():
             agent_id = f"{base_id}/{project_name.strip()}"
         else:
-            agent_id = base_id
+            # No project name - likely an MCP call from static config
+            # Try to find an existing online agent with this base_id
+            existing = agent_manager.find_agent_by_base_id(base_id)
+            if existing:
+                agent_id = existing["id"]
+            else:
+                agent_id = base_id
 
         # Auto-register/update heartbeat on each tool call
         # This may return a different agent_id if collision was resolved

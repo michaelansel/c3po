@@ -48,20 +48,30 @@ class AgentManager:
         existing = self._get_agent_raw(agent_id)
 
         if existing:
-            # Same session reconnecting - update heartbeat, keep same ID
-            if session_id and existing.get("session_id") == session_id:
+            existing_session = existing.get("session_id")
+            last_seen = datetime.fromisoformat(existing["last_seen"])
+            seconds_since = (datetime.now(timezone.utc) - last_seen).total_seconds()
+            is_online = seconds_since < self.AGENT_TIMEOUT_SECONDS
+
+            # Case 1: Same session reconnecting - update heartbeat
+            if session_id and existing_session == session_id:
                 existing["last_seen"] = now
                 if capabilities is not None:
                     existing["capabilities"] = capabilities
                 self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(existing))
                 return self._add_status(existing)
 
-            # Check if existing agent is online (collision!)
-            last_seen = datetime.fromisoformat(existing["last_seen"])
-            seconds_since = (datetime.now(timezone.utc) - last_seen).total_seconds()
+            # Case 2: No session_id provided, agent is online - assume MCP call
+            # from the existing session (MCP config can't include dynamic session ID)
+            if not session_id and is_online:
+                existing["last_seen"] = now
+                if capabilities is not None:
+                    existing["capabilities"] = capabilities
+                self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(existing))
+                return self._add_status(existing)
 
-            if seconds_since < self.AGENT_TIMEOUT_SECONDS:
-                # Collision: different session, agent still online
+            # Case 3: Different session_id AND agent is online - collision!
+            if is_online:
                 agent_id = self._resolve_collision(agent_id)
 
         # Create new or update offline agent
@@ -211,3 +221,32 @@ class AgentManager:
         """
         agents = self.list_agents()
         return sum(1 for a in agents if a.get("status") == "online")
+
+    def find_agent_by_base_id(self, base_id: str) -> Optional[dict]:
+        """Find an online agent whose ID starts with the given base_id.
+
+        Used to match MCP calls (which only have machine name) to their
+        registered agents (which have machine/project format).
+
+        Args:
+            base_id: The base/machine identifier to search for
+
+        Returns:
+            Agent data dict if found, None otherwise.
+            Prefers exact match, then prefix match (base_id/).
+        """
+        agents = self.list_agents()
+        online_agents = [a for a in agents if a.get("status") == "online"]
+
+        # First, try exact match
+        for agent in online_agents:
+            if agent["id"] == base_id:
+                return agent
+
+        # Then, try prefix match (base_id/*)
+        prefix = f"{base_id}/"
+        for agent in online_agents:
+            if agent["id"].startswith(prefix):
+                return agent
+
+        return None
