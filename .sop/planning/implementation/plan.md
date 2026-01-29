@@ -3,11 +3,11 @@
 ## Progress Checklist
 
 ### Group 1: Code Fixes
-- [ ] Step 1: Fix response queue race condition (lpush → rpush)
-- [ ] Step 2: Increase BLPOP timeout (1s → 10s)
-- [ ] Step 3: Remove dead code (pending_count, unused error codes, update_heartbeat)
-- [ ] Step 4: Improve Redis error messages
-- [ ] Step 5: Run tests and commit Group 1
+- [x] Step 1: Fix response queue race condition (lpush → rpush)
+- [x] Step 2: Increase BLPOP timeout (1s → 10s)
+- [x] Step 3: Remove dead code (pending_count, unused error codes, update_heartbeat)
+- [x] Step 4: Improve Redis error messages
+- [x] Step 5: Run tests and commit Group 1
 
 ### Group 2: Test Additions
 - [ ] Step 6: Create middleware test file with header extraction tests
