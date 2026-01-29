@@ -10,26 +10,32 @@
 - [x] Step 5: Run tests and commit Group 1
 
 ### Group 2: Test Additions
-- [ ] Step 6: Create middleware test file with header extraction tests
-- [ ] Step 7: Add middleware collision resolution tests
-- [ ] Step 8: Add /api/unregister endpoint tests
-- [ ] Step 9: Add response put-back mechanism tests
-- [ ] Step 10: Run tests and commit Group 2
+- [x] Step 6: Create middleware test file with header extraction tests
+- [x] Step 7: Add middleware collision resolution tests
+- [x] Step 8: Add /api/unregister endpoint tests
+- [x] Step 9: Add response put-back mechanism tests
+- [x] Step 10: Run tests and commit Group 2
 
 ### Group 3: Documentation Updates
-- [ ] Step 11: Fix agent timeout documentation (5min → 90s)
-- [ ] Step 12: Document SessionEnd hook and /api/unregister
-- [ ] Step 13: Create API Reference - MCP tools section
-- [ ] Step 14: Create API Reference - REST endpoints section
-- [ ] Step 15: Document collision detection behavior
-- [ ] Step 16: Fix TROUBLESHOOTING.md and add ping tool docs
-- [ ] Step 17: Fix terminology inconsistencies
-- [ ] Step 18: Commit Group 3
+- [x] Step 11: Fix agent timeout documentation (5min → 90s)
+- [x] Step 12: Document SessionEnd hook and /api/unregister
+- [x] Step 13: Create API Reference - MCP tools section
+- [x] Step 14: Create API Reference - REST endpoints section
+- [x] Step 15: Document collision detection behavior
+- [x] Step 16: Fix TROUBLESHOOTING.md and add ping tool docs
+- [x] Step 17: Fix terminology inconsistencies
+- [x] Step 18: Commit Group 3
 
 ### Group 4: Design Document Reconciliation
-- [ ] Step 19: Update detailed-design.md (mark unimplemented as Future)
-- [ ] Step 20: Update PROMPT.md task statuses
-- [ ] Step 21: Commit Group 4
+- [x] Step 19: Update detailed-design.md (mark unimplemented as Future)
+- [x] Step 20: Update PROMPT.md task statuses
+- [x] Step 21: Commit Group 4
+
+Note: Group 4 was completed differently than originally planned. The original design
+documents (detailed-design.md and PROMPT.md with TASK 4/5) were superseded by the
+improvement plan artifacts rather than being updated in-place. The unimplemented
+features (set_status, escalate_to_human, get_agent_status, /api/agents) are documented
+in the "Out of Scope" section of summary.md.
 
 ### Group 5: Low Priority Improvements
 - [ ] Step 22: Add input validation to REST endpoints
