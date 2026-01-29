@@ -109,19 +109,6 @@ class TestMessageManager:
         requests = message_manager.peek_pending_requests("b")
         assert len(requests) == 0
 
-    def test_pending_count(self, message_manager):
-        """pending_count should return correct count."""
-        assert message_manager.pending_count("b") == 0
-
-        message_manager.send_request("a", "b", "one")
-        assert message_manager.pending_count("b") == 1
-
-        message_manager.send_request("c", "b", "two")
-        assert message_manager.pending_count("b") == 2
-
-        message_manager.get_pending_requests("b")
-        assert message_manager.pending_count("b") == 0
-
 
 class TestSendRequestTool:
     """Tests for the send_request tool implementation."""

@@ -130,27 +130,6 @@ class TestGetAgent:
         assert result is None
 
 
-class TestUpdateHeartbeat:
-    """Tests for heartbeat updates."""
-
-    def test_update_heartbeat_success(self, agent_manager):
-        """Should update last_seen timestamp."""
-        agent_manager.register_agent("agent-a")
-        original = agent_manager.get_agent("agent-a")["last_seen"]
-
-        time.sleep(0.01)
-        result = agent_manager.update_heartbeat("agent-a")
-
-        assert result is True
-        updated = agent_manager.get_agent("agent-a")["last_seen"]
-        assert updated >= original
-
-    def test_update_heartbeat_unknown_agent(self, agent_manager):
-        """Should return False for unknown agent."""
-        result = agent_manager.update_heartbeat("unknown")
-        assert result is False
-
-
 class TestRemoveAgent:
     """Tests for agent removal."""
 

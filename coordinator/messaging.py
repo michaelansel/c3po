@@ -218,18 +218,6 @@ class MessageManager:
 
         return requests
 
-    def pending_count(self, agent_id: str) -> int:
-        """Get the count of pending requests for an agent.
-
-        Args:
-            agent_id: The agent whose inbox to check
-
-        Returns:
-            Number of pending requests
-        """
-        inbox_key = f"{self.INBOX_PREFIX}{agent_id}"
-        return self.redis.llen(inbox_key)
-
     RESPONSES_PREFIX = "c3po:responses:"
 
     def _parse_request_id(self, request_id: str) -> tuple[str, str]:

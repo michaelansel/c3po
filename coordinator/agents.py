@@ -191,28 +191,6 @@ class AgentManager:
 
         return self._add_status(agent_data)
 
-    def update_heartbeat(self, agent_id: str) -> bool:
-        """Update the last_seen timestamp for an agent.
-
-        Args:
-            agent_id: The agent ID to update
-
-        Returns:
-            True if agent exists and was updated, False otherwise
-        """
-        data = self.redis.hget(self.AGENTS_KEY, agent_id)
-        if data is None:
-            return False
-
-        if isinstance(data, bytes):
-            data = data.decode()
-
-        agent_data = json.loads(data)
-        agent_data["last_seen"] = datetime.now(timezone.utc).isoformat()
-
-        self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(agent_data))
-        return True
-
     def remove_agent(self, agent_id: str) -> bool:
         """Remove an agent from the registry.
 

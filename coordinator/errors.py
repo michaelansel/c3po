@@ -25,13 +25,10 @@ class C3POError:
 # Error codes
 class ErrorCodes:
     """C3PO error codes."""
-    COORD_UNAVAILABLE = "COORD_UNAVAILABLE"
     AGENT_NOT_FOUND = "AGENT_NOT_FOUND"
-    AGENT_BUSY = "AGENT_BUSY"
     TIMEOUT = "TIMEOUT"
     INVALID_REQUEST = "INVALID_REQUEST"
     RATE_LIMITED = "RATE_LIMITED"
-    MESSAGE_EXPIRED = "MESSAGE_EXPIRED"
 
 
 def agent_not_found(target: str, available: list[str]) -> C3POError:
@@ -66,22 +63,4 @@ def rate_limited(agent_id: str, limit: int, window_seconds: int) -> C3POError:
         code=ErrorCodes.RATE_LIMITED,
         message=f"Rate limit exceeded for agent '{agent_id}'.",
         suggestion=f"Maximum {limit} requests per {window_seconds} seconds. Wait before sending more requests.",
-    )
-
-
-def timeout_error(operation: str, timeout_seconds: int) -> C3POError:
-    """Create error for timeout."""
-    return C3POError(
-        code=ErrorCodes.TIMEOUT,
-        message=f"Operation '{operation}' timed out after {timeout_seconds} seconds.",
-        suggestion="The target agent may be offline or busy. Try again later or check agent status with list_agents.",
-    )
-
-
-def coordinator_unavailable(reason: str = "Connection failed") -> C3POError:
-    """Create error for coordinator unavailable."""
-    return C3POError(
-        code=ErrorCodes.COORD_UNAVAILABLE,
-        message=f"Coordinator unavailable: {reason}",
-        suggestion="Check that the coordinator is running and C3PO_COORDINATOR_URL is correct.",
     )
