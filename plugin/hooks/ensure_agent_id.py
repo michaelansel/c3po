@@ -35,6 +35,11 @@ def _debug(msg: str) -> None:
         print(f"[c3po:ensure_agent_id] {msg}", file=sys.stderr)
 
 
+def _warn(msg: str) -> None:
+    """Write warning to stderr (always visible in hook logs)."""
+    print(f"[c3po:ensure_agent_id] {msg}", file=sys.stderr)
+
+
 def main() -> None:
     try:
         stdin_data = json.load(sys.stdin)
@@ -58,13 +63,10 @@ def main() -> None:
     try:
         session_id = get_session_id(stdin_data)
     except ValueError:
-        # No session_id — can't look up agent ID, log and allow without injection
-        _debug("no session_id in stdin, cannot inject agent_id")
-        print(
-            "[c3po] ERROR: PreToolUse hook has no session_id. "
-            "Agent identity injection will fail. "
-            "The coordinator will reject calls without a valid agent ID.",
-            file=sys.stderr,
+        _warn(
+            f"INJECTION FAILED: no session_id in hook stdin. "
+            f"Keys present: {sorted(stdin_data.keys())}. "
+            f"Claude Code should provide session_id automatically."
         )
         sys.exit(0)
 
@@ -73,12 +75,10 @@ def main() -> None:
     _debug(f"session_id={session_id} file={path} exists={os.path.exists(path)}")
     agent_id = read_agent_id(session_id)
     if not agent_id:
-        _debug(f"no agent_id found at {path}, cannot inject")
-        print(
-            f"[c3po] ERROR: No agent ID file found for session {session_id}. "
-            f"Expected at: {path}. "
-            f"The SessionStart hook may not have run or failed to register.",
-            file=sys.stderr,
+        _warn(
+            f"INJECTION FAILED: no agent ID file for session {session_id}. "
+            f"Expected at: {path}. exists={os.path.exists(path)}. "
+            f"SessionStart hook may not have run or failed to register."
         )
         sys.exit(0)
 
