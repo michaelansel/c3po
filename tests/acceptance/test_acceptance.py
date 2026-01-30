@@ -434,6 +434,125 @@ async def phase_6():
 
 
 # ---------------------------------------------------------------------------
+# Phase 6b: Concurrent Access During Blocking Wait
+# ---------------------------------------------------------------------------
+async def phase_6b():
+    """Verify that a blocking wait on one agent does not block other agents.
+
+    This catches the event-loop-blocking bug where sync redis.blpop() in
+    wait_for_response/wait_for_request freezes the entire coordinator.
+    """
+    global _current_phase
+    _current_phase = 7
+    log("Concurrent Access During Blocking Wait")
+
+    from mcp.client.streamable_http import streamablehttp_client
+    from mcp import ClientSession
+
+    url = f"{_config['coordinator_url']}/mcp"
+
+    agent_blocker_base = f"conc-blocker-{uuid.uuid4().hex[:8]}"
+    agent_other_base = f"conc-other-{uuid.uuid4().hex[:8]}"
+
+    headers_blocker = {
+        "X-Agent-ID": agent_blocker_base,
+        "X-Project-Name": "acceptance-test",
+        "X-Session-ID": str(uuid.uuid4()),
+    }
+    headers_other = {
+        "X-Agent-ID": agent_other_base,
+        "X-Project-Name": "acceptance-test",
+        "X-Session-ID": str(uuid.uuid4()),
+    }
+
+    passed = True
+
+    async with streamablehttp_client(url, headers=headers_blocker) as (rb, wb, _):
+        async with ClientSession(rb, wb) as sess_blocker:
+            await sess_blocker.initialize()
+            await sess_blocker.call_tool("ping", {})
+
+            async with streamablehttp_client(url, headers=headers_other) as (ro, wo, _):
+                async with ClientSession(ro, wo) as sess_other:
+                    await sess_other.initialize()
+                    await sess_other.call_tool("ping", {})
+
+                    # Step 1: Start a blocking wait_for_request on blocker (15s timeout)
+                    # Concurrently, have the other agent call list_agents.
+                    # If the coordinator is blocked, list_agents will hang.
+                    log("Step 1: blocker starts wait_for_request(timeout=15), other calls list_agents concurrently")
+
+                    async def blocker_wait():
+                        return await sess_blocker.call_tool("wait_for_request", {
+                            "timeout": 15,
+                        })
+
+                    async def other_list():
+                        start = time.time()
+                        result = await sess_other.call_tool("list_agents", {})
+                        elapsed = time.time() - start
+                        return result, elapsed
+
+                    # Run both concurrently — other_list should complete quickly
+                    blocker_task = asyncio.create_task(blocker_wait())
+                    await asyncio.sleep(1)  # Let the blocker start blocking
+
+                    other_result, other_elapsed = await asyncio.wait_for(
+                        other_list(), timeout=10
+                    )
+
+                    passed = assert_true(
+                        other_elapsed < 5,
+                        f"list_agents completed in {other_elapsed:.1f}s while blocker was waiting (not blocked)",
+                        f"list_agents took {other_elapsed:.1f}s — coordinator was blocked by wait_for_request",
+                    ) and passed
+
+                    # Step 2: Same test with wait_for_response
+                    log("Step 2: blocker starts wait_for_response(timeout=15), other calls ping concurrently")
+
+                    async def blocker_wait_response():
+                        return await sess_blocker.call_tool("wait_for_response", {
+                            "request_id": "nonexistent::fake::00000000",
+                            "timeout": 15,
+                        })
+
+                    async def other_ping():
+                        start = time.time()
+                        result = await sess_other.call_tool("ping", {})
+                        elapsed = time.time() - start
+                        return result, elapsed
+
+                    # Cancel the previous blocker task first
+                    blocker_task.cancel()
+                    try:
+                        await blocker_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+                    blocker_task2 = asyncio.create_task(blocker_wait_response())
+                    await asyncio.sleep(1)
+
+                    ping_result, ping_elapsed = await asyncio.wait_for(
+                        other_ping(), timeout=10
+                    )
+
+                    passed = assert_true(
+                        ping_elapsed < 5,
+                        f"ping completed in {ping_elapsed:.1f}s while blocker was waiting (not blocked)",
+                        f"ping took {ping_elapsed:.1f}s — coordinator was blocked by wait_for_response",
+                    ) and passed
+
+                    # Clean up
+                    blocker_task2.cancel()
+                    try:
+                        await blocker_task2
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+    return passed
+
+
+# ---------------------------------------------------------------------------
 # Phase 9: Error Cases
 # ---------------------------------------------------------------------------
 async def phase_9():
@@ -627,6 +746,7 @@ async def run_all(phases=None):
         4: ("Two-Agent Registration", phase_4),
         5: ("Request/Response Roundtrip", phase_5),
         6: ("Blocking Wait Behavior", phase_6),
+        7: ("Concurrent Access During Blocking Wait", phase_6b),
         9: ("Error Cases", phase_9),
         10: ("Teardown", phase_10),
     }
