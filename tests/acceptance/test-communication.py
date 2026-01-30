@@ -78,7 +78,7 @@ async def run_test():
                     # Test 2: Alice sends request to Bob
                     log(f"Test 2: {alice_id} sending request to {bob_id}...")
                     result = await session_alice.call_tool("send_request", {
-                        "target": bob_id,
+                        "target_agent": bob_id,
                         "message": "What is 2+2?"
                     })
                     result_text = str(result)

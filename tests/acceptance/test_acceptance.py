@@ -247,7 +247,7 @@ async def phase_5():
                     # Step 1: Agent A sends request to Agent B
                     log("Step 1: Agent A sends request to Agent B")
                     result = await sess_a.call_tool("send_request", {
-                        "target": agent_b_full,
+                        "target_agent": agent_b_full,
                         "message": "What is 2+2?",
                     })
                     result_text = str(result)
@@ -408,7 +408,7 @@ async def phase_6():
 
                     # Sender sends a request to waiter
                     send_result = await sess_sender.call_tool("send_request", {
-                        "target": waiter_full,
+                        "target_agent": waiter_full,
                         "message": "notification test",
                     })
 
@@ -576,7 +576,7 @@ async def phase_9():
             log("Step 1: send_request to nonexistent agent")
             try:
                 result = await session.call_tool("send_request", {
-                    "target": "nonexistent-agent",
+                    "target_agent": "nonexistent-agent",
                     "message": "hello",
                 })
                 result_text = str(result)

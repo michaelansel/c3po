@@ -121,7 +121,7 @@ class TestSendRequestTool:
             message_manager,
             agent_manager,
             from_agent="agent-a",
-            target="agent-b",
+            target_agent="agent-b",
             message="Help me please",
         )
 
@@ -141,7 +141,7 @@ class TestSendRequestTool:
                 message_manager,
                 agent_manager,
                 from_agent="agent-a",
-                target="agent-b",
+                target_agent="agent-b",
                 message="Hello?",
             )
 
@@ -250,7 +250,7 @@ class TestResponseHandling:
             message_manager,
             agent_manager,
             from_agent="agent-a",
-            target="agent-b",
+            target_agent="agent-b",
             message="What is 2+2?",
         )
         request_id = request["id"]

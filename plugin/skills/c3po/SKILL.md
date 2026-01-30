@@ -83,7 +83,7 @@ Registered Agents:
 
 ### `/c3po send <agent> <message>`
 
-1. Call `send_request` tool with target=agent and message=message
+1. Call `send_request` tool with target_agent=agent and message=message
 2. Call `wait_for_message` with type="response" and `timeout=3600` (user will Ctrl+C if needed)
 3. Display the response or timeout message
 

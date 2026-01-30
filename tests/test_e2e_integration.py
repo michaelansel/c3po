@@ -81,7 +81,7 @@ class TestE2EIntegration:
         # Send request from agent-a
         async with mcp_client_session("e2e-agent-a") as session_a:
             send_result = await session_a.call_tool("send_request", {
-                "target": "e2e-agent-b",
+                "target_agent": "e2e-agent-b",
                 "message": "Hello from E2E test!",
                 "context": "Integration test"
             })
@@ -105,7 +105,7 @@ class TestE2EIntegration:
         # Step 2: Sender sends request
         async with mcp_client_session("e2e-sender") as sender:
             send_result = await sender.call_tool("send_request", {
-                "target": "e2e-receiver",
+                "target_agent": "e2e-receiver",
                 "message": "E2E test message"
             })
             # Parse request_id from result

@@ -408,13 +408,13 @@ def _send_request_impl(
     msg_manager: MessageManager,
     agent_manager: AgentManager,
     from_agent: str,
-    target: str,
+    target_agent: str,
     message: str,
     context: Optional[str] = None,
 ) -> dict:
     """Send a request to another agent."""
     # Validate inputs
-    _validate_agent_id(target, "target")
+    _validate_agent_id(target_agent, "target_agent")
     _validate_message(message)
     if context and len(context) > MAX_MESSAGE_LENGTH:
         err = invalid_request(
@@ -431,23 +431,23 @@ def _send_request_impl(
             msg_manager.RATE_LIMIT_REQUESTS,
             msg_manager.RATE_LIMIT_WINDOW_SECONDS
         )
-        logger.warning("send_rejected from=%s to=%s reason=rate_limited", from_agent, target)
+        logger.warning("send_rejected from=%s to=%s reason=rate_limited", from_agent, target_agent)
         raise ToolError(f"{err.message} {err.suggestion}")
 
     # Check if target agent exists
-    target_agent = agent_manager.get_agent(target)
-    if target_agent is None:
+    resolved_target = agent_manager.get_agent(target_agent)
+    if resolved_target is None:
         # Get list of available agents for helpful error
         available = agent_manager.list_agents()
         agent_ids = [a["id"] for a in available]
-        err = agent_not_found(target, agent_ids)
-        logger.warning("send_rejected from=%s to=%s reason=agent_not_found", from_agent, target)
+        err = agent_not_found(target_agent, agent_ids)
+        logger.warning("send_rejected from=%s to=%s reason=agent_not_found", from_agent, target_agent)
         raise ToolError(f"{err.message} {err.suggestion}")
 
     # Record request for rate limiting
     msg_manager.record_request(from_agent)
 
-    return msg_manager.send_request(from_agent, target, message, context)
+    return msg_manager.send_request(from_agent, target_agent, message, context)
 
 
 def _get_messages_impl(
@@ -608,7 +608,7 @@ def register_agent(
 @mcp.tool()
 def send_request(
     ctx: Context,
-    target: str,
+    target_agent: str,
     message: str,
     context: Optional[str] = None,
     agent_id: Optional[str] = None,
@@ -617,7 +617,7 @@ def send_request(
 
     Args:
         ctx: MCP context (injected automatically)
-        target: The ID of the agent to send the request to
+        target_agent: The ID of the agent to send the request to
         message: The request message
         context: Optional context or background for the request
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
@@ -627,7 +627,7 @@ def send_request(
     """
     from_agent = _resolve_agent_id(ctx, agent_id)
     return _send_request_impl(
-        message_manager, agent_manager, from_agent, target, message, context
+        message_manager, agent_manager, from_agent, target_agent=target_agent, message=message, context=context
     )
 
 
