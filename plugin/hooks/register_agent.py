@@ -11,26 +11,22 @@ Exit codes:
 
 Environment variables:
 - C3PO_COORDINATOR_URL: Coordinator URL (default: http://localhost:8420)
-- C3PO_AGENT_ID: Machine/agent identifier (default: hostname)
-- C3PO_MACHINE_NAME: Machine name override (default: hostname)
+- C3PO_AGENT_ID: Machine/agent identifier (default: from MCP config or hostname)
+- C3PO_MACHINE_NAME: Machine name override
 """
 
 import json
 import os
-import platform
 import sys
 import urllib.request
 import urllib.error
 
-from c3po_common import get_coordinator_url, parse_hook_input, save_agent_id
+from c3po_common import get_coordinator_url, get_configured_machine_name, get_session_id, parse_hook_input, save_agent_id
 
 
 # Configuration
 COORDINATOR_URL = get_coordinator_url()
-
-# Machine ID: defaults to hostname (matches user-scope MCP config)
-MACHINE_NAME = os.environ.get("C3PO_MACHINE_NAME", platform.node().split('.')[0])
-AGENT_ID = os.environ.get("C3PO_AGENT_ID", MACHINE_NAME)
+AGENT_ID = get_configured_machine_name()
 
 # Project context (for display, not part of agent ID)
 PROJECT_NAME = os.path.basename(os.getcwd())
@@ -77,7 +73,7 @@ def main() -> None:
     """Register with coordinator and output session context."""
     # Parse stdin to get session_id from Claude Code
     stdin_data = parse_hook_input()
-    session_id = stdin_data.get("session_id", str(os.getppid()))
+    session_id = get_session_id(stdin_data)
 
     try:
         # Register this session with the coordinator

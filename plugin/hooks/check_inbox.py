@@ -20,7 +20,7 @@ import sys
 import urllib.request
 import urllib.error
 
-from c3po_common import get_coordinator_url, read_agent_id
+from c3po_common import get_coordinator_url, get_session_id, read_agent_id
 
 
 # Configuration
@@ -55,7 +55,7 @@ def main() -> None:
         sys.exit(0)
 
     # Get session_id from stdin, fall back to ppid
-    session_id = stdin_data.get("session_id", str(os.getppid()))
+    session_id = get_session_id(stdin_data)
 
     # Read agent ID using session_id
     assigned_id = read_agent_id(session_id)

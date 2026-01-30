@@ -19,7 +19,7 @@ import sys
 import urllib.request
 import urllib.error
 
-from c3po_common import get_coordinator_url, parse_hook_input, read_agent_id, delete_agent_id_file
+from c3po_common import get_coordinator_url, get_session_id, parse_hook_input, read_agent_id, delete_agent_id_file
 
 
 # Configuration
@@ -30,7 +30,7 @@ def main() -> None:
     """Unregister agent from coordinator and clean up session file."""
     # Parse stdin to get session_id from Claude Code
     stdin_data = parse_hook_input()
-    session_id = stdin_data.get("session_id", str(os.getppid()))
+    session_id = get_session_id(stdin_data)
 
     # Read the assigned agent_id (written by SessionStart hook)
     assigned_id = read_agent_id(session_id)

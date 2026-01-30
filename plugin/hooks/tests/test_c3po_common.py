@@ -2,6 +2,7 @@
 
 import json
 import os
+import platform
 import sys
 
 import pytest
@@ -11,10 +12,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from c3po_common import (
     get_agent_id_file,
+    get_configured_machine_name,
+    get_coordinator_url,
+    get_session_id,
     read_agent_id,
     save_agent_id,
     delete_agent_id_file,
-    get_coordinator_url,
 )
 
 
@@ -83,11 +86,94 @@ class TestGetCoordinatorUrl:
             }
         }))
         monkeypatch.setenv("HOME", str(tmp_path))
-        # get_coordinator_url uses expanduser("~/.claude.json")
-        # We need to mock expanduser or set HOME
         assert get_coordinator_url() == "http://myhost:8420"
 
     def test_fallback_to_localhost(self, tmp_path, monkeypatch):
         monkeypatch.delenv("C3PO_COORDINATOR_URL", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))  # No .claude.json
         assert get_coordinator_url() == "http://localhost:8420"
+
+
+class TestGetConfiguredMachineName:
+    def test_env_c3po_agent_id_takes_priority(self, monkeypatch):
+        monkeypatch.setenv("C3PO_AGENT_ID", "my-custom-id")
+        assert get_configured_machine_name() == "my-custom-id"
+
+    def test_env_c3po_machine_name_second_priority(self, monkeypatch):
+        monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
+        monkeypatch.setenv("C3PO_MACHINE_NAME", "my-machine")
+        assert get_configured_machine_name() == "my-machine"
+
+    def test_reads_from_claude_json_mcp_header(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
+        monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps({
+            "mcpServers": {
+                "c3po": {
+                    "url": "http://myhost:8420/mcp",
+                    "headers": {
+                        "X-Agent-ID": "${C3PO_AGENT_ID:-haos}"
+                    }
+                }
+            }
+        }))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert get_configured_machine_name() == "haos"
+
+    def test_reads_plain_header_value(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
+        monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps({
+            "mcpServers": {
+                "c3po": {
+                    "url": "http://myhost:8420/mcp",
+                    "headers": {
+                        "X-Agent-ID": "plain-name"
+                    }
+                }
+            }
+        }))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert get_configured_machine_name() == "plain-name"
+
+    def test_fallback_to_hostname(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
+        monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))  # No .claude.json
+        expected = platform.node().split('.')[0]
+        assert get_configured_machine_name() == expected
+
+    def test_ignores_unresolvable_shell_var(self, tmp_path, monkeypatch):
+        """If header is just a shell variable with no default, fall back to hostname."""
+        monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
+        monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps({
+            "mcpServers": {
+                "c3po": {
+                    "url": "http://myhost:8420/mcp",
+                    "headers": {
+                        "X-Agent-ID": "$C3PO_AGENT_ID"
+                    }
+                }
+            }
+        }))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        expected = platform.node().split('.')[0]
+        assert get_configured_machine_name() == expected
+
+
+class TestGetSessionId:
+    def test_returns_session_id_from_stdin(self):
+        assert get_session_id({"session_id": "abc-123"}) == "abc-123"
+
+    def test_falls_back_to_ppid(self):
+        result = get_session_id({})
+        assert result == str(os.getppid())
+
+    def test_falls_back_to_ppid_on_empty_dict(self):
+        result = get_session_id({})
+        # Should be a numeric string (PID)
+        assert result.isdigit()

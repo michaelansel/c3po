@@ -17,7 +17,7 @@ import json
 import os
 import sys
 
-from c3po_common import read_agent_id, get_agent_id_file
+from c3po_common import get_agent_id_file, get_session_id, read_agent_id
 
 # Tools that need agent_id injection
 TOOLS_NEEDING_AGENT_ID = {
@@ -55,7 +55,7 @@ def main() -> None:
         sys.exit(0)
 
     # Get session_id from stdin data, fall back to ppid
-    session_id = stdin_data.get("session_id", str(os.getppid()))
+    session_id = get_session_id(stdin_data)
 
     # Read the assigned agent_id from the session file
     path = get_agent_id_file(session_id)
