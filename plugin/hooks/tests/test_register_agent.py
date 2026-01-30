@@ -12,6 +12,8 @@ import pytest
 
 HOOK_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "register_agent.py")
 
+TEST_SESSION_ID = "test-session-uuid-1234"
+
 
 class MockCoordinatorHandler(BaseHTTPRequestHandler):
     """Mock HTTP handler for testing coordinator responses."""
@@ -85,14 +87,17 @@ def mock_coordinator():
     server.shutdown()
 
 
-def run_hook(env: dict = None) -> tuple[int, str, str]:
+def run_hook(env: dict = None, stdin_data: dict = None) -> tuple[int, str, str]:
     """Run the hook script and return (exit_code, stdout, stderr)."""
     full_env = os.environ.copy()
     if env:
         full_env.update(env)
 
+    stdin_input = json.dumps(stdin_data) if stdin_data else json.dumps({"session_id": TEST_SESSION_ID})
+
     result = subprocess.run(
         [sys.executable, HOOK_SCRIPT],
+        input=stdin_input,
         capture_output=True,
         text=True,
         env=full_env,
@@ -175,6 +180,7 @@ class TestRegisterAgentHook:
         # Just verify the script doesn't crash with defaults
         result = subprocess.run(
             [sys.executable, HOOK_SCRIPT],
+            input=json.dumps({"session_id": TEST_SESSION_ID}),
             capture_output=True,
             text=True,
             timeout=10,
@@ -239,3 +245,50 @@ class TestRegisterAgentHook:
         assert exit_code == 0
         # Should default to 0
         assert "0 agent(s) currently online" in stdout
+
+    def test_saves_agent_id_file_with_session_id(self, mock_coordinator, tmp_path):
+        """Hook should save agent ID file keyed by session_id."""
+        session_id = "unique-session-abc"
+        MockCoordinatorHandler.register_response = {
+            "id": "machine/project", "status": "online", "capabilities": []
+        }
+
+        run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                "C3PO_AGENT_ID": "test-agent",
+                "TMPDIR": str(tmp_path),
+            },
+            stdin_data={"session_id": session_id},
+        )
+
+        # Verify file was created with session_id in name
+        expected_file = tmp_path / f"c3po-agent-id-{session_id}"
+        assert expected_file.exists()
+        assert expected_file.read_text() == "machine/project"
+
+    def test_sends_session_id_to_coordinator(self, mock_coordinator):
+        """Hook should send the session_id from stdin as X-Session-ID header."""
+        session_id = "header-test-session"
+        received_headers = {}
+
+        # Capture headers from the mock
+        original_do_post = MockCoordinatorHandler.do_POST
+
+        def capturing_do_post(self):
+            received_headers["X-Session-ID"] = self.headers.get("X-Session-ID")
+            original_do_post(self)
+
+        MockCoordinatorHandler.do_POST = capturing_do_post
+        try:
+            run_hook(
+                env={
+                    "C3PO_COORDINATOR_URL": mock_coordinator,
+                    "C3PO_AGENT_ID": "test-agent",
+                },
+                stdin_data={"session_id": session_id},
+            )
+
+            assert received_headers.get("X-Session-ID") == session_id
+        finally:
+            MockCoordinatorHandler.do_POST = original_do_post

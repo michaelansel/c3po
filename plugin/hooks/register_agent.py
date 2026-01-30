@@ -3,7 +3,7 @@
 C3PO SessionStart Hook - Register agent and show coordination context.
 
 This hook runs when a Claude Code session starts. It registers the agent
-with a unique session ID, displays connection status, and provides context
+with the coordinator, displays connection status, and provides context
 about available coordination features.
 
 Exit codes:
@@ -22,35 +22,7 @@ import sys
 import urllib.request
 import urllib.error
 
-
-def get_coordinator_url() -> str:
-    """Get coordinator URL from environment or claude.json MCP config.
-
-    Priority:
-    1. C3PO_COORDINATOR_URL environment variable (allows override)
-    2. MCP server URL from ~/.claude.json
-    3. Fallback to localhost
-    """
-    # First check environment (allows override)
-    if url := os.environ.get("C3PO_COORDINATOR_URL"):
-        return url
-
-    # Try to read from ~/.claude.json MCP config
-    claude_json = os.path.expanduser("~/.claude.json")
-    try:
-        with open(claude_json) as f:
-            config = json.load(f)
-        mcp_servers = config.get("mcpServers", {})
-        c3po_config = mcp_servers.get("c3po", {})
-        url = c3po_config.get("url", "")
-        if url:
-            # URL is like "http://host:port/mcp", strip /mcp suffix
-            return url.rsplit("/mcp", 1)[0]
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass
-
-    # Fallback to localhost
-    return "http://localhost:8420"
+from c3po_common import get_coordinator_url, parse_hook_input, save_agent_id
 
 
 # Configuration
@@ -63,27 +35,8 @@ AGENT_ID = os.environ.get("C3PO_AGENT_ID", MACHINE_NAME)
 # Project context (for display, not part of agent ID)
 PROJECT_NAME = os.path.basename(os.getcwd())
 
-# Session ID: unique per Claude Code process (parent PID since hook is subprocess)
-SESSION_ID = str(os.getppid())
 
-
-def _get_agent_id_file() -> str:
-    """Get the path to the agent ID file for this session."""
-    ppid = os.getppid()
-    return os.path.join(os.environ.get("TMPDIR", "/tmp"), f"c3po-agent-id-{ppid}")
-
-
-def _save_agent_id(agent_id: str) -> None:
-    """Save the assigned agent_id for PreToolUse hook to read."""
-    try:
-        path = _get_agent_id_file()
-        with open(path, "w") as f:
-            f.write(agent_id)
-    except OSError:
-        pass  # Best effort
-
-
-def register_with_coordinator() -> dict | None:
+def register_with_coordinator(session_id: str) -> dict | None:
     """Register this session with the coordinator via REST API.
 
     Sends headers that coordinator uses to construct full agent_id:
@@ -100,7 +53,7 @@ def register_with_coordinator() -> dict | None:
         headers={
             "X-Agent-ID": AGENT_ID,
             "X-Project-Name": PROJECT_NAME,
-            "X-Session-ID": SESSION_ID,
+            "X-Session-ID": session_id,
         },
         method="POST",
     )
@@ -122,16 +75,20 @@ def register_with_coordinator() -> dict | None:
 
 def main() -> None:
     """Register with coordinator and output session context."""
+    # Parse stdin to get session_id from Claude Code
+    stdin_data = parse_hook_input()
+    session_id = stdin_data.get("session_id", str(os.getppid()))
+
     try:
         # Register this session with the coordinator
-        registration = register_with_coordinator()
+        registration = register_with_coordinator(session_id)
 
         if registration:
             # The coordinator returns the assigned agent_id (may have collision suffix)
             assigned_id = registration.get("id", f"{AGENT_ID}/{PROJECT_NAME}")
 
-            # Save assigned agent_id for PreToolUse hook to inject
-            _save_agent_id(assigned_id)
+            # Save assigned agent_id keyed by session_id for other hooks to read
+            save_agent_id(session_id, assigned_id)
 
             # Get agent count from health endpoint
             req = urllib.request.Request(

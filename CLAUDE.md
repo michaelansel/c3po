@@ -96,7 +96,31 @@ bash tests/acceptance/run-acceptance.sh
 
 ## Testing
 
-Tests use `pytest` with `fakeredis` for in-memory Redis. Async tests use `pytest-asyncio`. The coordinator tests are self-contained and don't require a running Redis instance. E2E and acceptance tests require a live coordinator.
+### Philosophy
+
+Tests are organized in layers from fast/isolated to slow/integrated. Each layer builds confidence that the layer below didn't miss something:
+
+1. **Unit tests** (`coordinator/tests/`, `plugin/hooks/tests/`) — Fast, no network. Use `fakeredis` for in-memory Redis and mock HTTP servers for hook tests. Every module has its own test file. These run in seconds and should always pass before committing.
+
+2. **E2E integration tests** (`tests/test_e2e_integration.py`) — Real MCP client sessions against a live coordinator. Gated behind `C3PO_TEST_LIVE=1`. Validates that MCP transport, headers, and tool dispatch work end-to-end.
+
+3. **Acceptance tests** (`tests/acceptance/`) — Fully containerized: builds the coordinator image, starts Redis, coordinator, and agent containers, then runs multi-phase scenarios. This is the closest thing to production. Run with `bash tests/acceptance/run-acceptance.sh`.
+
+4. **Manual scenarios** (`tests/TESTING.md`) — Human-executed tests for behaviors that require real Claude Code sessions (stop hooks, human interrupt, task delegation).
+
+### Guidelines
+
+- Unit tests use `fakeredis` — no running Redis needed. Each test gets a fresh instance via fixtures.
+- Async tests use `pytest-asyncio`. REST endpoint tests use `httpx` `AsyncClient` with ASGI transport.
+- Plugin hook tests run the hook scripts as subprocesses against a mock HTTP server, matching how Claude Code invokes them.
+- Acceptance tests support both `docker` and `finch` runtimes.
+- Test documentation lives in `tests/`: `TEST_PLAN.md` (test matrix and IDs), `TESTING.md` (manual scenarios), `acceptance/ACCEPTANCE_SPEC.md` (acceptance phases).
+
+### What to run when
+
+- **Before committing**: Unit tests (`coordinator/tests/` and `plugin/hooks/tests/`)
+- **Before deploying**: Acceptance tests (`tests/acceptance/run-acceptance.sh`)
+- **After deploying**: Smoke-check with `scripts/test_e2e.sh` or E2E integration tests
 
 ## Container Runtime
 

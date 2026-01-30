@@ -13,6 +13,8 @@ import pytest
 
 HOOK_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "check_inbox.py")
 
+TEST_SESSION_ID = "test-session-uuid-5678"
+
 
 class MockCoordinatorHandler(BaseHTTPRequestHandler):
     """Mock HTTP handler for testing coordinator responses."""
@@ -47,10 +49,24 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_POST(self):
+        """Handle POST requests (heartbeat registration)."""
+        if self.path == "/api/register":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"id": "test-machine/test-project", "status": "online"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
 
 @pytest.fixture
 def mock_coordinator():
     """Start a mock coordinator server."""
+    MockCoordinatorHandler.pending_response = {"count": 0, "requests": []}
+    MockCoordinatorHandler.response_delay = 0
+
     server = HTTPServer(("127.0.0.1", 0), MockCoordinatorHandler)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever)
@@ -64,15 +80,9 @@ def mock_coordinator():
 
 @pytest.fixture
 def agent_id_file(tmp_path):
-    """Write an agent ID file that the hook subprocess will find.
-
-    The hook reads from $TMPDIR/c3po-agent-id-{ppid}, where ppid is the
-    hook process's parent PID. Since we launch the hook via subprocess.run,
-    the hook's ppid is our PID. So we write the file using our PID.
-    """
+    """Write an agent ID file keyed by session_id that the hook will find."""
     tmpdir = str(tmp_path)
-    pid = os.getpid()
-    path = os.path.join(tmpdir, f"c3po-agent-id-{pid}")
+    path = os.path.join(tmpdir, f"c3po-agent-id-{TEST_SESSION_ID}")
     with open(path, "w") as f:
         f.write("test-machine/test-project")
 
@@ -89,6 +99,10 @@ def run_hook(stdin_data: dict, env: dict = None) -> tuple[int, str, str]:
     full_env = os.environ.copy()
     if env:
         full_env.update(env)
+
+    # Ensure session_id is in stdin_data
+    if "session_id" not in stdin_data:
+        stdin_data["session_id"] = TEST_SESSION_ID
 
     result = subprocess.run(
         [sys.executable, HOOK_SCRIPT],
@@ -257,7 +271,7 @@ class TestCheckInboxHook:
         # Just verify the script doesn't crash with defaults
         result = subprocess.run(
             [sys.executable, HOOK_SCRIPT],
-            input=json.dumps({"stop_hook_active": False}),
+            input=json.dumps({"stop_hook_active": False, "session_id": TEST_SESSION_ID}),
             capture_output=True,
             text=True,
             timeout=10,

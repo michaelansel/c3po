@@ -19,63 +19,23 @@ import sys
 import urllib.request
 import urllib.error
 
-
-def get_coordinator_url() -> str:
-    """Get coordinator URL from environment or claude.json MCP config.
-
-    Priority:
-    1. C3PO_COORDINATOR_URL environment variable (allows override)
-    2. MCP server URL from ~/.claude.json
-    3. Fallback to localhost
-    """
-    # First check environment (allows override)
-    if url := os.environ.get("C3PO_COORDINATOR_URL"):
-        return url
-
-    # Try to read from ~/.claude.json MCP config
-    claude_json = os.path.expanduser("~/.claude.json")
-    try:
-        with open(claude_json) as f:
-            config = json.load(f)
-        mcp_servers = config.get("mcpServers", {})
-        c3po_config = mcp_servers.get("c3po", {})
-        url = c3po_config.get("url", "")
-        if url:
-            # URL is like "http://host:port/mcp", strip /mcp suffix
-            return url.rsplit("/mcp", 1)[0]
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass
-
-    # Fallback to localhost
-    return "http://localhost:8420"
+from c3po_common import get_coordinator_url, parse_hook_input, read_agent_id, delete_agent_id_file
 
 
 # Configuration
 COORDINATOR_URL = get_coordinator_url()
 
 
-def _get_agent_id_file() -> str:
-    """Get the path to the agent ID file for this session."""
-    ppid = os.getppid()
-    return os.path.join(os.environ.get("TMPDIR", "/tmp"), f"c3po-agent-id-{ppid}")
-
-
-def _read_agent_id() -> str | None:
-    """Read the assigned agent_id from the session file."""
-    try:
-        with open(_get_agent_id_file()) as f:
-            return f.read().strip() or None
-    except FileNotFoundError:
-        return None
-
-
 def main() -> None:
     """Unregister agent from coordinator and clean up session file."""
+    # Parse stdin to get session_id from Claude Code
+    stdin_data = parse_hook_input()
+    session_id = stdin_data.get("session_id", str(os.getppid()))
+
     # Read the assigned agent_id (written by SessionStart hook)
-    assigned_id = _read_agent_id()
+    assigned_id = read_agent_id(session_id)
     if not assigned_id:
         print("[c3po] Warning: no agent ID file found, skipping unregister", file=sys.stderr)
-        # Still clean up the file (may be empty)
     else:
         try:
             req = urllib.request.Request(
@@ -89,10 +49,7 @@ def main() -> None:
             pass
 
     # Clean up the agent_id file
-    try:
-        os.unlink(_get_agent_id_file())
-    except OSError:
-        pass
+    delete_agent_id_file(session_id)
 
     sys.exit(0)
 
