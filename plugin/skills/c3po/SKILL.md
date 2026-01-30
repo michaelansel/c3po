@@ -31,7 +31,7 @@ Guide the user through configuring their C3PO coordinator connection. This is an
 3. Ask for an agent ID (suggest hostname/project format as default)
 4. Configure the MCP server using `claude mcp add`:
    ```bash
-   claude mcp add c3po <url>/mcp -t http -s user -H "X-Agent-ID: <agent-id>"
+   claude mcp add c3po <url>/mcp -t http -s user -H "X-Machine-Name: <machine-name>"
    ```
 5. Verify the configuration with `claude mcp list`
 
@@ -83,7 +83,7 @@ Registered Agents:
 ### `/c3po send <agent> <message>`
 
 1. Call `send_request` tool with target=agent and message=message
-2. Call `wait_for_response` with the returned request_id and a 60s timeout
+2. Call `wait_for_message` with type="response" and a 60s timeout
 3. Display the response or timeout message
 
 Example:
@@ -100,7 +100,7 @@ Response from meshtastic: "Nodes online: node-1234, node-5678"
 The coordinator URL and agent ID components are configured via environment variables:
 
 - `C3PO_COORDINATOR_URL` - Coordinator URL (default: `http://localhost:8420`)
-- `C3PO_AGENT_ID` - Machine identifier, base of agent ID (default: hostname)
+- `C3PO_MACHINE_NAME` - Machine identifier, base of agent ID (default: hostname)
 - `C3PO_PROJECT_NAME` - Project name override (default: current directory name)
 - `C3PO_SESSION_ID` - Session identifier for same-session detection
 

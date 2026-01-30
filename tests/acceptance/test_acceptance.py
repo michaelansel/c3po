@@ -264,14 +264,16 @@ async def phase_5():
                         "send_request returned empty request ID",
                     ) and passed
 
-                    # Step 2: Agent B gets pending requests
-                    log("Step 2: Agent B checks pending requests")
-                    result = await sess_b.call_tool("get_pending_requests", {})
+                    # Step 2: Agent B gets pending messages (requests)
+                    log("Step 2: Agent B checks pending messages")
+                    result = await sess_b.call_tool("get_messages", {
+                        "type": "request",
+                    })
                     result_text = str(result)
                     passed = assert_true(
                         "What is 2+2" in result_text,
-                        "get_pending_requests returns the request from Agent A",
-                        f"Request not found in pending: {result_text}",
+                        "get_messages returns the request from Agent A",
+                        f"Request not found in messages: {result_text}",
                     ) and passed
 
                     # Step 3: Agent B responds
@@ -287,16 +289,16 @@ async def phase_5():
                         f"Response failed: {result_text}",
                     ) and passed
 
-                    # Step 4: Agent A waits for response
-                    log("Step 4: Agent A waits for response")
-                    result = await sess_a.call_tool("wait_for_response", {
-                        "request_id": request_id,
+                    # Step 4: Agent A waits for message (response)
+                    log("Step 4: Agent A waits for response via wait_for_message")
+                    result = await sess_a.call_tool("wait_for_message", {
+                        "type": "response",
                         "timeout": 30,
                     })
                     result_text = str(result)
                     passed = assert_true(
                         '"4"' in result_text or "'4'" in result_text,
-                        'wait_for_response returns the response "4"',
+                        'wait_for_message returns the response "4"',
                         f"Response not found: {result_text}",
                     ) and passed
 
@@ -330,19 +332,18 @@ async def phase_6():
             await session.initialize()
             await session.call_tool("ping", {})
 
-            # Step 1: wait_for_response with nonexistent request_id
-            log("Step 1: wait_for_response with nonexistent request_id (timeout=5)")
+            # Step 1: wait_for_message with no pending messages (timeout)
+            log("Step 1: wait_for_message with no pending messages (timeout=5)")
             start = time.time()
             try:
-                result = await session.call_tool("wait_for_response", {
-                    "request_id": "nonexistent::fake::00000000",
+                result = await session.call_tool("wait_for_message", {
                     "timeout": 5,
                 })
                 result_text = str(result)
                 elapsed = time.time() - start
                 passed = assert_true(
                     "timeout" in result_text.lower(),
-                    f"wait_for_response returns timeout status (took {elapsed:.1f}s)",
+                    f"wait_for_message returns timeout status (took {elapsed:.1f}s)",
                     f"Expected timeout, got: {result_text}",
                 ) and passed
             except Exception as e:
@@ -350,34 +351,35 @@ async def phase_6():
                 # A ToolError is acceptable as long as it's not a crash
                 passed = assert_true(
                     elapsed >= 3,
-                    f"wait_for_response handled gracefully after {elapsed:.1f}s (error: {e})",
-                    f"wait_for_response crashed immediately: {e}",
+                    f"wait_for_message handled gracefully after {elapsed:.1f}s (error: {e})",
+                    f"wait_for_message crashed immediately: {e}",
                 ) and passed
 
-            # Step 2: wait_for_request with timeout
-            log("Step 2: wait_for_request with timeout=5")
+            # Step 2: wait_for_message with type=request filter (timeout)
+            log("Step 2: wait_for_message type=request with timeout=5")
             start = time.time()
             try:
-                result = await session.call_tool("wait_for_request", {
+                result = await session.call_tool("wait_for_message", {
+                    "type": "request",
                     "timeout": 5,
                 })
                 result_text = str(result)
                 elapsed = time.time() - start
                 passed = assert_true(
                     "timeout" in result_text.lower(),
-                    f"wait_for_request returns timeout status (took {elapsed:.1f}s)",
+                    f"wait_for_message type=request returns timeout status (took {elapsed:.1f}s)",
                     f"Expected timeout, got: {result_text}",
                 ) and passed
             except Exception as e:
                 elapsed = time.time() - start
                 passed = assert_true(
                     elapsed >= 3,
-                    f"wait_for_request handled gracefully after {elapsed:.1f}s (error: {e})",
-                    f"wait_for_request crashed immediately: {e}",
+                    f"wait_for_message handled gracefully after {elapsed:.1f}s (error: {e})",
+                    f"wait_for_message crashed immediately: {e}",
                 ) and passed
 
-    # Step 3: wait_for_request notification then consume via get_pending_requests
-    log("Step 3: wait_for_request returns ready, then get_pending_requests consumes")
+    # Step 3: wait_for_message returns messages directly
+    log("Step 3: wait_for_message returns messages directly when request arrives")
 
     agent_waiter_base = f"blocking-waiter-{uuid.uuid4().hex[:8]}"
     agent_sender_base = f"blocking-sender-{uuid.uuid4().hex[:8]}"
@@ -410,24 +412,15 @@ async def phase_6():
                         "message": "notification test",
                     })
 
-                    # Waiter calls wait_for_request — should return ready
-                    result = await sess_waiter.call_tool("wait_for_request", {
+                    # Waiter calls wait_for_message — should return messages directly
+                    result = await sess_waiter.call_tool("wait_for_message", {
                         "timeout": 10,
                     })
                     result_text = str(result)
                     passed = assert_true(
-                        "ready" in result_text.lower(),
-                        "wait_for_request returns ready status when message available",
-                        f"Expected ready status, got: {result_text}",
-                    ) and passed
-
-                    # Now consume via get_pending_requests
-                    result = await sess_waiter.call_tool("get_pending_requests", {})
-                    result_text = str(result)
-                    passed = assert_true(
                         "notification test" in result_text,
-                        "get_pending_requests returns the message after wait_for_request",
-                        f"Message not found in pending: {result_text}",
+                        "wait_for_message returns messages directly when request available",
+                        f"Expected message content, got: {result_text}",
                     ) and passed
 
     return passed
@@ -477,13 +470,13 @@ async def phase_6b():
                     await sess_other.initialize()
                     await sess_other.call_tool("ping", {})
 
-                    # Step 1: Start a blocking wait_for_request on blocker (15s timeout)
+                    # Step 1: Start a blocking wait_for_message on blocker (15s timeout)
                     # Concurrently, have the other agent call list_agents.
                     # If the coordinator is blocked, list_agents will hang.
-                    log("Step 1: blocker starts wait_for_request(timeout=15), other calls list_agents concurrently")
+                    log("Step 1: blocker starts wait_for_message(timeout=15), other calls list_agents concurrently")
 
                     async def blocker_wait():
-                        return await sess_blocker.call_tool("wait_for_request", {
+                        return await sess_blocker.call_tool("wait_for_message", {
                             "timeout": 15,
                         })
 
@@ -504,15 +497,15 @@ async def phase_6b():
                     passed = assert_true(
                         other_elapsed < 5,
                         f"list_agents completed in {other_elapsed:.1f}s while blocker was waiting (not blocked)",
-                        f"list_agents took {other_elapsed:.1f}s — coordinator was blocked by wait_for_request",
+                        f"list_agents took {other_elapsed:.1f}s — coordinator was blocked by wait_for_message",
                     ) and passed
 
-                    # Step 2: Same test with wait_for_response
-                    log("Step 2: blocker starts wait_for_response(timeout=15), other calls ping concurrently")
+                    # Step 2: Same test with wait_for_message type=response
+                    log("Step 2: blocker starts wait_for_message(type=response, timeout=15), other calls ping concurrently")
 
                     async def blocker_wait_response():
-                        return await sess_blocker.call_tool("wait_for_response", {
-                            "request_id": "nonexistent::fake::00000000",
+                        return await sess_blocker.call_tool("wait_for_message", {
+                            "type": "response",
                             "timeout": 15,
                         })
 
@@ -539,7 +532,7 @@ async def phase_6b():
                     passed = assert_true(
                         ping_elapsed < 5,
                         f"ping completed in {ping_elapsed:.1f}s while blocker was waiting (not blocked)",
-                        f"ping took {ping_elapsed:.1f}s — coordinator was blocked by wait_for_response",
+                        f"ping took {ping_elapsed:.1f}s — coordinator was blocked by wait_for_message",
                     ) and passed
 
                     # Clean up

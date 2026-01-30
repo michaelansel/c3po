@@ -22,10 +22,9 @@ from c3po_common import get_agent_id_file, get_session_id, read_agent_id
 # Tools that need agent_id injection
 TOOLS_NEEDING_AGENT_ID = {
     "mcp__c3po__send_request",
-    "mcp__c3po__get_pending_requests",
+    "mcp__c3po__get_messages",
     "mcp__c3po__respond_to_request",
-    "mcp__c3po__wait_for_response",
-    "mcp__c3po__wait_for_request",
+    "mcp__c3po__wait_for_message",
 }
 
 

@@ -133,7 +133,9 @@ mcp = FastMCP(
     name="c3po",
     instructions=(
         "C3PO coordinates multiple Claude Code instances. "
-        "Use list_agents to see available agents, send_request to communicate with them."
+        "Use list_agents to see available agents, send_request to communicate with them. "
+        "Use get_messages to check for replies and incoming requests, "
+        "or wait_for_message to block until a message arrives."
     ),
 )
 mcp.add_middleware(AgentIdentityMiddleware())
@@ -447,13 +449,17 @@ def _send_request_impl(
     return msg_manager.send_request(from_agent, target, message, context)
 
 
-def _get_pending_requests_impl(
+def _get_messages_impl(
     msg_manager: MessageManager,
     agent_id: str,
+    message_type: Optional[str] = None,
 ) -> list[dict]:
-    """Get all pending requests for an agent (consumes them)."""
-    logger.info("get_pending agent=%s", agent_id)
-    return msg_manager.get_pending_requests(agent_id)
+    """Get all pending messages (requests and/or responses) for an agent."""
+    if message_type is not None and message_type not in ("request", "response"):
+        err = invalid_request("type", "must be 'request', 'response', or omitted for both")
+        raise ToolError(f"{err.message} {err.suggestion}")
+    logger.info("get_messages agent=%s type=%s", agent_id, message_type)
+    return msg_manager.get_messages(agent_id, message_type)
 
 
 def _respond_to_request_impl(
@@ -487,45 +493,29 @@ def _respond_to_request_impl(
     return msg_manager.respond_to_request(request_id, from_agent, response, status)
 
 
-def _wait_for_response_impl(
-    msg_manager: MessageManager,
-    agent_id: str,
-    request_id: str,
-    timeout: int = 60,
-) -> dict:
-    """Wait for a response to a specific request."""
-    result = msg_manager.wait_for_response(agent_id, request_id, timeout)
-    if result is None:
-        return {
-            "status": "timeout",
-            "code": ErrorCodes.TIMEOUT,
-            "request_id": request_id,
-            "message": f"No response received within {timeout} seconds",
-            "suggestion": "The target agent may be offline or busy. Check agent status with list_agents.",
-        }
-    return result
-
-
-def _wait_for_request_impl(
+def _wait_for_message_impl(
     msg_manager: MessageManager,
     agent_id: str,
     timeout: int = 60,
+    message_type: Optional[str] = None,
 ) -> dict:
-    """Wait for an incoming request notification (blocking).
+    """Wait for any message (request or response) to arrive.
 
-    Returns a notification dict with status="ready" and pending count,
-    NOT the message itself. Use get_pending_requests to consume messages.
+    Returns the messages directly, not a notification.
     """
-    logger.info("wait_for_request agent=%s timeout=%d", agent_id, timeout)
-    result = msg_manager.wait_for_request(agent_id, timeout)
+    if message_type is not None and message_type not in ("request", "response"):
+        err = invalid_request("type", "must be 'request', 'response', or omitted for both")
+        raise ToolError(f"{err.message} {err.suggestion}")
+    logger.info("wait_for_message agent=%s timeout=%d type=%s", agent_id, timeout, message_type)
+    result = msg_manager.wait_for_message(agent_id, timeout, message_type)
     if result is None:
         return {
             "status": "timeout",
             "code": ErrorCodes.TIMEOUT,
-            "message": f"No request received within {timeout} seconds",
-            "suggestion": "No agents have sent requests. You can continue with other work.",
+            "message": f"No messages received within {timeout} seconds",
+            "suggestion": "No agents have sent messages. You can continue with other work.",
         }
-    return result
+    return {"status": "received", "messages": result}
 
 
 def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> str:
@@ -632,24 +622,29 @@ def send_request(
 
 
 @mcp.tool()
-def get_pending_requests(
+def get_messages(
     ctx: Context,
+    type: Optional[str] = None,
     agent_id: Optional[str] = None,
 ) -> list[dict]:
-    """Get all pending requests for this agent.
+    """Get all pending messages (requests and responses) for this agent.
 
-    This consumes the requests - they will not be returned again.
-    Process each request and respond with respond_to_request.
+    This consumes the messages - they will not be returned again.
+    Returns both incoming requests (from other agents) and responses
+    (to your previously sent requests) in a single unified list.
+    Each message has a "type" field: "request" or "response".
 
     Args:
         ctx: MCP context (injected automatically)
+        type: Optional filter - "request" for incoming requests only,
+              "response" for responses only, or omit for both
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
-        List of pending request dicts with id, from_agent, message, etc.
+        List of message dicts with type, id/request_id, from_agent, message/response, etc.
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
-    return _get_pending_requests_impl(message_manager, effective_id)
+    return _get_messages_impl(message_manager, effective_id, type)
 
 
 @mcp.tool()
@@ -679,55 +674,31 @@ def respond_to_request(
 
 
 @mcp.tool()
-async def wait_for_response(
-    ctx: Context,
-    request_id: str,
-    timeout: int = 60,
-    agent_id: Optional[str] = None,
-) -> dict:
-    """Wait for a response to a previously sent request.
-
-    This is a blocking call - it will wait until a response arrives
-    or the timeout is reached.
-
-    Args:
-        ctx: MCP context (injected automatically)
-        request_id: The ID of the request to wait for
-        timeout: Maximum seconds to wait (default 60)
-        agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
-
-    Returns:
-        Response data if received, or timeout indicator
-    """
-    effective_id = _resolve_agent_id(ctx, agent_id)
-    return await asyncio.to_thread(
-        _wait_for_response_impl, message_manager, effective_id, request_id, timeout
-    )
-
-
-@mcp.tool()
-async def wait_for_request(
+async def wait_for_message(
     ctx: Context,
     timeout: int = 60,
+    type: Optional[str] = None,
     agent_id: Optional[str] = None,
 ) -> dict:
-    """Wait for an incoming request from another agent.
+    """Wait for any message (request or response) to arrive.
 
-    This is a blocking call - it will wait until a request arrives
-    in your inbox or the timeout is reached. This is an alternative
-    to polling with get_pending_requests.
+    This is a blocking call - it will wait until a message arrives
+    or the timeout is reached. Returns the messages directly.
+    Use this instead of polling get_messages in a loop.
 
     Args:
         ctx: MCP context (injected automatically)
         timeout: Maximum seconds to wait (default 60)
+        type: Optional filter - "request" for incoming requests only,
+              "response" for responses only, or omit for both
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
-        Request data if received, or timeout indicator
+        Dict with status="received" and messages list, or timeout indicator
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
     return await asyncio.to_thread(
-        _wait_for_request_impl, message_manager, effective_id, timeout
+        _wait_for_message_impl, message_manager, effective_id, timeout, type
     )
 
 

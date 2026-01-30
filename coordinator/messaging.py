@@ -294,6 +294,11 @@ class MessageManager:
 
         logger.info("response_sent request_id=%s from=%s to=%s status=%s", request_id, from_agent, original_sender, status)
 
+        # Push notification so wait_for_message wakes on responses too
+        notify_key = f"{self.NOTIFY_PREFIX}{original_sender}"
+        self.redis.rpush(notify_key, "1")
+        self.redis.expire(notify_key, self.MESSAGE_TTL_SECONDS)
+
         return response_data
 
     def wait_for_response(
@@ -383,3 +388,112 @@ class MessageManager:
                 pending = self.peek_pending_requests(agent_id)
                 logger.info("wait_request_notified agent=%s pending=%d", agent_id, len(pending))
                 return {"status": "ready", "pending": len(pending)}
+
+    def _get_pending_responses(self, agent_id: str) -> list[dict]:
+        """Get and consume all pending responses for an agent.
+
+        This removes the responses from the queue (they are consumed).
+        Expired messages are automatically filtered out.
+
+        Args:
+            agent_id: The agent whose response queue to check
+
+        Returns:
+            List of response dicts, oldest first (FIFO), excluding expired
+        """
+        response_key = f"{self.RESPONSES_PREFIX}{agent_id}"
+        responses = []
+
+        while True:
+            data = self.redis.lpop(response_key)
+            if data is None:
+                break
+
+            if isinstance(data, bytes):
+                data = data.decode()
+
+            message = json.loads(data)
+            if not self._is_message_expired(message):
+                responses.append(message)
+
+        logger.info("responses_consumed agent=%s count=%d", agent_id, len(responses))
+        return responses
+
+    def get_messages(
+        self,
+        agent_id: str,
+        message_type: Optional[str] = None,
+    ) -> list[dict]:
+        """Get all pending messages (requests and/or responses) for an agent.
+
+        Consumes messages from the matching queues. Each message gets a "type"
+        field ("request" or "response") so the caller can distinguish them.
+
+        Args:
+            agent_id: The agent whose messages to retrieve
+            message_type: Optional filter - "request", "response", or None (both)
+
+        Returns:
+            List of message dicts with added "type" field, oldest first
+        """
+        messages = []
+
+        if message_type is None or message_type == "request":
+            for msg in self.get_pending_requests(agent_id):
+                msg["type"] = "request"
+                messages.append(msg)
+
+        if message_type is None or message_type == "response":
+            for msg in self._get_pending_responses(agent_id):
+                msg["type"] = "response"
+                messages.append(msg)
+
+        logger.info("get_messages agent=%s type=%s count=%d", agent_id, message_type, len(messages))
+        return messages
+
+    def wait_for_message(
+        self,
+        agent_id: str,
+        timeout: int = 60,
+        message_type: Optional[str] = None,
+    ) -> Optional[list[dict]]:
+        """Wait for any message (request or response) to arrive, then return all pending.
+
+        First checks for existing messages (non-blocking). If none, blocks on the
+        notification channel until a signal arrives or timeout. Then drains via
+        get_messages. Returns None on timeout.
+
+        Args:
+            agent_id: The agent waiting for messages
+            timeout: Timeout in seconds (default 60)
+            message_type: Optional filter - "request", "response", or None (both)
+
+        Returns:
+            List of message dicts if any arrived, or None if timeout
+        """
+        # First check for existing messages without blocking
+        existing = self.get_messages(agent_id, message_type)
+        if existing:
+            logger.info("wait_for_message immediate agent=%s count=%d", agent_id, len(existing))
+            return existing
+
+        # Block on notification channel
+        notify_key = f"{self.NOTIFY_PREFIX}{agent_id}"
+        deadline = datetime.now(timezone.utc).timestamp() + timeout
+
+        while True:
+            remaining = deadline - datetime.now(timezone.utc).timestamp()
+            if remaining <= 0:
+                logger.info("wait_for_message_timeout agent=%s timeout=%d", agent_id, timeout)
+                return None
+
+            blpop_timeout = max(1, int(min(remaining, 10)))
+            result = self.redis.blpop(notify_key, timeout=blpop_timeout)
+
+            if result is not None:
+                # Got a notification — drain messages
+                messages = self.get_messages(agent_id, message_type)
+                if messages:
+                    logger.info("wait_for_message_received agent=%s count=%d", agent_id, len(messages))
+                    return messages
+                # Stale notification (already consumed), continue blocking

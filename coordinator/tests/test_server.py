@@ -4,8 +4,10 @@ import pytest
 
 import fakeredis
 
-from coordinator.server import _ping_impl, _list_agents_impl, _register_agent_impl
+from coordinator.server import _ping_impl, _list_agents_impl, _register_agent_impl, _get_messages_impl, _wait_for_message_impl
 from coordinator.agents import AgentManager
+from coordinator.messaging import MessageManager
+from fastmcp.exceptions import ToolError
 
 
 @pytest.fixture
@@ -72,3 +74,57 @@ class TestRegisterAgent:
         )
 
         assert result["capabilities"] == ["search", "code"]
+
+
+@pytest.fixture
+def message_manager(redis_client):
+    """Create MessageManager with fakeredis."""
+    return MessageManager(redis_client)
+
+
+class TestGetMessagesImpl:
+    """Tests for _get_messages_impl server function."""
+
+    def test_returns_messages(self, message_manager):
+        """Should return messages from get_messages."""
+        message_manager.send_request("a", "b", "hello")
+        result = _get_messages_impl(message_manager, "b")
+        assert len(result) == 1
+        assert result[0]["type"] == "request"
+
+    def test_invalid_type_raises(self, message_manager):
+        """Should raise ToolError for invalid type parameter."""
+        with pytest.raises(ToolError):
+            _get_messages_impl(message_manager, "b", message_type="invalid")
+
+    def test_none_type_returns_both(self, message_manager):
+        """Should return both requests and responses when type is None."""
+        req = message_manager.send_request("a", "b", "Q")
+        message_manager.respond_to_request(req["id"], "b", "A")
+
+        # Agent a gets responses, agent b gets requests
+        msgs_a = _get_messages_impl(message_manager, "a", message_type=None)
+        assert len(msgs_a) == 1
+        assert msgs_a[0]["type"] == "response"
+
+
+class TestWaitForMessageImpl:
+    """Tests for _wait_for_message_impl server function."""
+
+    def test_returns_timeout_dict(self, message_manager):
+        """Should return timeout dict when no messages arrive."""
+        result = _wait_for_message_impl(message_manager, "agent-a", timeout=1)
+        assert result["status"] == "timeout"
+        assert "No messages received" in result["message"]
+
+    def test_returns_received_dict(self, message_manager):
+        """Should return received dict with messages."""
+        message_manager.send_request("a", "b", "hello")
+        result = _wait_for_message_impl(message_manager, "b", timeout=5)
+        assert result["status"] == "received"
+        assert len(result["messages"]) == 1
+
+    def test_invalid_type_raises(self, message_manager):
+        """Should raise ToolError for invalid type parameter."""
+        with pytest.raises(ToolError):
+            _wait_for_message_impl(message_manager, "b", timeout=1, message_type="invalid")
