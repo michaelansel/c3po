@@ -525,9 +525,9 @@ def _wait_for_request_impl(
 def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> str:
     """Resolve the effective agent_id for a tool call.
 
-    Priority:
-    1. Explicit agent_id parameter (from Claude, who learned it from hook output)
-    2. Header-based agent_id (from middleware auto-registration)
+    The agent_id must be provided explicitly (injected by the PreToolUse hook).
+    Falls back to middleware header only if it contains a slash (full ID).
+    Raises ToolError if no valid agent_id can be determined.
 
     Args:
         ctx: MCP context with state from middleware
@@ -535,14 +535,33 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
 
     Returns:
         The effective agent_id to use
+
+    Raises:
+        ToolError: If no valid agent_id is available
     """
     if explicit_agent_id and explicit_agent_id.strip():
         resolved = explicit_agent_id.strip()
         logger.info("resolve_agent_id explicit=%s", resolved)
         return resolved
+
+    # Middleware fallback — only accept full agent IDs (with slash)
     middleware_id = ctx.get_state("agent_id")
-    logger.warning("resolve_agent_id fallback_to_middleware=%s", middleware_id)
-    return middleware_id
+    if middleware_id and "/" in middleware_id:
+        logger.warning("resolve_agent_id fallback_to_middleware=%s", middleware_id)
+        return middleware_id
+
+    # No valid agent_id — fail loudly
+    logger.error(
+        "resolve_agent_id_failed middleware_id=%s (missing slash — "
+        "PreToolUse hook did not inject agent_id)",
+        middleware_id,
+    )
+    raise ToolError(
+        f"Could not determine your agent ID. The PreToolUse hook should inject "
+        f"the agent_id parameter, but it didn't. Middleware only has base ID: "
+        f"'{middleware_id}'. This usually means the ensure_agent_id hook is not "
+        f"running or not finding the session file. Try restarting your session."
+    )
 
 
 # Register tools with MCP server

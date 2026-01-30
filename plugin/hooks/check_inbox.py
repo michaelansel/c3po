@@ -54,8 +54,12 @@ def main() -> None:
         # Can't parse input, fail open
         sys.exit(0)
 
-    # Get session_id from stdin, fall back to ppid
-    session_id = get_session_id(stdin_data)
+    # Get session_id from stdin
+    try:
+        session_id = get_session_id(stdin_data)
+    except ValueError:
+        # No session_id — can't look up agent ID, fail open
+        sys.exit(0)
 
     # Read agent ID using session_id
     assigned_id = read_agent_id(session_id)

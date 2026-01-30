@@ -30,7 +30,11 @@ def main() -> None:
     """Unregister agent from coordinator and clean up session file."""
     # Parse stdin to get session_id from Claude Code
     stdin_data = parse_hook_input()
-    session_id = get_session_id(stdin_data)
+    try:
+        session_id = get_session_id(stdin_data)
+    except ValueError:
+        # No session_id — can't find agent ID file, skip cleanup
+        sys.exit(0)
 
     # Read the assigned agent_id (written by SessionStart hook)
     assigned_id = read_agent_id(session_id)

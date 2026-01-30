@@ -73,7 +73,11 @@ def main() -> None:
     """Register with coordinator and output session context."""
     # Parse stdin to get session_id from Claude Code
     stdin_data = parse_hook_input()
-    session_id = get_session_id(stdin_data)
+    try:
+        session_id = get_session_id(stdin_data)
+    except ValueError:
+        print("[c3po] Cannot register without session_id. Running in local mode.")
+        sys.exit(0)
 
     try:
         # Register this session with the coordinator

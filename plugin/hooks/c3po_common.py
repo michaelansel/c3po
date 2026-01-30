@@ -124,9 +124,19 @@ def parse_hook_input() -> dict:
 
 
 def get_session_id(stdin_data: dict) -> str:
-    """Extract session_id from parsed hook stdin, falling back to PPID.
+    """Extract session_id from parsed hook stdin.
 
     Claude Code provides session_id (a stable UUID) in the stdin JSON
-    for all hooks. Falls back to os.getppid() for backward compatibility.
+    for all hooks. Raises an error if missing — the PPID fallback was
+    unreliable and masked bugs.
     """
-    return stdin_data.get("session_id", str(os.getppid()))
+    session_id = stdin_data.get("session_id")
+    if not session_id:
+        print(
+            "[c3po] ERROR: no session_id in hook stdin. "
+            "Claude Code should provide this automatically. "
+            "stdin keys: " + ", ".join(sorted(stdin_data.keys())),
+            file=sys.stderr,
+        )
+        raise ValueError("session_id missing from hook stdin")
+    return session_id

@@ -54,17 +54,32 @@ def main() -> None:
         _debug(f"agent_id already set: {tool_input['agent_id']}")
         sys.exit(0)
 
-    # Get session_id from stdin data, fall back to ppid
-    session_id = get_session_id(stdin_data)
+    # Get session_id from stdin data
+    try:
+        session_id = get_session_id(stdin_data)
+    except ValueError:
+        # No session_id — can't look up agent ID, log and allow without injection
+        _debug("no session_id in stdin, cannot inject agent_id")
+        print(
+            "[c3po] ERROR: PreToolUse hook has no session_id. "
+            "Agent identity injection will fail. "
+            "The coordinator will reject calls without a valid agent ID.",
+            file=sys.stderr,
+        )
+        sys.exit(0)
 
     # Read the assigned agent_id from the session file
     path = get_agent_id_file(session_id)
     _debug(f"session_id={session_id} file={path} exists={os.path.exists(path)}")
     agent_id = read_agent_id(session_id)
     if not agent_id:
-        # No agent_id file - allow without injection
-        # (coordinator will fall back to header-based lookup)
-        _debug(f"no agent_id found, skipping injection")
+        _debug(f"no agent_id found at {path}, cannot inject")
+        print(
+            f"[c3po] ERROR: No agent ID file found for session {session_id}. "
+            f"Expected at: {path}. "
+            f"The SessionStart hook may not have run or failed to register.",
+            file=sys.stderr,
+        )
         sys.exit(0)
 
     # Inject agent_id into the tool input

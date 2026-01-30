@@ -169,11 +169,10 @@ class TestGetSessionId:
     def test_returns_session_id_from_stdin(self):
         assert get_session_id({"session_id": "abc-123"}) == "abc-123"
 
-    def test_falls_back_to_ppid(self):
-        result = get_session_id({})
-        assert result == str(os.getppid())
+    def test_raises_on_missing_session_id(self):
+        with pytest.raises(ValueError, match="session_id missing"):
+            get_session_id({})
 
-    def test_falls_back_to_ppid_on_empty_dict(self):
-        result = get_session_id({})
-        # Should be a numeric string (PID)
-        assert result.isdigit()
+    def test_raises_on_empty_session_id(self):
+        with pytest.raises(ValueError, match="session_id missing"):
+            get_session_id({"session_id": ""})
