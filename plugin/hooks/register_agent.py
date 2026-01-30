@@ -104,6 +104,7 @@ def main() -> None:
             print(f"[c3po] Connected to coordinator at {COORDINATOR_URL}")
             print(f"[c3po] Your agent ID: {assigned_id}")
             print(f"[c3po] {agents_online} agent(s) currently online")
+            print(f"[c3po] Tip: call set_description to tell other agents what you can help with")
         else:
             print(f"[c3po] Could not register with coordinator at {COORDINATOR_URL}")
             print(f"[c3po] Running in local mode. Set C3PO_DEBUG=1 for more details.")

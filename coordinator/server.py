@@ -135,7 +135,9 @@ mcp = FastMCP(
         "C3PO coordinates multiple Claude Code instances. "
         "Use list_agents to see available agents, send_request to communicate with them. "
         "Use get_messages to check for replies and incoming requests, "
-        "or wait_for_message to block until a message arrives."
+        "or wait_for_message to block until a message arrives. "
+        "When you start a session, call set_description with a brief summary of what "
+        "you can help with, so other agents know your capabilities."
     ),
 )
 mcp.add_middleware(AgentIdentityMiddleware())
