@@ -1,11 +1,14 @@
 """Message passing between agents for C3PO coordinator."""
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 import redis
+
+logger = logging.getLogger("c3po.messaging")
 
 
 class MessageManager:
@@ -131,6 +134,8 @@ class MessageManager:
         self.redis.rpush(notify_key, "1")
         self.redis.expire(notify_key, self.MESSAGE_TTL_SECONDS)
 
+        logger.info("request_sent request_id=%s from=%s to=%s inbox_key=%s", request_id, from_agent, to_agent, inbox_key)
+
         return request_data
 
     def _is_message_expired(self, message: dict) -> bool:
@@ -194,6 +199,8 @@ class MessageManager:
             if not self._is_message_expired(message):
                 requests.append(message)
 
+        logger.info("inbox_consumed agent=%s inbox_key=%s count=%d", agent_id, inbox_key, len(requests))
+
         return requests
 
     def peek_pending_requests(self, agent_id: str) -> list[dict]:
@@ -221,6 +228,8 @@ class MessageManager:
             # Skip expired messages
             if not self._is_message_expired(message):
                 requests.append(message)
+
+        logger.debug("inbox_peeked agent=%s inbox_key=%s count=%d", agent_id, inbox_key, len(requests))
 
         return requests
 
@@ -283,6 +292,8 @@ class MessageManager:
         response_key = f"{self.RESPONSES_PREFIX}{original_sender}"
         self.redis.rpush(response_key, json.dumps(response_data))
 
+        logger.info("response_sent request_id=%s from=%s to=%s status=%s", request_id, from_agent, original_sender, status)
+
         return response_data
 
     def wait_for_response(
@@ -309,6 +320,7 @@ class MessageManager:
         while True:
             remaining = deadline - datetime.now(timezone.utc).timestamp()
             if remaining <= 0:
+                logger.info("wait_response_timeout agent=%s request_id=%s timeout=%d", agent_id, request_id, timeout)
                 return None
 
             # BLPOP returns (key, value) or None on timeout
@@ -327,10 +339,12 @@ class MessageManager:
 
             # Check if this is the response we're waiting for
             if response.get("request_id") == request_id:
+                logger.info("wait_response_matched agent=%s request_id=%s", agent_id, request_id)
                 return response
 
             # Not our response, put it back for another waiter
             # Use rpush to maintain FIFO order (append to end of queue)
+            logger.debug("wait_response_putback agent=%s got_request_id=%s wanted=%s", agent_id, response.get("request_id"), request_id)
             self.redis.rpush(response_key, json.dumps(response))
 
     def wait_for_request(
@@ -357,6 +371,7 @@ class MessageManager:
         while True:
             remaining = deadline - datetime.now(timezone.utc).timestamp()
             if remaining <= 0:
+                logger.info("wait_request_timeout agent=%s timeout=%d", agent_id, timeout)
                 return None
 
             # Use at least 1 second timeout (0 means wait forever in Redis)
@@ -366,4 +381,5 @@ class MessageManager:
             if result is not None:
                 # Got a notification — peek at inbox for count
                 pending = self.peek_pending_requests(agent_id)
+                logger.info("wait_request_notified agent=%s pending=%d", agent_id, len(pending))
                 return {"status": "ready", "pending": len(pending)}

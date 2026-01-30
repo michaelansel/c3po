@@ -1,10 +1,13 @@
 """Agent registration and management for C3PO coordinator."""
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
 import redis
+
+logger = logging.getLogger("c3po.agents")
 
 
 class AgentManager:
@@ -59,6 +62,7 @@ class AgentManager:
                 if capabilities is not None:
                     existing["capabilities"] = capabilities
                 self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(existing))
+                logger.debug("agent_heartbeat agent=%s", agent_id)
                 return self._add_status(existing)
 
             # Case 2: No session_id provided, agent is online - assume MCP call
@@ -68,11 +72,14 @@ class AgentManager:
                 if capabilities is not None:
                     existing["capabilities"] = capabilities
                 self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(existing))
+                logger.debug("agent_heartbeat agent=%s", agent_id)
                 return self._add_status(existing)
 
             # Case 3: Different session_id AND agent is online - collision!
             if is_online:
+                original_id = agent_id
                 agent_id = self._resolve_collision(agent_id)
+                logger.warning("agent_collision requested=%s resolved=%s", original_id, agent_id)
 
         # Create new or update offline agent
         agent_data = {
@@ -84,6 +91,7 @@ class AgentManager:
         }
 
         self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(agent_data))
+        logger.info("agent_registered agent=%s session=%s", agent_id, session_id)
         return self._add_status(agent_data)
 
     def _get_agent_raw(self, agent_id: str) -> Optional[dict]:
@@ -211,7 +219,9 @@ class AgentManager:
             True if agent was removed, False if not found
         """
         result = self.redis.hdel(self.AGENTS_KEY, agent_id)
-        return result > 0
+        removed = result > 0
+        logger.info("agent_removed agent=%s", agent_id)
+        return removed
 
     def count_online_agents(self) -> int:
         """Count the number of currently online agents.

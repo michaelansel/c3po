@@ -214,8 +214,7 @@ This document defines all test cases for the C3PO multi-agent coordination syste
 
 ```bash
 # Unit tests (coordinator)
-cd coordinator && source ../.venv/bin/activate
-pytest tests/ -v
+python3 -m pytest coordinator/tests/ -v
 
 # Unit tests (hooks)
 cd plugin/hooks && pytest tests/ -v
@@ -224,6 +223,31 @@ cd plugin/hooks && pytest tests/ -v
 export C3PO_TEST_LIVE=1
 ./scripts/test-local.sh start
 pytest tests/test_e2e_integration.py -v
+```
+
+### Running Containerized Acceptance Tests
+
+The containerized acceptance tests build Docker images, spin up Redis + coordinator + host agent containers in an isolated network, and run the full acceptance test suite inside the containers. This validates the complete deployment artifact, not just source code.
+
+```bash
+# Full containerized acceptance test (uses docker or finch)
+bash tests/acceptance/run-acceptance.sh
+
+# Keep containers running after test for debugging
+bash tests/acceptance/run-acceptance.sh --no-cleanup
+
+# Run specific phase only
+bash tests/acceptance/run-acceptance.sh --phase 5
+```
+
+This is the most comprehensive automated validation and should be included in the verification step of any change that modifies coordinator code, messaging, agent management, or REST endpoints.
+
+### Running Acceptance Tests Against a Live Coordinator
+
+For faster iteration against an already-deployed coordinator (does NOT validate the built image):
+
+```bash
+python3 tests/acceptance/test_acceptance.py --coordinator-url http://<host>:8420
 ```
 
 ### Running Manual Tests

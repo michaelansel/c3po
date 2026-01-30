@@ -205,7 +205,44 @@ curl http://localhost:8420/api/health
 
 ---
 
-## Automated E2E Test
+## Automated Tests
+
+### Containerized Acceptance Tests (recommended)
+
+The most comprehensive automated validation. Builds Docker images, spins up Redis + coordinator + host agent containers in an isolated network, and runs all acceptance test phases inside the containers. This validates the actual deployment artifact.
+
+```bash
+# Full containerized acceptance test (uses docker or finch)
+bash tests/acceptance/run-acceptance.sh
+
+# Keep containers running after test for debugging
+bash tests/acceptance/run-acceptance.sh --no-cleanup
+
+# Run specific phase only
+bash tests/acceptance/run-acceptance.sh --phase 5
+```
+
+**Any change to coordinator code should run this before merging.**
+
+### Acceptance Tests Against a Live Coordinator
+
+For faster iteration when the coordinator is already deployed (does not validate the built image):
+
+```bash
+python3 tests/acceptance/test_acceptance.py --coordinator-url http://<host>:8420
+```
+
+### Unit Tests
+
+```bash
+# Coordinator unit tests
+python3 -m pytest coordinator/tests/ -v
+
+# Hook unit tests
+cd plugin/hooks && pytest tests/ -v
+```
+
+### E2E Integration Test
 
 For automated testing without Claude Code, use the E2E test script:
 

@@ -1,5 +1,6 @@
 """C3PO Coordinator - FastMCP server for multi-agent coordination."""
 
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -11,6 +12,8 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from starlette.responses import JSONResponse
+
+logger = logging.getLogger("c3po.server")
 
 from coordinator.agents import AgentManager
 from coordinator.errors import (
@@ -114,6 +117,8 @@ class AgentIdentityMiddleware(Middleware):
         context.fastmcp_context.set_state("project_name", project_name)
         context.fastmcp_context.set_state("session_id", session_id)
 
+        logger.debug("tool_call agent=%s tool=%s", actual_agent_id, getattr(context, 'tool_name', '?'))
+
         return await call_next(context)
 
 
@@ -184,6 +189,7 @@ async def api_register(request):
 
     try:
         result = agent_manager.register_agent(agent_id, session_id)
+        logger.info("rest_register agent_id=%s", result.get("id", agent_id))
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse(
@@ -251,6 +257,7 @@ async def api_pending(request):
 
     try:
         requests = message_manager.peek_pending_requests(agent_id)
+        logger.info("rest_pending agent_id=%s count=%d", agent_id, len(requests))
         return JSONResponse({
             "count": len(requests),
             "requests": requests,
@@ -294,6 +301,7 @@ async def api_unregister(request):
 
     try:
         removed = agent_manager.remove_agent(agent_id)
+        logger.info("rest_unregister agent_id=%s removed=%s", agent_id, removed)
         if removed:
             return JSONResponse({
                 "status": "ok",
@@ -412,6 +420,7 @@ def _send_request_impl(
             msg_manager.RATE_LIMIT_REQUESTS,
             msg_manager.RATE_LIMIT_WINDOW_SECONDS
         )
+        logger.warning("send_rejected from=%s to=%s reason=rate_limited", from_agent, target)
         raise ToolError(f"{err.message} {err.suggestion}")
 
     # Check if target agent exists
@@ -421,6 +430,7 @@ def _send_request_impl(
         available = agent_manager.list_agents()
         agent_ids = [a["id"] for a in available]
         err = agent_not_found(target, agent_ids)
+        logger.warning("send_rejected from=%s to=%s reason=agent_not_found", from_agent, target)
         raise ToolError(f"{err.message} {err.suggestion}")
 
     # Record request for rate limiting
@@ -434,6 +444,7 @@ def _get_pending_requests_impl(
     agent_id: str,
 ) -> list[dict]:
     """Get all pending requests for an agent (consumes them)."""
+    logger.info("get_pending agent=%s", agent_id)
     return msg_manager.get_pending_requests(agent_id)
 
 
@@ -497,6 +508,7 @@ def _wait_for_request_impl(
     Returns a notification dict with status="ready" and pending count,
     NOT the message itself. Use get_pending_requests to consume messages.
     """
+    logger.info("wait_for_request agent=%s timeout=%d", agent_id, timeout)
     result = msg_manager.wait_for_request(agent_id, timeout)
     if result is None:
         return {
@@ -686,16 +698,22 @@ def wait_for_request(
 
 def main():
     """Run the coordinator server."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+
     port = int(os.environ.get("C3PO_PORT", "8420"))
     host = os.environ.get("C3PO_HOST", "0.0.0.0")
 
-    print(f"Starting C3PO coordinator on {host}:{port}")
-    print(f"Redis URL: {REDIS_URL}")
+    logger.info("Starting C3PO coordinator on %s:%s", host, port)
+    logger.info("Redis URL: %s", REDIS_URL)
 
     # Test Redis connection at startup with improved error message
     try:
         redis_client.ping()
-        print("Redis connection verified")
+        logger.info("Redis connection verified")
     except redis.ConnectionError as e:
         raise RedisConnectionError(REDIS_URL, e) from e
     except redis.RedisError as e:
