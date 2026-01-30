@@ -160,7 +160,7 @@ generate_api_key() {
         return 1  # No admin key, skip API key generation
     fi
 
-    log "Generating API key for ${machine_name}/*..."
+    log "Generating API key for ${machine_name}/*..." >&2
 
     local response
     response=$(curl -sf --connect-timeout 5 \
@@ -298,10 +298,9 @@ main() {
     # Add MCP server
     add_mcp_server "$COORDINATOR_URL" "$AGENT_ID" "$API_KEY"
 
-    # Export API key for hooks if generated
+    # API key info (hooks read it automatically from ~/.claude.json)
     if [[ -n "$API_KEY" ]]; then
-        info "Set this environment variable for hook authentication:"
-        echo "  export C3PO_API_KEY='$API_KEY'"
+        log "API key stored in ~/.claude.json (hooks read it automatically)"
     fi
 
     # Verify
