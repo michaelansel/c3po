@@ -30,6 +30,8 @@ class ErrorCodes:
     INVALID_REQUEST = "INVALID_REQUEST"
     RATE_LIMITED = "RATE_LIMITED"
     REDIS_UNAVAILABLE = "REDIS_UNAVAILABLE"
+    UNAUTHORIZED = "UNAUTHORIZED"
+    FORBIDDEN = "FORBIDDEN"
 
 
 def agent_not_found(target: str, available: list[str]) -> C3POError:
@@ -64,6 +66,24 @@ def rate_limited(agent_id: str, limit: int, window_seconds: int) -> C3POError:
         code=ErrorCodes.RATE_LIMITED,
         message=f"Rate limit exceeded for agent '{agent_id}'.",
         suggestion=f"Maximum {limit} requests per {window_seconds} seconds. Wait before sending more requests.",
+    )
+
+
+def unauthorized(message: str = "Authentication required") -> C3POError:
+    """Create error for missing or invalid authentication."""
+    return C3POError(
+        code=ErrorCodes.UNAUTHORIZED,
+        message=message,
+        suggestion="Provide a valid Authorization: Bearer <token> header.",
+    )
+
+
+def forbidden(agent_id: str, action: str = "access this resource") -> C3POError:
+    """Create error for insufficient authorization."""
+    return C3POError(
+        code=ErrorCodes.FORBIDDEN,
+        message=f"Agent '{agent_id}' is not authorized to {action}.",
+        suggestion="Your API key does not have permission for this agent ID.",
     )
 
 

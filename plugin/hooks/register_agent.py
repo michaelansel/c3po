@@ -21,7 +21,7 @@ import sys
 import urllib.request
 import urllib.error
 
-from c3po_common import get_coordinator_url, get_machine_name, get_session_id, parse_hook_input, save_agent_id
+from c3po_common import auth_headers, get_coordinator_url, get_machine_name, get_session_id, parse_hook_input, save_agent_id, urlopen_with_ssl
 
 
 # Configuration
@@ -43,19 +43,21 @@ def register_with_coordinator(session_id: str) -> dict | None:
     Returns:
         Registration result dict (with assigned agent_id) or None if failed
     """
+    headers = {
+        "X-Machine-Name": MACHINE_NAME,
+        "X-Project-Name": PROJECT_NAME,
+        "X-Session-ID": session_id,
+    }
+    headers.update(auth_headers())
     req = urllib.request.Request(
         f"{COORDINATOR_URL}/api/register",
         data=b"",  # POST with empty body
-        headers={
-            "X-Machine-Name": MACHINE_NAME,
-            "X-Project-Name": PROJECT_NAME,
-            "X-Session-ID": session_id,
-        },
+        headers=headers,
         method="POST",
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urlopen_with_ssl(req, timeout=5) as resp:
             return json.loads(resp.read())
     except urllib.error.URLError as e:
         if os.environ.get("C3PO_DEBUG"):
@@ -90,12 +92,11 @@ def main() -> None:
             # Save assigned agent_id keyed by session_id for other hooks to read
             save_agent_id(session_id, assigned_id)
 
-            # Get agent count from health endpoint
+            # Get agent count from health endpoint (no auth required for health)
             req = urllib.request.Request(
                 f"{COORDINATOR_URL}/api/health",
-                headers={"X-Machine-Name": MACHINE_NAME},
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urlopen_with_ssl(req, timeout=5) as resp:
                 health = json.loads(resp.read())
 
             agents_online = health.get("agents_online", 0)

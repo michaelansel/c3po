@@ -71,12 +71,55 @@ cmd_push() {
     log "Run 'deploy' to start containers"
 }
 
+# Secrets file location on NAS
+SECRETS_FILE="${NAS_DATA_DIR}/.secrets"
+
+# Generate or load secrets
+ensure_secrets() {
+    log "Checking secrets..."
+
+    # Check if secrets file exists on NAS
+    if ssh "$NAS_HOST" "test -f ${SECRETS_FILE}"; then
+        log "Loading existing secrets"
+    else
+        log "Generating new secrets..."
+        local redis_password
+        redis_password=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+        local server_secret
+        server_secret=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+        local admin_key
+        admin_key=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+
+        ssh "$NAS_HOST" "mkdir -p ${NAS_DATA_DIR} && cat > ${SECRETS_FILE} << 'SECRETS_EOF'
+REDIS_PASSWORD=${redis_password}
+C3PO_SERVER_SECRET=${server_secret}
+C3PO_ADMIN_KEY=${admin_key}
+SECRETS_EOF
+chmod 600 ${SECRETS_FILE}"
+
+        log "Secrets generated and stored at ${SECRETS_FILE}"
+        warn "Admin bearer token: ${server_secret}.${admin_key}"
+        warn "Save this token — it is needed for enrollment and key management."
+    fi
+}
+
 # Deploy containers on NAS
 cmd_deploy() {
     log "Deploying to NAS..."
 
     # Create data directory
     ssh "$NAS_HOST" "mkdir -p ${NAS_DATA_DIR}/redis"
+
+    # Ensure secrets exist
+    ensure_secrets
+
+    # Load secrets (don't log them)
+    local secrets_content
+    secrets_content=$(ssh "$NAS_HOST" "cat ${SECRETS_FILE}")
+    local redis_password server_secret admin_key
+    redis_password=$(echo "$secrets_content" | grep REDIS_PASSWORD | cut -d= -f2)
+    server_secret=$(echo "$secrets_content" | grep C3PO_SERVER_SECRET | cut -d= -f2)
+    admin_key=$(echo "$secrets_content" | grep C3PO_ADMIN_KEY | cut -d= -f2)
 
     # Stop existing containers
     ssh "$NAS_HOST" "${NAS_DOCKER} stop c3po-coordinator c3po-redis 2>/dev/null || true"
@@ -94,15 +137,24 @@ cmd_deploy() {
         --network c3po-net \
         --restart unless-stopped \
         -p ${REDIS_PORT}:6379 \
-        redis:7-alpine"
+        -e REDIS_PASSWORD='${redis_password}' \
+        redis:7-alpine \
+        redis-server ${redis_password:+--requirepass '${redis_password}'}"
 
     # Start Coordinator
     log "Starting Coordinator..."
+    local redis_url="redis://c3po-redis:6379"
+    if [[ -n "$redis_password" ]]; then
+        redis_url="redis://:${redis_password}@c3po-redis:6379"
+    fi
+
     ssh "$NAS_HOST" "${NAS_DOCKER} run -d \
         --name c3po-coordinator \
         --network c3po-net \
         --restart unless-stopped \
-        -e REDIS_URL=redis://c3po-redis:6379 \
+        -e REDIS_URL='${redis_url}' \
+        -e C3PO_SERVER_SECRET='${server_secret}' \
+        -e C3PO_ADMIN_KEY='${admin_key}' \
         -p ${COORDINATOR_PORT}:8420 \
         c3po-coordinator:latest"
 

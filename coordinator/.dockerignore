@@ -1,0 +1,11 @@
+.git
+.gitignore
+tests/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.md
+docker-compose.yml
+nginx-c3po.conf.example
+.dockerignore

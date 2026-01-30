@@ -4,11 +4,26 @@ services:
     ports:
       - "8420:8420"
     environment:
-      - REDIS_URL=redis://redis:6379
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379
+      - C3PO_SERVER_SECRET=${C3PO_SERVER_SECRET:-}
+      - C3PO_ADMIN_KEY=${C3PO_ADMIN_KEY:-}
+      - C3PO_BEHIND_PROXY=${C3PO_BEHIND_PROXY:-false}
     depends_on:
       redis:
         condition: service_started
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=10M
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/api/health')"]
       interval: 30s
@@ -20,8 +35,26 @@ services:
     image: redis:7-alpine
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
+    command: >-
+      redis-server
+      --appendonly yes
+      ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=10M
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s

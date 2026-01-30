@@ -1,0 +1,131 @@
+# C3PO Nginx Reverse Proxy Configuration
+#
+# This config provides TLS termination and pre-authentication for the
+# C3PO coordinator. Place this in your nginx sites-enabled directory
+# and adjust the values marked with TODO.
+#
+# Pre-authentication: nginx validates the server_secret prefix of the
+# Bearer token before forwarding to the coordinator. This shields the
+# Python service from unauthenticated traffic.
+
+# Extract the server secret prefix from "Bearer <secret>.<key>"
+# The token format is: Authorization: Bearer <server_secret>.<api_key>
+map $http_authorization $c3po_auth_prefix {
+    ~^Bearer\s+([^.]+)\. $1;
+    default "";
+}
+
+# TODO: Set your server secret here (must match C3PO_SERVER_SECRET env var)
+# You can also use env var substitution if your nginx supports it
+map $c3po_auth_prefix $c3po_auth_valid {
+    "YOUR_SERVER_SECRET_HERE" 1;  # TODO: Replace with actual secret
+    default 0;
+}
+
+# Rate limit zone (backup to app-level limiting)
+limit_req_zone $binary_remote_addr zone=c3po_api:10m rate=30r/s;
+limit_req_zone $binary_remote_addr zone=c3po_admin:1m rate=5r/m;
+
+upstream c3po_coordinator {
+    server 127.0.0.1:8420;  # TODO: Adjust if coordinator is on different host/port
+    keepalive 8;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name c3po.example.com;  # TODO: Your domain
+
+    # TLS configuration
+    ssl_certificate /path/to/cert.pem;      # TODO: Your certificate
+    ssl_certificate_key /path/to/key.pem;   # TODO: Your private key
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_tickets off;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-XSS-Protection "0" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Request body size limit
+    client_max_body_size 64k;
+
+    # Health endpoint - no auth required
+    location = /api/health {
+        limit_req zone=c3po_api burst=10 nodelay;
+        proxy_pass http://c3po_coordinator;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Admin endpoints - stricter rate limit
+    location /api/admin/ {
+        # Validate server secret prefix
+        if ($c3po_auth_valid = 0) {
+            return 401 '{"error": "Unauthorized"}';
+        }
+
+        limit_req zone=c3po_admin burst=3 nodelay;
+        proxy_pass http://c3po_coordinator;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # MCP endpoint - supports SSE for long-poll (wait_for_message)
+    location /mcp {
+        # Validate server secret prefix
+        if ($c3po_auth_valid = 0) {
+            return 401 '{"error": "Unauthorized"}';
+        }
+
+        limit_req zone=c3po_api burst=20 nodelay;
+        proxy_pass http://c3po_coordinator;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_http_version 1.1;
+
+        # SSE/long-poll support
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3700s;  # Slightly longer than max wait_for_message timeout (3600s)
+    }
+
+    # All other API endpoints
+    location /api/ {
+        # Validate server secret prefix
+        if ($c3po_auth_valid = 0) {
+            return 401 '{"error": "Unauthorized"}';
+        }
+
+        limit_req zone=c3po_api burst=10 nodelay;
+        proxy_pass http://c3po_coordinator;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Deny everything else
+    location / {
+        return 404;
+    }
+}
+
+# HTTP -> HTTPS redirect
+server {
+    listen 80;
+    server_name c3po.example.com;  # TODO: Your domain
+    return 301 https://$host$request_uri;
+}

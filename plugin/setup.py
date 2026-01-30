@@ -136,13 +136,48 @@ def get_default_machine_name() -> str:
     return platform.node().split('.')[0]  # hostname without domain
 
 
-def add_mcp_server(url: str, machine_name: str) -> bool:
+def generate_api_key(url: str, machine_name: str, admin_key: str) -> str | None:
+    """Generate an API key using the admin endpoint.
+
+    Args:
+        url: Coordinator URL
+        machine_name: Machine name for agent pattern
+        admin_key: Full admin bearer token
+
+    Returns:
+        Full bearer token string, or None on failure
+    """
+    try:
+        body = json.dumps({
+            "agent_pattern": f"{machine_name}/*",
+            "description": "Enrolled via setup.py",
+        }).encode()
+        req = urllib.request.Request(
+            f"{url}/api/admin/keys",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {admin_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            return data.get("bearer_token")
+    except Exception as e:
+        if os.environ.get("C3PO_DEBUG"):
+            error(f"API key generation failed: {e}")
+        return None
+
+
+def add_mcp_server(url: str, machine_name: str, api_key: str = "") -> bool:
     """Add c3po MCP server to Claude Code config.
 
     Configures headers that the coordinator uses to construct the full agent ID:
     - X-Machine-Name: Machine identifier (base for agent ID)
     - X-Project-Name: Project name from cwd (coordinator appends to agent ID)
     - X-Session-ID: Session identifier (for same-session detection)
+    - Authorization: Bearer token for authentication (if api_key provided)
     """
     # Use env var expansion so users can override
     machine_name_header = f"${{C3PO_MACHINE_NAME:-{machine_name}}}"
@@ -152,17 +187,21 @@ def add_mcp_server(url: str, machine_name: str) -> bool:
     # This provides per-instance uniqueness for collision detection
     session_id_header = "${C3PO_SESSION_ID:-$$}"
 
+    cmd = [
+        "claude", "mcp", "add", "c3po",
+        f"{url}/mcp",
+        "-t", "http",
+        "-s", "user",
+        "-H", f"X-Machine-Name: {machine_name_header}",
+        "-H", f"X-Project-Name: {project_header}",
+        "-H", f"X-Session-ID: {session_id_header}",
+    ]
+    if api_key:
+        cmd.extend(["-H", f"Authorization: Bearer {api_key}"])
+
     try:
         result = subprocess.run(
-            [
-                "claude", "mcp", "add", "c3po",
-                f"{url}/mcp",
-                "-t", "http",
-                "-s", "user",
-                "-H", f"X-Machine-Name: {machine_name_header}",
-                "-H", f"X-Project-Name: {project_header}",
-                "-H", f"X-Session-ID: {session_id_header}"
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=30
@@ -261,15 +300,34 @@ def run_setup() -> int:
     else:
         machine_name = default_machine_name
 
+    # Generate API key if admin key is available
+    api_key = ""
+    admin_key = os.environ.get("C3PO_ADMIN_KEY", "")
+    if admin_key:
+        info("Admin key detected, generating API key...")
+        api_key = generate_api_key(coordinator_url, machine_name, admin_key) or ""
+        if api_key:
+            log("API key generated successfully")
+        else:
+            warn("Could not generate API key (continuing without auth)")
+    else:
+        info("No C3PO_ADMIN_KEY set - skipping API key generation")
+        info("Set C3PO_ADMIN_KEY env var to enable authentication")
+
     # Configure MCP server
     print()
     log("Configuring Claude Code...")
 
-    if not add_mcp_server(coordinator_url, machine_name):
+    if not add_mcp_server(coordinator_url, machine_name, api_key):
         error("Failed to configure MCP server.")
         error("You can try manual setup with:")
         print(f"  claude mcp add c3po {coordinator_url}/mcp -t http -s user -H \"X-Machine-Name: {machine_name}\"")
         return 1
+
+    if api_key:
+        print()
+        info("Set this environment variable for hook authentication:")
+        print(f"  export C3PO_API_KEY='{api_key}'")
 
     # Success!
     print()

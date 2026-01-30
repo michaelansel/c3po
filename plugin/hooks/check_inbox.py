@@ -20,7 +20,7 @@ import sys
 import urllib.request
 import urllib.error
 
-from c3po_common import get_coordinator_url, get_session_id, read_agent_id
+from c3po_common import auth_headers, get_coordinator_url, get_session_id, read_agent_id, urlopen_with_ssl
 
 
 # Configuration
@@ -35,13 +35,15 @@ def _heartbeat(assigned_id: str) -> None:
     keep the agent marked as online.
     """
     try:
+        headers = {"X-Agent-ID": assigned_id}
+        headers.update(auth_headers())
         req = urllib.request.Request(
             f"{COORDINATOR_URL}/api/register",
             data=b"",
-            headers={"X-Agent-ID": assigned_id},
+            headers=headers,
             method="POST",
         )
-        urllib.request.urlopen(req, timeout=5)
+        urlopen_with_ssl(req, timeout=5)
     except Exception:
         pass  # Best effort - don't block stop
 
@@ -79,11 +81,13 @@ def main() -> None:
         sys.exit(0)
 
     try:
+        pending_headers = {"X-Agent-ID": assigned_id}
+        pending_headers.update(auth_headers())
         req = urllib.request.Request(
             f"{COORDINATOR_URL}/api/pending",
-            headers={"X-Agent-ID": assigned_id},
+            headers=pending_headers,
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urlopen_with_ssl(req, timeout=5) as resp:
             data = json.loads(resp.read())
 
         count = data.get("count", 0)

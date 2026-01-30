@@ -15,6 +15,7 @@ set -euo pipefail
 # Configuration
 COORDINATOR_URL="${1:-}"
 AGENT_ID="${2:-$(basename "$PWD")}"
+ADMIN_KEY="${C3PO_ADMIN_KEY:-}"
 
 # Colors
 RED='\033[0;31m'
@@ -39,9 +40,15 @@ Arguments:
                        Example: http://nas.local:8420
     agent-id           Identifier for this agent (default: current folder name)
 
+Environment:
+    C3PO_ADMIN_KEY     Admin bearer token for API key generation (optional)
+                       Format: <server_secret>.<admin_key>
+                       When set, enrollment generates a per-agent API key.
+
 Examples:
     $0 http://localhost:8420
     $0 http://nas.local:8420 my-project
+    C3PO_ADMIN_KEY=secret.adminkey $0 http://nas:8420 my-agent
     curl -sSL .../enroll.sh | bash -s -- http://nas:8420 my-agent
 
 EOF
@@ -144,18 +151,57 @@ check_existing() {
     fi
 }
 
+# Generate API key using admin credentials
+generate_api_key() {
+    local url="$1"
+    local machine_name="$2"
+
+    if [[ -z "$ADMIN_KEY" ]]; then
+        return 1  # No admin key, skip API key generation
+    fi
+
+    log "Generating API key for ${machine_name}/*..."
+
+    local response
+    response=$(curl -sf --connect-timeout 5 \
+        -X POST "$url/api/admin/keys" \
+        -H "Authorization: Bearer $ADMIN_KEY" \
+        -H "Content-Type: application/json" \
+        -d "{\"agent_pattern\": \"${machine_name}/*\", \"description\": \"Enrolled via enroll.sh\"}" \
+        2>/dev/null) || {
+        warn "Could not generate API key (admin endpoint may not be available)"
+        return 1
+    }
+
+    # Extract bearer_token from JSON response
+    local bearer_token
+    bearer_token=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['bearer_token'])" 2>/dev/null) || {
+        warn "Could not parse API key response"
+        return 1
+    }
+
+    echo "$bearer_token"
+}
+
 # Add MCP server to Claude Code
 add_mcp_server() {
     local url="$1"
     local agent_id="$2"
+    local api_key="${3:-}"
 
     log "Configuring Claude Code MCP server..."
+
+    # Build header arguments
+    local header_args=(-H "X-Agent-ID: $agent_id")
+    if [[ -n "$api_key" ]]; then
+        header_args+=(-H "Authorization: Bearer $api_key")
+    fi
 
     # Add with user scope so it works from any directory
     if claude mcp add c3po "$url/mcp" \
         -t http \
         -s user \
-        -H "X-Agent-ID: $agent_id"; then
+        "${header_args[@]}"; then
         log "MCP server added successfully"
     else
         error "Failed to add MCP server"
@@ -238,8 +284,25 @@ main() {
         claude mcp remove c3po 2>/dev/null || true
     fi
 
+    # Generate API key if admin credentials are available
+    API_KEY=""
+    if [[ -n "$ADMIN_KEY" ]]; then
+        API_KEY=$(generate_api_key "$COORDINATOR_URL" "$AGENT_ID")
+        if [[ -n "$API_KEY" ]]; then
+            log "API key generated successfully"
+        else
+            warn "Continuing without API key (auth may not be enforced)"
+        fi
+    fi
+
     # Add MCP server
-    add_mcp_server "$COORDINATOR_URL" "$AGENT_ID"
+    add_mcp_server "$COORDINATOR_URL" "$AGENT_ID" "$API_KEY"
+
+    # Export API key for hooks if generated
+    if [[ -n "$API_KEY" ]]; then
+        info "Set this environment variable for hook authentication:"
+        echo "  export C3PO_API_KEY='$API_KEY'"
+    fi
 
     # Verify
     verify_config "$COORDINATOR_URL" "$AGENT_ID"

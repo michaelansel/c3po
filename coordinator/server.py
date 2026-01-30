@@ -17,15 +17,20 @@ from starlette.responses import JSONResponse
 logger = logging.getLogger("c3po.server")
 
 from coordinator.agents import AgentManager
+from coordinator.audit import AuditLogger
+from coordinator.auth import AuthManager
 from coordinator.errors import (
     agent_not_found,
+    forbidden,
     invalid_request,
     rate_limited,
     redis_unavailable,
+    unauthorized,
     RedisConnectionError,
     ErrorCodes,
 )
 from coordinator.messaging import MessageManager
+from coordinator.rate_limit import RateLimiter
 
 
 def create_redis_client(redis_url: str, test_connection: bool = False) -> redis.Redis:
@@ -62,6 +67,64 @@ agent_manager = AgentManager(redis_client)
 # Message manager
 message_manager = MessageManager(redis_client)
 
+# Auth manager
+auth_manager = AuthManager(redis_client)
+
+# Rate limiter
+rate_limiter = RateLimiter(redis_client)
+
+# Audit logger
+audit_logger = AuditLogger(redis_client)
+
+
+def _is_auth_disabled() -> bool:
+    """Check if authentication is explicitly disabled."""
+    return os.environ.get("C3PO_SERVER_SECRET") == AUTH_DISABLED_SENTINEL
+
+
+def _authenticate_rest_request(request) -> dict:
+    """Authenticate a REST API request.
+
+    Returns auth_result dict from AuthManager.validate_bearer_token().
+    If auth is explicitly disabled (C3PO_SERVER_SECRET=none), returns
+    a permissive result.
+    """
+    if _is_auth_disabled():
+        return {"valid": True, "is_admin": True, "key_id": "no-auth", "agent_pattern": "*"}
+
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header:
+        audit_logger.auth_failure("missing_header", source="rest")
+        return {"valid": False, "error": "unauthorized", "message": "Missing Authorization header"}
+
+    result = auth_manager.validate_bearer_token(auth_header)
+    if result.get("valid"):
+        audit_logger.auth_success(result.get("key_id", ""), result.get("agent_pattern", ""), source="rest")
+    else:
+        audit_logger.auth_failure(result.get("message", "unknown"), source="rest")
+    return result
+
+
+def _authenticate_mcp_headers(headers: dict) -> dict:
+    """Authenticate an MCP tool call from headers.
+
+    Returns auth_result dict. If auth is explicitly disabled, returns permissive result.
+    """
+    if _is_auth_disabled():
+        return {"valid": True, "is_admin": True, "key_id": "no-auth", "agent_pattern": "*"}
+
+    auth_header = headers.get("authorization", "")
+    if not auth_header:
+        audit_logger.auth_failure("missing_header", source="mcp")
+        return {"valid": False, "error": "unauthorized", "message": "Missing Authorization header"}
+
+    result = auth_manager.validate_bearer_token(auth_header)
+    if result.get("valid"):
+        audit_logger.auth_success(result.get("key_id", ""), result.get("agent_pattern", ""), source="mcp")
+    else:
+        audit_logger.auth_failure(result.get("message", "unknown"), source="mcp")
+    return result
+
 
 class AgentIdentityMiddleware(Middleware):
     """Extract agent identity from headers and auto-register.
@@ -80,6 +143,18 @@ class AgentIdentityMiddleware(Middleware):
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         headers = get_http_headers()
+
+        # Authenticate MCP request
+        auth_result = _authenticate_mcp_headers(headers)
+        if not auth_result.get("valid"):
+            raise ToolError(
+                f"Authentication failed: {auth_result.get('message', 'Invalid credentials')}. "
+                f"Provide a valid Authorization header."
+            )
+
+        # Store auth result for authorization checks in tools
+        context.fastmcp_context.set_state("auth_result", auth_result)
+
         # Prefer X-Machine-Name, fall back to X-Agent-ID for old configs
         machine_name = headers.get("x-machine-name") or headers.get("x-agent-id")
         if headers.get("x-agent-id") and not headers.get("x-machine-name"):
@@ -128,6 +203,15 @@ class AgentIdentityMiddleware(Middleware):
         return await call_next(context)
 
 
+# Authentication disabled sentinel — setting C3PO_SERVER_SECRET to this value
+# explicitly disables authentication. The coordinator will refuse to start
+# without C3PO_SERVER_SECRET set at all.
+AUTH_DISABLED_SENTINEL = "none"
+
+# Proxy configuration
+BEHIND_PROXY = os.environ.get("C3PO_BEHIND_PROXY", "").lower() in ("1", "true", "yes")
+
+
 # Create the MCP server
 mcp = FastMCP(
     name="c3po",
@@ -141,6 +225,44 @@ mcp = FastMCP(
     ),
 )
 mcp.add_middleware(AgentIdentityMiddleware())
+
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Cache-Control": "no-store",
+}
+
+
+def _get_client_ip(request) -> str:
+    """Get client IP, respecting proxy headers when configured."""
+    if BEHIND_PROXY:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        real_ip = request.headers.get("x-real-ip", "")
+        if real_ip:
+            return real_ip
+    return request.client.host if request.client else "unknown"
+
+
+def SecureJSONResponse(content, status_code=200):
+    """JSONResponse with security headers."""
+    resp = JSONResponse(content, status_code=status_code)
+    for k, v in SECURITY_HEADERS.items():
+        resp.headers[k] = v
+    return resp
+
+
+def _check_rest_rate_limit(request, operation: str, identity: str) -> JSONResponse | None:
+    """Check rate limit for a REST endpoint. Returns 429 response if exceeded, None if OK."""
+    allowed, count = rate_limiter.check_and_record(operation, identity)
+    if not allowed:
+        return JSONResponse(
+            {"error": "Rate limit exceeded", "code": ErrorCodes.RATE_LIMITED},
+            status_code=429,
+        )
+    return None
 
 
 # REST API endpoints for hooks (non-MCP access)
@@ -175,6 +297,19 @@ async def api_register(request):
     optionally X-Project-Name and X-Session-ID.
     Returns the assigned agent_id (may differ from requested if collision resolved).
     """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("message", "Authentication required")},
+            status_code=401,
+        )
+
+    # Rate limit by client IP
+    client_ip = _get_client_ip(request)
+    rate_resp = _check_rest_rate_limit(request, "rest_register", client_ip)
+    if rate_resp:
+        return rate_resp
+
     # Prefer X-Machine-Name, fall back to X-Agent-ID for old configs
     machine_name = request.headers.get("x-machine-name") or request.headers.get("x-agent-id")
     project_name = request.headers.get("x-project-name")
@@ -197,6 +332,13 @@ async def api_register(request):
         return JSONResponse(
             {"error": "Invalid agent ID format"},
             status_code=400,
+        )
+
+    # Check authorization for this agent_id
+    if not auth_manager.check_agent_authorization(auth_result, agent_id):
+        return JSONResponse(
+            {"error": f"Not authorized to register as '{agent_id}'"},
+            status_code=403,
         )
 
     try:
@@ -245,6 +387,19 @@ async def api_pending(request):
     Used by Stop hooks to check inbox.
     Does NOT consume messages - just peeks at the inbox.
     """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("message", "Authentication required")},
+            status_code=401,
+        )
+
+    # Rate limit by client IP
+    client_ip = _get_client_ip(request)
+    rate_resp = _check_rest_rate_limit(request, "rest_pending", client_ip)
+    if rate_resp:
+        return rate_resp
+
     base_id = request.headers.get("x-agent-id")
     project_name = request.headers.get("x-project-name")
 
@@ -265,6 +420,13 @@ async def api_pending(request):
         return JSONResponse(
             {"error": "Invalid agent ID format"},
             status_code=400,
+        )
+
+    # Check authorization
+    if not auth_manager.check_agent_authorization(auth_result, agent_id):
+        return JSONResponse(
+            {"error": f"Not authorized to access inbox for '{agent_id}'"},
+            status_code=403,
         )
 
     try:
@@ -289,6 +451,19 @@ async def api_unregister(request):
     Called by SessionEnd hook.
     Removes the agent from the registry so list_agents doesn't show stale entries.
     """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("message", "Authentication required")},
+            status_code=401,
+        )
+
+    # Rate limit by client IP
+    client_ip = _get_client_ip(request)
+    rate_resp = _check_rest_rate_limit(request, "rest_unregister", client_ip)
+    if rate_resp:
+        return rate_resp
+
     base_id = request.headers.get("x-agent-id")
     project_name = request.headers.get("x-project-name")
 
@@ -311,6 +486,13 @@ async def api_unregister(request):
             status_code=400,
         )
 
+    # Check authorization
+    if not auth_manager.check_agent_authorization(auth_result, agent_id):
+        return JSONResponse(
+            {"error": f"Not authorized to unregister '{agent_id}'"},
+            status_code=403,
+        )
+
     try:
         removed = agent_manager.remove_agent(agent_id)
         logger.info("rest_unregister agent_id=%s removed=%s", agent_id, removed)
@@ -329,6 +511,105 @@ async def api_unregister(request):
             {"error": str(e)},
             status_code=500,
         )
+
+
+# Admin API endpoints (require admin key)
+@mcp.custom_route("/api/admin/keys", methods=["POST"])
+async def api_admin_create_key(request):
+    """Create a new API key. Requires admin authentication.
+
+    Body: {"agent_pattern": "machine/*", "description": "optional"}
+    Returns the full bearer token (shown only once).
+    """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("message", "Authentication required")},
+            status_code=401,
+        )
+    if not auth_result.get("is_admin"):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+    agent_pattern = body.get("agent_pattern", "")
+    if not agent_pattern:
+        return JSONResponse({"error": "agent_pattern is required"}, status_code=400)
+
+    description = body.get("description", "")
+
+    raw_key, metadata = auth_manager.generate_key(agent_pattern, description)
+    full_token = auth_manager.get_full_bearer_token(raw_key)
+
+    return JSONResponse({
+        "bearer_token": full_token,
+        "key_id": metadata["key_id"],
+        "agent_pattern": agent_pattern,
+        "description": description,
+        "message": "Save this token securely - it cannot be retrieved again.",
+    })
+
+
+@mcp.custom_route("/api/admin/keys", methods=["GET"])
+async def api_admin_list_keys(request):
+    """List all API keys (metadata only). Requires admin authentication."""
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("message", "Authentication required")},
+            status_code=401,
+        )
+    if not auth_result.get("is_admin"):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+
+    keys = auth_manager.list_keys()
+    return JSONResponse({"keys": keys})
+
+
+@mcp.custom_route("/api/admin/keys/{key_id}", methods=["DELETE"])
+async def api_admin_revoke_key(request):
+    """Revoke an API key. Requires admin authentication."""
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("message", "Authentication required")},
+            status_code=401,
+        )
+    if not auth_result.get("is_admin"):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+
+    key_id = request.path_params.get("key_id", "")
+    if not key_id:
+        return JSONResponse({"error": "key_id is required"}, status_code=400)
+
+    revoked = auth_manager.revoke_key(key_id)
+    if revoked:
+        return JSONResponse({"status": "ok", "message": f"Key '{key_id}' revoked"})
+    else:
+        return JSONResponse({"error": f"Key '{key_id}' not found"}, status_code=404)
+
+
+@mcp.custom_route("/api/admin/audit", methods=["GET"])
+async def api_admin_audit(request):
+    """Query recent audit events. Requires admin authentication."""
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("message", "Authentication required")},
+            status_code=401,
+        )
+    if not auth_result.get("is_admin"):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+
+    # Parse query params
+    limit = min(int(request.query_params.get("limit", "100")), 1000)
+    event_filter = request.query_params.get("event")
+
+    entries = audit_logger.get_recent(limit=limit, event_filter=event_filter)
+    return JSONResponse({"entries": entries, "count": len(entries)})
 
 
 # Tool implementations (testable standalone functions)
@@ -549,6 +830,9 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
     Falls back to middleware header only if it contains a slash (full ID).
     Raises ToolError if no valid agent_id can be determined.
 
+    Also checks authorization: the authenticated key must have permission
+    to act as the resolved agent_id.
+
     Args:
         ctx: MCP context with state from middleware
         explicit_agent_id: Optional agent_id passed by Claude
@@ -557,31 +841,39 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
         The effective agent_id to use
 
     Raises:
-        ToolError: If no valid agent_id is available
+        ToolError: If no valid agent_id is available or unauthorized
     """
     if explicit_agent_id and explicit_agent_id.strip():
         resolved = explicit_agent_id.strip()
         logger.info("resolve_agent_id explicit=%s", resolved)
-        return resolved
-
-    # Middleware fallback — only accept full agent IDs (with slash)
-    middleware_id = ctx.get_state("agent_id")
-    if middleware_id and "/" in middleware_id:
+    elif (middleware_id := ctx.get_state("agent_id")) and "/" in middleware_id:
+        # Middleware fallback — only accept full agent IDs (with slash)
         logger.warning("resolve_agent_id fallback_to_middleware=%s", middleware_id)
-        return middleware_id
+        resolved = middleware_id
+    else:
+        # No valid agent_id — fail loudly
+        middleware_id = ctx.get_state("agent_id")
+        logger.error(
+            "resolve_agent_id_failed middleware_id=%s (missing slash — "
+            "PreToolUse hook did not inject agent_id)",
+            middleware_id,
+        )
+        raise ToolError(
+            f"Could not determine your agent ID. The PreToolUse hook should inject "
+            f"the agent_id parameter, but it didn't. Middleware only has base ID: "
+            f"'{middleware_id}'. This usually means the ensure_agent_id hook is not "
+            f"running or not finding the session file. Try restarting your session."
+        )
 
-    # No valid agent_id — fail loudly
-    logger.error(
-        "resolve_agent_id_failed middleware_id=%s (missing slash — "
-        "PreToolUse hook did not inject agent_id)",
-        middleware_id,
-    )
-    raise ToolError(
-        f"Could not determine your agent ID. The PreToolUse hook should inject "
-        f"the agent_id parameter, but it didn't. Middleware only has base ID: "
-        f"'{middleware_id}'. This usually means the ensure_agent_id hook is not "
-        f"running or not finding the session file. Try restarting your session."
-    )
+    # Check authorization
+    auth_result = ctx.get_state("auth_result")
+    if auth_result and not auth_manager.check_agent_authorization(auth_result, resolved):
+        err = forbidden(resolved, "act as this agent")
+        logger.warning("authorization_denied agent_id=%s key_id=%s pattern=%s",
+                       resolved, auth_result.get("key_id"), auth_result.get("agent_pattern"))
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    return resolved
 
 
 # Register tools with MCP server
@@ -595,8 +887,15 @@ def ping() -> dict:
 
 
 @mcp.tool()
-def list_agents() -> list[dict]:
+def list_agents(ctx: Context) -> list[dict]:
     """List all registered agents with their status (online/offline)."""
+    # Rate limit by authenticated key_id
+    auth_result = ctx.get_state("auth_result") or {}
+    identity = auth_result.get("key_id", "unknown")
+    allowed, _ = rate_limiter.check_and_record("list_agents", identity)
+    if not allowed:
+        err = rate_limited(identity, 30, 60)
+        raise ToolError(f"{err.message} {err.suggestion}")
     return _list_agents_impl(agent_manager)
 
 
@@ -761,7 +1060,34 @@ def main():
     host = os.environ.get("C3PO_HOST", "0.0.0.0")
 
     logger.info("Starting C3PO coordinator on %s:%s", host, port)
-    logger.info("Redis URL: %s", REDIS_URL)
+    # Redact credentials from Redis URL in logs
+    redacted_url = re.sub(r"://[^@]+@", "://***@", REDIS_URL) if "@" in REDIS_URL else REDIS_URL
+    logger.info("Redis URL: %s", redacted_url)
+
+    # Validate authentication configuration
+    server_secret = os.environ.get("C3PO_SERVER_SECRET", "")
+    if not server_secret:
+        logger.error(
+            "C3PO_SERVER_SECRET is not set. The coordinator requires authentication. "
+            "Set C3PO_SERVER_SECRET to a strong random value. "
+            "To explicitly run without authentication (NOT recommended), "
+            "set C3PO_SERVER_SECRET=none"
+        )
+        raise SystemExit(1)
+
+    if server_secret == AUTH_DISABLED_SENTINEL:
+        logger.warning(
+            "Authentication is DISABLED (C3PO_SERVER_SECRET=none). "
+            "Anyone with network access can use this coordinator. "
+            "This is only appropriate for local development."
+        )
+    else:
+        logger.info("Server secret: configured")
+
+    if os.environ.get("C3PO_ADMIN_KEY"):
+        logger.info("Admin key: configured")
+    else:
+        logger.warning("C3PO_ADMIN_KEY is not set. Admin endpoints (key management) will be inaccessible.")
 
     # Test Redis connection at startup with improved error message
     try:

@@ -55,8 +55,11 @@ bash tests/acceptance/run-acceptance.sh
 - **coordinator/** — FastMCP server with Redis backend (port 8420)
   - `server.py` — MCP tools, REST endpoints, middleware, entry point (`main()`)
   - `agents.py` — `AgentManager`: registration, collision detection, heartbeat tracking
-  - `messaging.py` — `MessageManager`: request/response queues, rate limiting, notifications
+  - `messaging.py` — `MessageManager`: request/response queues, notifications
   - `errors.py` — Structured error codes
+  - `auth.py` — `AuthManager`: two-layer bearer token auth (server secret + API key), key CRUD, agent pattern authorization
+  - `audit.py` — `AuditLogger`: structured JSON audit logging to Python logger + Redis
+  - `rate_limit.py` — `RateLimiter`: per-operation, per-identity sliding window rate limiting
 
 - **plugin/** — Claude Code plugin (hooks + skills)
   - `hooks/register_agent.py` — SessionStart: registers agent via REST
@@ -71,15 +74,17 @@ bash tests/acceptance/run-acceptance.sh
 
 **Collision detection**: When two sessions claim the same agent ID, the second gets a suffix (`-2`, `-3`, etc.). Same session reconnecting just updates the heartbeat.
 
-**Dual interface**: MCP tools for agent-to-agent communication within Claude Code sessions; REST API (`/api/register`, `/api/pending`, `/api/unregister`, `/api/health`) for hook scripts that run outside MCP context.
+**Dual interface**: MCP tools for agent-to-agent communication within Claude Code sessions; REST API (`/api/register`, `/api/pending`, `/api/unregister`, `/api/health`) for hook scripts that run outside MCP context. Admin endpoints (`/api/admin/keys`, `/api/admin/audit`) require admin authentication.
 
-**Adding MCP tools**: When adding a new tool to `coordinator/server.py`, also update `plugin/hooks/hooks.json` (PreToolUse matcher list) and, if the tool uses `agent_id`, `plugin/hooks/ensure_agent_id.py` (TOOLS_NEEDING_AGENT_ID). The matcher must explicitly list all tool names because prefix patterns don't work in plugin hooks.
+**Authentication**: Two-layer bearer token scheme (`Bearer <server_secret>.<api_key>`). Server secret is validated first (can be pre-validated by nginx). API key identifies the agent and restricts which agent IDs it can act as via glob patterns. Admin key (`C3PO_ADMIN_KEY`) bypasses agent pattern restrictions. Auth is enforced when `C3PO_SERVER_SECRET` or `C3PO_ADMIN_KEY` env vars are set; otherwise, all requests are allowed (backwards compatibility).
+
+**Adding MCP tools**: When adding a new tool to `coordinator/server.py`, also update `plugin/hooks/hooks.json` (PreToolUse matcher list) and, if the tool uses `agent_id`, `plugin/hooks/ensure_agent_id.py` (TOOLS_NEEDING_AGENT_ID). The matcher must explicitly list all tool names because prefix patterns don't work in plugin hooks. New modules also need to be added to the `Dockerfile` COPY commands.
 
 **Version bumping**: When committing a version bump, update the version in **both** `plugin/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` in addition to the commit message tag. These manifests must stay in sync.
 
 **Message flow**: Requests go to `c3po:inbox:{agent}` Redis lists. Notifications (separate from messages) go to `c3po:notify:{agent}` to wake blocked `wait_for_request` calls without consuming messages. This separation prevents message loss.
 
-**Rate limiting**: Sliding window (10 requests per 60 seconds per agent) using Redis sorted sets.
+**Rate limiting**: Per-operation sliding window rate limits using Redis sorted sets. Different limits for different operations (e.g., `send_request`: 10/60s, `list_agents`: 30/60s, `rest_register`: 5/60s). Per-agent for MCP tools, per-IP for REST endpoints.
 
 **Agent liveness**: Heartbeat updated on every MCP tool call. Agents go offline after 15 minutes of inactivity. Messages expire after 24 hours.
 
@@ -89,13 +94,21 @@ bash tests/acceptance/run-acceptance.sh
 - `c3po:inbox:{agent_id}` — Request queue (FIFO list)
 - `c3po:notify:{agent_id}` — Notification signals for wait_for_request
 - `c3po:responses:{agent_id}` — Response queue
-- `c3po:rate:{agent_id}` — Rate limit tracking (sorted set)
+- `c3po:rate:{operation}:{identity}` — Rate limit tracking (sorted set)
+- `c3po:api_keys` — Hash of API key hashes to metadata JSON
+- `c3po:key_ids` — Hash of key_id to key hash (for revocation)
+- `c3po:audit` — List of recent audit entries (JSON, newest first)
 
 ### Environment Variables
 
 - `REDIS_URL` — Redis connection (default: `redis://localhost:6379`)
 - `C3PO_PORT` — Server port (default: `8420`)
 - `C3PO_HOST` — Server bind address (default: `0.0.0.0`)
+- `C3PO_SERVER_SECRET` — Shared secret for nginx pre-auth + coordinator validation
+- `C3PO_ADMIN_KEY` — Admin API key (bypasses agent pattern restrictions, manages keys)
+- `C3PO_BEHIND_PROXY` — Set to `true` to trust X-Forwarded-For/X-Real-IP headers
+- `C3PO_API_KEY` — Client bearer token for hook authentication (set by enroll)
+- `C3PO_CA_CERT` — Path to custom CA certificate for HTTPS (hooks)
 - `C3PO_AGENT_ID` / `C3PO_PROJECT_NAME` / `C3PO_SESSION_ID` — Plugin overrides
 
 ## Testing

@@ -10,7 +10,9 @@ import json
 import os
 import platform
 import re
+import ssl
 import sys
+import urllib.request
 
 
 def get_machine_name() -> str:
@@ -89,9 +91,95 @@ def get_coordinator_url() -> str:
     return "http://localhost:8420"
 
 
+def get_ssl_context() -> ssl.SSLContext | None:
+    """Get SSL context with custom CA cert if configured.
+
+    Returns None if no custom CA cert is set (uses default verification).
+    Set C3PO_CA_CERT to the path of a PEM CA certificate file.
+    """
+    ca_cert = os.environ.get("C3PO_CA_CERT")
+    if ca_cert:
+        ctx = ssl.create_default_context(cafile=ca_cert)
+        return ctx
+    return None
+
+
+def urlopen_with_ssl(req, timeout=5):
+    """Open a URL request with optional custom SSL context."""
+    ctx = get_ssl_context()
+    if ctx:
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def get_api_key() -> str | None:
+    """Get the full bearer token for authenticating with the coordinator.
+
+    The token format is "<server_secret>.<api_key>".
+
+    Priority:
+    1. C3PO_API_KEY environment variable (explicit override)
+    2. Authorization header from ~/.claude.json MCP config
+       (written by `claude mcp add -H "Authorization: Bearer ..."`)
+
+    The second source means enrollment automatically makes the key
+    available to hooks — no separate env var needed.
+    """
+    if api_key := os.environ.get("C3PO_API_KEY"):
+        return api_key
+
+    # Read from ~/.claude.json MCP header config (same place get_machine_name reads from)
+    claude_json = os.path.expanduser("~/.claude.json")
+    try:
+        with open(claude_json) as f:
+            config = json.load(f)
+        mcp_servers = config.get("mcpServers", {})
+        c3po_config = mcp_servers.get("c3po", {})
+        headers = c3po_config.get("headers", {})
+        auth_header = headers.get("Authorization", "")
+        if auth_header:
+            # Header value is "Bearer <token>" — extract the token
+            # Handle shell variable syntax: "${C3PO_API_KEY:-actual_token}"
+            match = re.match(r'\$\{[^:}]+:-([^}]+)\}', auth_header)
+            if match:
+                auth_header = match.group(1)
+            if auth_header.lower().startswith("bearer "):
+                return auth_header[7:]  # strip "Bearer " prefix
+            # Plain token (no Bearer prefix in config)
+            if not auth_header.startswith("$"):
+                return auth_header
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+
+    return None
+
+
+def auth_headers() -> dict:
+    """Return Authorization header dict if API key is configured.
+
+    Returns empty dict if no key is set (backwards compatibility).
+    """
+    api_key = get_api_key()
+    if api_key:
+        return {"Authorization": f"Bearer {api_key}"}
+    return {}
+
+
+def _get_runtime_dir() -> str:
+    """Get the best directory for runtime files.
+
+    Prefers XDG_RUNTIME_DIR (user-specific, tmpfs, proper permissions)
+    over TMPDIR or /tmp.
+    """
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir and os.path.isdir(runtime_dir):
+        return runtime_dir
+    return os.environ.get("TMPDIR", "/tmp")
+
+
 def get_agent_id_file(session_id: str) -> str:
     """Get the path to the agent ID file for a given session."""
-    return os.path.join(os.environ.get("TMPDIR", "/tmp"), f"c3po-agent-id-{session_id}")
+    return os.path.join(_get_runtime_dir(), f"c3po-agent-id-{session_id}")
 
 
 def read_agent_id(session_id: str) -> str | None:
@@ -105,10 +193,15 @@ def read_agent_id(session_id: str) -> str | None:
 
 
 def save_agent_id(session_id: str, agent_id: str) -> None:
-    """Save the assigned agent_id for other hooks to read."""
+    """Save the assigned agent_id for other hooks to read.
+
+    Uses os.open with 0o600 permissions to prevent other users from
+    reading agent identity files.
+    """
     try:
         path = get_agent_id_file(session_id)
-        with open(path, "w") as f:
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.write(agent_id)
             f.flush()
             os.fsync(f.fileno())

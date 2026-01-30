@@ -19,7 +19,7 @@ import sys
 import urllib.request
 import urllib.error
 
-from c3po_common import get_coordinator_url, get_session_id, parse_hook_input, read_agent_id, delete_agent_id_file
+from c3po_common import auth_headers, get_coordinator_url, get_session_id, parse_hook_input, read_agent_id, delete_agent_id_file, urlopen_with_ssl
 
 
 # Configuration
@@ -42,12 +42,14 @@ def main() -> None:
         print("[c3po] Warning: no agent ID file found, skipping unregister", file=sys.stderr)
     else:
         try:
+            unreg_headers = {"X-Agent-ID": assigned_id}
+            unreg_headers.update(auth_headers())
             req = urllib.request.Request(
                 f"{COORDINATOR_URL}/api/unregister",
-                headers={"X-Agent-ID": assigned_id},
+                headers=unreg_headers,
                 method="POST",
             )
-            urllib.request.urlopen(req, timeout=5)
+            urlopen_with_ssl(req, timeout=5)
         except (urllib.error.URLError, urllib.error.HTTPError, Exception):
             # Best effort - don't block exit
             pass

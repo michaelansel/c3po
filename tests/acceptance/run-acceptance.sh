@@ -109,6 +109,7 @@ $DOCKER run -d \
     --name "$COORD_CTR" \
     --network "$NET" \
     -e "REDIS_URL=redis://$REDIS_CTR:6379" \
+    -e "C3PO_SERVER_SECRET=none" \
     c3po-accept-coordinator
 
 # Wait for coordinator health
