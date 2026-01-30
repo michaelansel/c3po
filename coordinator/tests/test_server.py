@@ -4,7 +4,7 @@ import pytest
 
 import fakeredis
 
-from coordinator.server import _ping_impl, _list_agents_impl, _register_agent_impl, _get_messages_impl, _wait_for_message_impl
+from coordinator.server import _ping_impl, _list_agents_impl, _register_agent_impl, _set_description_impl, _get_messages_impl, _wait_for_message_impl
 from coordinator.agents import AgentManager
 from coordinator.messaging import MessageManager
 from fastmcp.exceptions import ToolError
@@ -74,6 +74,25 @@ class TestRegisterAgent:
         )
 
         assert result["capabilities"] == ["search", "code"]
+
+
+class TestSetDescription:
+    """Tests for the set_description tool."""
+
+    def test_set_description_via_impl(self, agent_manager):
+        """set_description should update agent description."""
+        agent_manager.register_agent("my-agent")
+        result = _set_description_impl(agent_manager, "my-agent", "Does cool stuff")
+
+        assert result["description"] == "Does cool stuff"
+        # Verify it persists in list
+        agents = _list_agents_impl(agent_manager)
+        assert agents[0]["description"] == "Does cool stuff"
+
+    def test_set_description_unknown_agent(self, agent_manager):
+        """set_description should raise ToolError for unknown agent."""
+        with pytest.raises(ToolError):
+            _set_description_impl(agent_manager, "nonexistent", "desc")
 
 
 @pytest.fixture

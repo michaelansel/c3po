@@ -404,6 +404,21 @@ def _validate_message(message: str) -> None:
         raise ToolError(f"{err.message} {err.suggestion}")
 
 
+def _set_description_impl(
+    manager: AgentManager,
+    agent_id: str,
+    description: str,
+) -> dict:
+    """Set the description for an agent."""
+    try:
+        return manager.set_description(agent_id, description)
+    except KeyError:
+        available = manager.list_agents()
+        agent_ids = [a["id"] for a in available]
+        err = agent_not_found(agent_id, agent_ids)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+
 def _send_request_impl(
     msg_manager: MessageManager,
     agent_manager: AgentManager,
@@ -603,6 +618,26 @@ def register_agent(
     agent_id = ctx.get_state("requested_agent_id") or ctx.get_state("agent_id")
     session_id = ctx.get_state("session_id")
     return _register_agent_impl(agent_manager, agent_id, session_id, name, capabilities)
+
+
+@mcp.tool()
+def set_description(
+    ctx: Context,
+    description: str,
+    agent_id: Optional[str] = None,
+) -> dict:
+    """Set a description for this agent so others know what it does.
+
+    Args:
+        ctx: MCP context (injected automatically)
+        description: A short description of what this agent does
+        agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
+
+    Returns:
+        Updated agent data including the description
+    """
+    effective_id = _resolve_agent_id(ctx, agent_id)
+    return _set_description_impl(agent_manager, effective_id, description)
 
 
 @mcp.tool()

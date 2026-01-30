@@ -71,15 +71,17 @@ C3PO Status:
 ### `/c3po agents`
 
 1. Call `list_agents` tool
-2. Display all agents with their status and last seen time
+2. Display all agents with their status, description, and last seen time
 
 Output format:
 ```
 Registered Agents:
-  agent-1: online (last seen: just now)
-  agent-2: offline (last seen: 5 minutes ago)
+  agent-1: online - "Home automation controller" (last seen: just now)
+  agent-2: offline - "Media server manager" (last seen: 5 minutes ago)
   agent-3: online (last seen: just now)
 ```
+
+Show the description in quotes after the status if the agent has one. Omit it if the description is empty.
 
 ### `/c3po send <agent> <message>`
 
@@ -100,16 +102,17 @@ Response from meshtastic: "Nodes online: node-1234, node-5678"
 
 Enter auto-listen mode: a tight loop that waits for incoming messages with minimal token usage.
 
-1. Print: `Auto-listen mode active. Waiting for messages... (Ctrl+C to exit)`
-2. Call `wait_for_message` with `timeout=3600`
-3. If messages received: process each message fully:
+1. Call `set_description` with a brief description of what this agent/project does (infer from the project context — e.g., repo name, README, or working directory)
+2. Print: `Auto-listen mode active. Waiting for messages... (Ctrl+C to exit)`
+3. Call `wait_for_message` with `timeout=3600`
+4. If messages received: process each message fully:
    - For requests: read the request, use any tools needed to research an answer, then call `respond_to_request` with your response
    - For responses: display the response content to the user
-   - After processing all messages, go back to step 2
-4. If timeout (no messages): print ONLY `Still listening...` and go back to step 2
+   - After processing all messages, go back to step 3
+5. If timeout (no messages): print ONLY `Still listening...` and go back to step 3
 
 **Critical rules for auto-listen mode:**
-- ALWAYS loop back to step 2. Never exit the loop unless the user interrupts with Ctrl+C.
+- ALWAYS loop back to step 3. Never exit the loop unless the user interrupts with Ctrl+C.
 - On timeout, print ONLY "Still listening..." — no extra commentary, no suggestions, no questions.
 - Do NOT ask the user for input during the loop. Process everything autonomously.
 - When processing requests, use your full tool access to research thorough answers before responding.

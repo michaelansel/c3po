@@ -86,6 +86,7 @@ class AgentManager:
             "id": agent_id,
             "session_id": session_id,
             "capabilities": capabilities or [],
+            "description": "",
             "registered_at": now,
             "last_seen": now,
         }
@@ -222,6 +223,28 @@ class AgentManager:
         removed = result > 0
         logger.info("agent_removed agent=%s", agent_id)
         return removed
+
+    def set_description(self, agent_id: str, description: str) -> dict:
+        """Set the description for an agent.
+
+        Args:
+            agent_id: The agent ID to update
+            description: The description string to set
+
+        Returns:
+            Updated agent data dict with status field
+
+        Raises:
+            KeyError: If agent not found
+        """
+        agent_data = self._get_agent_raw(agent_id)
+        if agent_data is None:
+            raise KeyError(f"Agent '{agent_id}' not found")
+
+        agent_data["description"] = description
+        self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(agent_data))
+        logger.info("agent_description_set agent=%s description=%s", agent_id, description[:50])
+        return self._add_status(agent_data)
 
     def count_online_agents(self) -> int:
         """Count the number of currently online agents.

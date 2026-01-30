@@ -248,3 +248,42 @@ class TestCollisionHandling:
 
         assert result["id"] == "agent-a"
         assert result["session_id"] is None
+
+
+class TestSetDescription:
+    """Tests for agent description."""
+
+    def test_set_description(self, agent_manager):
+        """Should set description on registered agent."""
+        agent_manager.register_agent("agent-a")
+        result = agent_manager.set_description("agent-a", "Home automation controller")
+
+        assert result["id"] == "agent-a"
+        assert result["description"] == "Home automation controller"
+
+    def test_set_description_updates(self, agent_manager):
+        """Setting description twice should use the second value."""
+        agent_manager.register_agent("agent-a")
+        agent_manager.set_description("agent-a", "First description")
+        result = agent_manager.set_description("agent-a", "Second description")
+
+        assert result["description"] == "Second description"
+
+    def test_set_description_unknown_agent(self, agent_manager):
+        """Should raise KeyError for unknown agent."""
+        with pytest.raises(KeyError, match="not found"):
+            agent_manager.set_description("unknown-agent", "some description")
+
+    def test_description_default_empty(self, agent_manager):
+        """New agent should have empty description."""
+        result = agent_manager.register_agent("agent-a")
+        assert result["description"] == ""
+
+    def test_description_in_list_agents(self, agent_manager):
+        """Description should appear in list_agents output."""
+        agent_manager.register_agent("agent-a")
+        agent_manager.set_description("agent-a", "My description")
+
+        agents = agent_manager.list_agents()
+        assert len(agents) == 1
+        assert agents[0]["description"] == "My description"
