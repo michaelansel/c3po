@@ -13,25 +13,27 @@ import re
 import sys
 
 
-def get_configured_machine_name() -> str:
+def get_machine_name() -> str:
     """Get the configured machine name from MCP headers or environment.
 
     Priority:
-    1. C3PO_AGENT_ID environment variable
-    2. C3PO_MACHINE_NAME environment variable
-    3. X-Agent-ID header default from ~/.claude.json MCP config
-       (parses shell syntax like "${C3PO_AGENT_ID:-Michaels-Mac-mini}")
+    1. C3PO_MACHINE_NAME environment variable
+    2. C3PO_AGENT_ID environment variable (deprecated fallback)
+    3. X-Machine-Name header default from ~/.claude.json MCP config
+       (parses shell syntax like "${C3PO_MACHINE_NAME:-Michaels-Mac-mini}")
+       Falls back to X-Agent-ID header for old configs.
     4. Fallback to hostname
 
     This ensures hooks use the same machine name that was configured
     during setup, rather than independently computing the hostname
     (which may differ, e.g. inside containers).
     """
-    if agent_id := os.environ.get("C3PO_AGENT_ID"):
-        return agent_id
-
     if machine_name := os.environ.get("C3PO_MACHINE_NAME"):
         return machine_name
+
+    if agent_id := os.environ.get("C3PO_AGENT_ID"):
+        print("[c3po] Warning: C3PO_AGENT_ID is deprecated, use C3PO_MACHINE_NAME instead", file=sys.stderr)
+        return agent_id
 
     # Read from ~/.claude.json MCP header config
     claude_json = os.path.expanduser("~/.claude.json")
@@ -41,19 +43,24 @@ def get_configured_machine_name() -> str:
         mcp_servers = config.get("mcpServers", {})
         c3po_config = mcp_servers.get("c3po", {})
         headers = c3po_config.get("headers", {})
-        agent_id_header = headers.get("X-Agent-ID", "")
-        if agent_id_header:
-            # Parse shell variable syntax: "${C3PO_AGENT_ID:-default}"
-            match = re.match(r'\$\{[^:}]+:-([^}]+)\}', agent_id_header)
+        # Try X-Machine-Name first, fall back to X-Agent-ID for old configs
+        header_value = headers.get("X-Machine-Name", "") or headers.get("X-Agent-ID", "")
+        if header_value:
+            # Parse shell variable syntax: "${C3PO_MACHINE_NAME:-default}" or "${C3PO_AGENT_ID:-default}"
+            match = re.match(r'\$\{[^:}]+:-([^}]+)\}', header_value)
             if match:
                 return match.group(1)
             # Plain value (no shell syntax)
-            if not agent_id_header.startswith("$"):
-                return agent_id_header
+            if not header_value.startswith("$"):
+                return header_value
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
         pass
 
     return platform.node().split('.')[0]
+
+
+# Deprecated alias for backwards compatibility
+get_configured_machine_name = get_machine_name
 
 
 def get_coordinator_url() -> str:

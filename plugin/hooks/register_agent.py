@@ -11,8 +11,8 @@ Exit codes:
 
 Environment variables:
 - C3PO_COORDINATOR_URL: Coordinator URL (default: http://localhost:8420)
-- C3PO_AGENT_ID: Machine/agent identifier (default: from MCP config or hostname)
-- C3PO_MACHINE_NAME: Machine name override
+- C3PO_MACHINE_NAME: Machine name identifier (default: from MCP config or hostname)
+- C3PO_AGENT_ID: Deprecated alias for C3PO_MACHINE_NAME
 """
 
 import json
@@ -21,12 +21,12 @@ import sys
 import urllib.request
 import urllib.error
 
-from c3po_common import get_coordinator_url, get_configured_machine_name, get_session_id, parse_hook_input, save_agent_id
+from c3po_common import get_coordinator_url, get_machine_name, get_session_id, parse_hook_input, save_agent_id
 
 
 # Configuration
 COORDINATOR_URL = get_coordinator_url()
-AGENT_ID = get_configured_machine_name()
+MACHINE_NAME = get_machine_name()
 
 # Project context (for display, not part of agent ID)
 PROJECT_NAME = os.path.basename(os.getcwd())
@@ -36,7 +36,7 @@ def register_with_coordinator(session_id: str) -> dict | None:
     """Register this session with the coordinator via REST API.
 
     Sends headers that coordinator uses to construct full agent_id:
-    - X-Agent-ID: Machine identifier (base)
+    - X-Machine-Name: Machine identifier (base)
     - X-Project-Name: Project name (appended to make full agent_id)
     - X-Session-ID: Session identifier (for same-session detection)
 
@@ -47,7 +47,7 @@ def register_with_coordinator(session_id: str) -> dict | None:
         f"{COORDINATOR_URL}/api/register",
         data=b"",  # POST with empty body
         headers={
-            "X-Agent-ID": AGENT_ID,
+            "X-Machine-Name": MACHINE_NAME,
             "X-Project-Name": PROJECT_NAME,
             "X-Session-ID": session_id,
         },
@@ -85,7 +85,7 @@ def main() -> None:
 
         if registration:
             # The coordinator returns the assigned agent_id (may have collision suffix)
-            assigned_id = registration.get("id", f"{AGENT_ID}/{PROJECT_NAME}")
+            assigned_id = registration.get("id", f"{MACHINE_NAME}/{PROJECT_NAME}")
 
             # Save assigned agent_id keyed by session_id for other hooks to read
             save_agent_id(session_id, assigned_id)
@@ -93,7 +93,7 @@ def main() -> None:
             # Get agent count from health endpoint
             req = urllib.request.Request(
                 f"{COORDINATOR_URL}/api/health",
-                headers={"X-Agent-ID": AGENT_ID},
+                headers={"X-Machine-Name": MACHINE_NAME},
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 health = json.loads(resp.read())

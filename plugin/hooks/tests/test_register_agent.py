@@ -118,7 +118,7 @@ class TestRegisterAgentHook:
         exit_code, stdout, stderr = run_hook(
             env={
                 "C3PO_COORDINATOR_URL": mock_coordinator,
-                "C3PO_AGENT_ID": "test-agent",
+                "C3PO_MACHINE_NAME": "test-agent",
             },
         )
 
@@ -132,7 +132,7 @@ class TestRegisterAgentHook:
         exit_code, stdout, stderr = run_hook(
             env={
                 "C3PO_COORDINATOR_URL": "http://127.0.0.1:9999",  # Non-existent
-                "C3PO_AGENT_ID": "test-agent",
+                "C3PO_MACHINE_NAME": "test-agent",
             },
         )
 
@@ -147,7 +147,7 @@ class TestRegisterAgentHook:
         exit_code, stdout, stderr = run_hook(
             env={
                 "C3PO_COORDINATOR_URL": mock_coordinator,
-                "C3PO_AGENT_ID": "test-agent",
+                "C3PO_MACHINE_NAME": "test-agent",
             },
         )
 
@@ -161,7 +161,7 @@ class TestRegisterAgentHook:
         exit_code, _, _ = run_hook(
             env={
                 "C3PO_COORDINATOR_URL": mock_coordinator,
-                "C3PO_AGENT_ID": "test-agent",
+                "C3PO_MACHINE_NAME": "test-agent",
             },
         )
         assert exit_code == 0
@@ -170,7 +170,7 @@ class TestRegisterAgentHook:
         exit_code, _, _ = run_hook(
             env={
                 "C3PO_COORDINATOR_URL": "http://127.0.0.1:9999",
-                "C3PO_AGENT_ID": "test-agent",
+                "C3PO_MACHINE_NAME": "test-agent",
             },
         )
         assert exit_code == 0
@@ -224,7 +224,7 @@ class TestRegisterAgentHook:
         exit_code, stdout, stderr = run_hook(
             env={
                 "C3PO_COORDINATOR_URL": mock_coordinator,
-                "C3PO_AGENT_ID": "test-agent",
+                "C3PO_MACHINE_NAME": "test-agent",
             },
         )
 
@@ -238,7 +238,7 @@ class TestRegisterAgentHook:
         exit_code, stdout, stderr = run_hook(
             env={
                 "C3PO_COORDINATOR_URL": mock_coordinator,
-                "C3PO_AGENT_ID": "test-agent",
+                "C3PO_MACHINE_NAME": "test-agent",
             },
         )
 
@@ -256,7 +256,7 @@ class TestRegisterAgentHook:
         run_hook(
             env={
                 "C3PO_COORDINATOR_URL": mock_coordinator,
-                "C3PO_AGENT_ID": "test-agent",
+                "C3PO_MACHINE_NAME": "test-agent",
                 "TMPDIR": str(tmp_path),
             },
             stdin_data={"session_id": session_id},
@@ -284,7 +284,7 @@ class TestRegisterAgentHook:
             run_hook(
                 env={
                     "C3PO_COORDINATOR_URL": mock_coordinator,
-                    "C3PO_AGENT_ID": "test-agent",
+                    "C3PO_MACHINE_NAME": "test-agent",
                 },
                 stdin_data={"session_id": session_id},
             )

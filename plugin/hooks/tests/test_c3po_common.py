@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from c3po_common import (
     get_agent_id_file,
-    get_configured_machine_name,
+    get_machine_name,
     get_coordinator_url,
     get_session_id,
     read_agent_id,
@@ -94,17 +94,38 @@ class TestGetCoordinatorUrl:
         assert get_coordinator_url() == "http://localhost:8420"
 
 
-class TestGetConfiguredMachineName:
-    def test_env_c3po_agent_id_takes_priority(self, monkeypatch):
-        monkeypatch.setenv("C3PO_AGENT_ID", "my-custom-id")
-        assert get_configured_machine_name() == "my-custom-id"
-
-    def test_env_c3po_machine_name_second_priority(self, monkeypatch):
-        monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
+class TestGetMachineName:
+    def test_env_c3po_machine_name_takes_priority(self, monkeypatch):
         monkeypatch.setenv("C3PO_MACHINE_NAME", "my-machine")
-        assert get_configured_machine_name() == "my-machine"
+        monkeypatch.setenv("C3PO_AGENT_ID", "should-not-use")
+        assert get_machine_name() == "my-machine"
 
-    def test_reads_from_claude_json_mcp_header(self, tmp_path, monkeypatch):
+    def test_env_c3po_agent_id_deprecated_fallback(self, monkeypatch, capsys):
+        monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
+        monkeypatch.setenv("C3PO_AGENT_ID", "my-custom-id")
+        assert get_machine_name() == "my-custom-id"
+        captured = capsys.readouterr()
+        assert "deprecated" in captured.err.lower()
+
+    def test_reads_x_machine_name_header(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
+        monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps({
+            "mcpServers": {
+                "c3po": {
+                    "url": "http://myhost:8420/mcp",
+                    "headers": {
+                        "X-Machine-Name": "${C3PO_MACHINE_NAME:-haos}"
+                    }
+                }
+            }
+        }))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert get_machine_name() == "haos"
+
+    def test_falls_back_to_x_agent_id_header(self, tmp_path, monkeypatch):
+        """Old configs with X-Agent-ID should still work."""
         monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
         monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
         claude_json = tmp_path / ".claude.json"
@@ -119,7 +140,7 @@ class TestGetConfiguredMachineName:
             }
         }))
         monkeypatch.setenv("HOME", str(tmp_path))
-        assert get_configured_machine_name() == "haos"
+        assert get_machine_name() == "haos"
 
     def test_reads_plain_header_value(self, tmp_path, monkeypatch):
         monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
@@ -130,20 +151,20 @@ class TestGetConfiguredMachineName:
                 "c3po": {
                     "url": "http://myhost:8420/mcp",
                     "headers": {
-                        "X-Agent-ID": "plain-name"
+                        "X-Machine-Name": "plain-name"
                     }
                 }
             }
         }))
         monkeypatch.setenv("HOME", str(tmp_path))
-        assert get_configured_machine_name() == "plain-name"
+        assert get_machine_name() == "plain-name"
 
     def test_fallback_to_hostname(self, tmp_path, monkeypatch):
         monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
         monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))  # No .claude.json
         expected = platform.node().split('.')[0]
-        assert get_configured_machine_name() == expected
+        assert get_machine_name() == expected
 
     def test_ignores_unresolvable_shell_var(self, tmp_path, monkeypatch):
         """If header is just a shell variable with no default, fall back to hostname."""
@@ -155,14 +176,14 @@ class TestGetConfiguredMachineName:
                 "c3po": {
                     "url": "http://myhost:8420/mcp",
                     "headers": {
-                        "X-Agent-ID": "$C3PO_AGENT_ID"
+                        "X-Machine-Name": "$C3PO_MACHINE_NAME"
                     }
                 }
             }
         }))
         monkeypatch.setenv("HOME", str(tmp_path))
         expected = platform.node().split('.')[0]
-        assert get_configured_machine_name() == expected
+        assert get_machine_name() == expected
 
 
 class TestGetSessionId:

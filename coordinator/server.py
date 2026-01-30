@@ -1,5 +1,6 @@
 """C3PO Coordinator - FastMCP server for multi-agent coordination."""
 
+import asyncio
 import logging
 import os
 import re
@@ -66,7 +67,7 @@ class AgentIdentityMiddleware(Middleware):
     """Extract agent identity from headers and auto-register.
 
     Constructs full agent_id from components:
-    - X-Agent-ID: Machine/base identifier (required)
+    - X-Machine-Name: Machine/base identifier (required; falls back to X-Agent-ID)
     - X-Project-Name: Project name (optional, appended to agent_id)
     - X-Session-ID: Session identifier (for same-session detection)
 
@@ -79,43 +80,46 @@ class AgentIdentityMiddleware(Middleware):
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         headers = get_http_headers()
-        base_id = headers.get("x-agent-id")
+        # Prefer X-Machine-Name, fall back to X-Agent-ID for old configs
+        machine_name = headers.get("x-machine-name") or headers.get("x-agent-id")
+        if headers.get("x-agent-id") and not headers.get("x-machine-name"):
+            logger.warning("deprecated_header: X-Agent-ID used instead of X-Machine-Name")
         project_name = headers.get("x-project-name")
         session_id = headers.get("x-session-id")
 
         logger.info(
-            "middleware_headers base_id=%s project_name=%s session_id=%s",
-            base_id, project_name, session_id,
+            "middleware_headers machine_name=%s project_name=%s session_id=%s",
+            machine_name, project_name, session_id,
         )
 
-        if not base_id:
+        if not machine_name:
             raise ToolError(
-                "Missing X-Agent-ID header. "
-                "Set this header to identify your agent."
+                "Missing X-Machine-Name header. "
+                "Set this header to identify your machine."
             )
 
         # Construct full agent_id from components
         # Format: machine/project (e.g., "macbook/myproject")
         if project_name and project_name.strip():
-            agent_id = f"{base_id}/{project_name.strip()}"
+            agent_id = f"{machine_name}/{project_name.strip()}"
             # Register/heartbeat with full identity
             registration = agent_manager.register_agent(agent_id, session_id)
             actual_agent_id = registration["id"]
         else:
             # No project name — can't construct full identity from headers alone.
             # Skip registration (the SessionStart hook already registered).
-            # Store base_id as placeholder; _resolve_agent_id() will prefer
+            # Store machine_name as placeholder; _resolve_agent_id() will prefer
             # the explicit agent_id parameter injected by the PreToolUse hook.
             logger.warning(
-                "no_project_name base_id=%s session_id=%s",
-                base_id, session_id,
+                "no_project_name machine_name=%s session_id=%s",
+                machine_name, session_id,
             )
-            actual_agent_id = base_id  # placeholder
+            actual_agent_id = machine_name  # placeholder
 
         # Store agent_id in context for tools to use
         context.fastmcp_context.set_state("agent_id", actual_agent_id)
-        context.fastmcp_context.set_state("requested_agent_id", agent_id if project_name and project_name.strip() else base_id)
-        context.fastmcp_context.set_state("base_agent_id", base_id)
+        context.fastmcp_context.set_state("requested_agent_id", agent_id if project_name and project_name.strip() else machine_name)
+        context.fastmcp_context.set_state("machine_name", machine_name)
         context.fastmcp_context.set_state("project_name", project_name)
         context.fastmcp_context.set_state("session_id", session_id)
 
@@ -163,22 +167,24 @@ async def api_register(request):
     Hooks can't use MCP (requires session handshake), so this provides
     the same registration functionality via a simple REST endpoint.
 
-    Requires X-Agent-ID header, optionally X-Project-Name and X-Session-ID.
+    Requires X-Machine-Name header (falls back to X-Agent-ID),
+    optionally X-Project-Name and X-Session-ID.
     Returns the assigned agent_id (may differ from requested if collision resolved).
     """
-    base_id = request.headers.get("x-agent-id")
+    # Prefer X-Machine-Name, fall back to X-Agent-ID for old configs
+    machine_name = request.headers.get("x-machine-name") or request.headers.get("x-agent-id")
     project_name = request.headers.get("x-project-name")
     session_id = request.headers.get("x-session-id")
 
-    if not base_id:
+    if not machine_name:
         return JSONResponse(
-            {"error": "Missing X-Agent-ID header"},
+            {"error": "Missing X-Machine-Name header"},
             status_code=400,
         )
 
     # Construct full agent_id from components
     try:
-        agent_id = _construct_agent_id(base_id, project_name)
+        agent_id = _construct_agent_id(machine_name, project_name)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -200,15 +206,15 @@ async def api_register(request):
         )
 
 
-def _construct_agent_id(base_id: str, project_name: Optional[str]) -> str:
+def _construct_agent_id(machine_name: str, project_name: Optional[str]) -> str:
     """Construct full agent_id from components.
 
-    If project_name is provided, returns "base_id/project_name".
-    Otherwise returns base_id as-is (caller already has a composite ID,
+    If project_name is provided, returns "machine_name/project_name".
+    Otherwise returns machine_name as-is (caller already has a composite ID,
     e.g. from the session temp file).
 
     Args:
-        base_id: Machine/base identifier (may already include /project)
+        machine_name: Machine identifier (may already include /project)
         project_name: Optional project name to append
 
     Returns:
@@ -218,13 +224,13 @@ def _construct_agent_id(base_id: str, project_name: Optional[str]) -> str:
         ValueError: If result would be a bare machine name (no slash)
     """
     if project_name and project_name.strip():
-        return f"{base_id}/{project_name.strip()}"
-    if "/" not in base_id:
+        return f"{machine_name}/{project_name.strip()}"
+    if "/" not in machine_name:
         raise ValueError(
-            f"Bare machine name '{base_id}' is not a valid agent ID. "
+            f"Bare machine name '{machine_name}' is not a valid agent ID. "
             f"Provide X-Project-Name header or use a composite ID (machine/project)."
         )
-    return base_id
+    return machine_name
 
 
 @mcp.custom_route("/api/pending", methods=["GET"])
@@ -673,7 +679,7 @@ def respond_to_request(
 
 
 @mcp.tool()
-def wait_for_response(
+async def wait_for_response(
     ctx: Context,
     request_id: str,
     timeout: int = 60,
@@ -694,11 +700,13 @@ def wait_for_response(
         Response data if received, or timeout indicator
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
-    return _wait_for_response_impl(message_manager, effective_id, request_id, timeout)
+    return await asyncio.to_thread(
+        _wait_for_response_impl, message_manager, effective_id, request_id, timeout
+    )
 
 
 @mcp.tool()
-def wait_for_request(
+async def wait_for_request(
     ctx: Context,
     timeout: int = 60,
     agent_id: Optional[str] = None,
@@ -718,7 +726,9 @@ def wait_for_request(
         Request data if received, or timeout indicator
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
-    return _wait_for_request_impl(message_manager, effective_id, timeout)
+    return await asyncio.to_thread(
+        _wait_for_request_impl, message_manager, effective_id, timeout
+    )
 
 
 def main():

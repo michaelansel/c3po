@@ -130,22 +130,22 @@ def check_coordinator(url: str) -> dict | None:
     return None
 
 
-def get_default_machine_id() -> str:
-    """Generate default machine ID from hostname."""
+def get_default_machine_name() -> str:
+    """Generate default machine name from hostname."""
     import platform
     return platform.node().split('.')[0]  # hostname without domain
 
 
-def add_mcp_server(url: str, machine_id: str) -> bool:
+def add_mcp_server(url: str, machine_name: str) -> bool:
     """Add c3po MCP server to Claude Code config.
 
     Configures headers that the coordinator uses to construct the full agent ID:
-    - X-Agent-ID: Machine identifier (base for agent ID)
+    - X-Machine-Name: Machine identifier (base for agent ID)
     - X-Project-Name: Project name from cwd (coordinator appends to agent ID)
     - X-Session-ID: Session identifier (for same-session detection)
     """
     # Use env var expansion so users can override
-    agent_id_header = f"${{C3PO_AGENT_ID:-{machine_id}}}"
+    machine_name_header = f"${{C3PO_MACHINE_NAME:-{machine_name}}}"
     # Project name from PWD basename - coordinator will append to make full agent ID
     project_header = "${C3PO_PROJECT_NAME:-${PWD##*/}}"
     # Session ID: use env var if set, otherwise use $$ (current process PID)
@@ -159,7 +159,7 @@ def add_mcp_server(url: str, machine_id: str) -> bool:
                 f"{url}/mcp",
                 "-t", "http",
                 "-s", "user",
-                "-H", f"X-Agent-ID: {agent_id_header}",
+                "-H", f"X-Machine-Name: {machine_name_header}",
                 "-H", f"X-Project-Name: {project_header}",
                 "-H", f"X-Session-ID: {session_id_header}"
             ],
@@ -242,33 +242,33 @@ def run_setup() -> int:
             agents = health.get("agents_online", 0)
             log(f"Coordinator online! {agents} agent(s) currently connected.")
 
-    # Get machine ID (auto-generate from hostname)
+    # Get machine name (auto-generate from hostname)
     print()
-    default_machine_id = get_default_machine_id()
-    info(f"Machine ID will be: {default_machine_id}")
-    info("(Based on hostname - override with C3PO_AGENT_ID env var)")
+    default_machine_name = get_default_machine_name()
+    info(f"Machine name will be: {default_machine_name}")
+    info("(Based on hostname - override with C3PO_MACHINE_NAME env var)")
     info("(Project context is added automatically per-session)")
     print()
 
-    response = prompt("Use a different machine ID? (y/N)", "n").lower()
+    response = prompt("Use a different machine name? (y/N)", "n").lower()
     if response == "y":
-        machine_id = None
-        while not machine_id:
-            id_input = prompt("Machine ID", default_machine_id)
-            machine_id = validate_agent_id(id_input)
-            if not machine_id:
-                error("Invalid machine ID. Must be 1-64 chars, alphanumeric start, may contain ._-/")
+        machine_name = None
+        while not machine_name:
+            id_input = prompt("Machine name", default_machine_name)
+            machine_name = validate_agent_id(id_input)
+            if not machine_name:
+                error("Invalid machine name. Must be 1-64 chars, alphanumeric start, may contain ._-/")
     else:
-        machine_id = default_machine_id
+        machine_name = default_machine_name
 
     # Configure MCP server
     print()
     log("Configuring Claude Code...")
 
-    if not add_mcp_server(coordinator_url, machine_id):
+    if not add_mcp_server(coordinator_url, machine_name):
         error("Failed to configure MCP server.")
         error("You can try manual setup with:")
-        print(f"  claude mcp add c3po {coordinator_url}/mcp -t http -s user -H \"X-Agent-ID: {machine_id}\"")
+        print(f"  claude mcp add c3po {coordinator_url}/mcp -t http -s user -H \"X-Machine-Name: {machine_name}\"")
         return 1
 
     # Success!
@@ -278,7 +278,7 @@ def run_setup() -> int:
     print(f"{GREEN}{'═' * 60}{NC}")
     print()
     print(f"  Coordinator: {coordinator_url}")
-    print(f"  Machine ID:  {machine_id}")
+    print(f"  Machine name: {machine_name}")
     print()
     print("  Next steps:")
     print("    1. Restart Claude Code to connect")
