@@ -15,6 +15,8 @@ Environment variables:
 - C3PO_AGENT_ID: Deprecated alias for C3PO_MACHINE_NAME
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys

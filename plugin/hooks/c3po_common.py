@@ -6,6 +6,8 @@ and SessionEnd hooks: coordinator URL discovery, agent ID file I/O,
 and stdin JSON parsing.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import platform
