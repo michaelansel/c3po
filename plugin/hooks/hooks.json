@@ -25,7 +25,6 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "mcp__c3po__",
         "hooks": [
           {
             "type": "command",
