@@ -75,6 +75,8 @@ bash tests/acceptance/run-acceptance.sh
 
 **Adding MCP tools**: When adding a new tool to `coordinator/server.py`, also update `plugin/hooks/hooks.json` (PreToolUse matcher list) and, if the tool uses `agent_id`, `plugin/hooks/ensure_agent_id.py` (TOOLS_NEEDING_AGENT_ID). The matcher must explicitly list all tool names because prefix patterns don't work in plugin hooks.
 
+**Version bumping**: When committing a version bump, update the version in **both** `plugin/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` in addition to the commit message tag. These manifests must stay in sync.
+
 **Message flow**: Requests go to `c3po:inbox:{agent}` Redis lists. Notifications (separate from messages) go to `c3po:notify:{agent}` to wake blocked `wait_for_request` calls without consuming messages. This separation prevents message loss.
 
 **Rate limiting**: Sliding window (10 requests per 60 seconds per agent) using Redis sorted sets.
