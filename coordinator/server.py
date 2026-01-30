@@ -72,8 +72,9 @@ class AgentIdentityMiddleware(Middleware):
 
     Full agent_id format: "{machine}/{project}" or just "{machine}" if no project.
 
-    When project_name is missing (MCP calls from static config), we look for
-    an existing online agent with the same base_id and use that.
+    When project_name is missing (MCP calls from static config), we skip
+    registration and rely on the PreToolUse hook's explicit agent_id parameter
+    to provide the correct identity via _resolve_agent_id().
     """
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
@@ -81,6 +82,11 @@ class AgentIdentityMiddleware(Middleware):
         base_id = headers.get("x-agent-id")
         project_name = headers.get("x-project-name")
         session_id = headers.get("x-session-id")
+
+        logger.info(
+            "middleware_headers base_id=%s project_name=%s session_id=%s",
+            base_id, project_name, session_id,
+        )
 
         if not base_id:
             raise ToolError(
@@ -92,27 +98,23 @@ class AgentIdentityMiddleware(Middleware):
         # Format: machine/project (e.g., "macbook/myproject")
         if project_name and project_name.strip():
             agent_id = f"{base_id}/{project_name.strip()}"
+            # Register/heartbeat with full identity
+            registration = agent_manager.register_agent(agent_id, session_id)
+            actual_agent_id = registration["id"]
         else:
-            # No project name - likely an MCP call from static config
-            # Try to find an existing online agent with this base_id
-            existing = agent_manager.find_agent_by_base_id(base_id)
-            if existing:
-                agent_id = existing["id"]
-            else:
-                raise ToolError(
-                    f"Cannot resolve agent identity: no X-Project-Name header "
-                    f"and no online agent found matching base ID '{base_id}'. "
-                    f"Ensure the SessionStart hook has registered this agent first."
-                )
+            # No project name — can't construct full identity from headers alone.
+            # Skip registration (the SessionStart hook already registered).
+            # Store base_id as placeholder; _resolve_agent_id() will prefer
+            # the explicit agent_id parameter injected by the PreToolUse hook.
+            logger.warning(
+                "no_project_name base_id=%s session_id=%s",
+                base_id, session_id,
+            )
+            actual_agent_id = base_id  # placeholder
 
-        # Auto-register/update heartbeat on each tool call
-        # This may return a different agent_id if collision was resolved
-        registration = agent_manager.register_agent(agent_id, session_id)
-        actual_agent_id = registration["id"]
-
-        # Store actual agent_id in context for tools to use
+        # Store agent_id in context for tools to use
         context.fastmcp_context.set_state("agent_id", actual_agent_id)
-        context.fastmcp_context.set_state("requested_agent_id", agent_id)
+        context.fastmcp_context.set_state("requested_agent_id", agent_id if project_name and project_name.strip() else base_id)
         context.fastmcp_context.set_state("base_agent_id", base_id)
         context.fastmcp_context.set_state("project_name", project_name)
         context.fastmcp_context.set_state("session_id", session_id)
@@ -535,8 +537,12 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
         The effective agent_id to use
     """
     if explicit_agent_id and explicit_agent_id.strip():
-        return explicit_agent_id.strip()
-    return ctx.get_state("agent_id")
+        resolved = explicit_agent_id.strip()
+        logger.info("resolve_agent_id explicit=%s", resolved)
+        return resolved
+    middleware_id = ctx.get_state("agent_id")
+    logger.warning("resolve_agent_id fallback_to_middleware=%s", middleware_id)
+    return middleware_id
 
 
 # Register tools with MCP server

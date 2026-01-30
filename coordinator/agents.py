@@ -232,31 +232,3 @@ class AgentManager:
         agents = self.list_agents()
         return sum(1 for a in agents if a.get("status") == "online")
 
-    def find_agent_by_base_id(self, base_id: str) -> Optional[dict]:
-        """Find an online agent whose ID starts with the given base_id.
-
-        Used to match MCP calls (which only have machine name) to their
-        registered agents (which have machine/project format).
-
-        Args:
-            base_id: The base/machine identifier to search for
-
-        Returns:
-            Agent data dict if found, None otherwise.
-            Prefers exact match, then prefix match (base_id/).
-        """
-        agents = self.list_agents()
-        online_agents = [a for a in agents if a.get("status") == "online"]
-
-        # First, try exact match
-        for agent in online_agents:
-            if agent["id"] == base_id:
-                return agent
-
-        # Then, try prefix match (base_id/*)
-        prefix = f"{base_id}/"
-        for agent in online_agents:
-            if agent["id"].startswith(prefix):
-                return agent
-
-        return None
