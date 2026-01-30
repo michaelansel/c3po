@@ -110,6 +110,8 @@ def save_agent_id(session_id: str, agent_id: str) -> None:
         path = get_agent_id_file(session_id)
         with open(path, "w") as f:
             f.write(agent_id)
+            f.flush()
+            os.fsync(f.fileno())
     except OSError:
         pass  # Best effort
 

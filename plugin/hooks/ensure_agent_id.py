@@ -16,6 +16,7 @@ Exit codes:
 import json
 import os
 import sys
+import time
 
 from c3po_common import get_agent_id_file, get_session_id, read_agent_id
 
@@ -80,14 +81,21 @@ def main() -> None:
         )
         sys.exit(0)
 
-    # Read the assigned agent_id from the session file
+    # Read the assigned agent_id from the session file (retry to handle race with SessionStart hook)
     path = get_agent_id_file(session_id)
-    agent_id = read_agent_id(session_id)
+    agent_id = None
+    for attempt in range(5):
+        agent_id = read_agent_id(session_id)
+        if agent_id:
+            if attempt > 0:
+                _log(f"LOOKUP: found agent_id on attempt {attempt + 1}")
+            break
+        time.sleep(0.1 * (2 ** attempt))  # 0.1, 0.2, 0.4, 0.8, 1.6s = ~3s total
     _log(f"LOOKUP: session_id={session_id} path={path} exists={os.path.exists(path)} agent_id={agent_id!r}")
 
     if not agent_id:
         _log(
-            f"INJECTION FAILED: no agent ID file for session {session_id}. "
+            f"INJECTION FAILED: no agent ID file for session {session_id} after 5 retries. "
             f"Expected at: {path}. exists={os.path.exists(path)}. "
             f"SessionStart hook may not have run or failed to register."
         )

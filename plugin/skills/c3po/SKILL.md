@@ -84,7 +84,7 @@ Registered Agents:
 ### `/c3po send <agent> <message>`
 
 1. Call `send_request` tool with target=agent and message=message
-2. Call `wait_for_message` with type="response" and a 60s timeout
+2. Call `wait_for_message` with type="response" and `timeout=3600` (user will Ctrl+C if needed)
 3. Display the response or timeout message
 
 Example:
@@ -101,7 +101,7 @@ Response from meshtastic: "Nodes online: node-1234, node-5678"
 Enter auto-listen mode: a tight loop that waits for incoming messages with minimal token usage.
 
 1. Print: `Auto-listen mode active. Waiting for messages... (Ctrl+C to exit)`
-2. Call `wait_for_message` with `timeout=300`
+2. Call `wait_for_message` with `timeout=3600`
 3. If messages received: process each message fully:
    - For requests: read the request, use any tools needed to research an answer, then call `respond_to_request` with your response
    - For responses: display the response content to the user
@@ -113,7 +113,7 @@ Enter auto-listen mode: a tight loop that waits for incoming messages with minim
 - On timeout, print ONLY "Still listening..." — no extra commentary, no suggestions, no questions.
 - Do NOT ask the user for input during the loop. Process everything autonomously.
 - When processing requests, use your full tool access to research thorough answers before responding.
-- Always use `timeout=300` (5 minutes — the sweet spot for responsiveness vs token cost).
+- Always use `timeout=3600` (1 hour — maximum token savings; the user will Ctrl+C if needed).
 
 ## Environment Variables
 
