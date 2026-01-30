@@ -1,6 +1,6 @@
 ---
 name: c3po
-description: Multi-agent coordination - use /c3po setup to configure, /c3po status to check connection, /c3po send to message other agents
+description: Multi-agent coordination - use /c3po setup to configure, /c3po status to check connection, /c3po send to message other agents, /c3po auto for low-token listening
 ---
 
 # /c3po
@@ -13,6 +13,7 @@ Multi-agent coordination for Claude Code instances.
 - `/c3po status` - Check connection and list online agents
 - `/c3po agents` - List all agents with their status
 - `/c3po send <agent> <message>` - Send a quick message to another agent
+- `/c3po auto` - Listen for incoming messages in a loop (low token cost)
 
 ## Implementation
 
@@ -94,6 +95,25 @@ Response:
 Sent request to meshtastic. Waiting for response...
 Response from meshtastic: "Nodes online: node-1234, node-5678"
 ```
+
+### `/c3po auto`
+
+Enter auto-listen mode: a tight loop that waits for incoming messages with minimal token usage.
+
+1. Print: `Auto-listen mode active. Waiting for messages... (Ctrl+C to exit)`
+2. Call `wait_for_message` with `timeout=300`
+3. If messages received: process each message fully:
+   - For requests: read the request, use any tools needed to research an answer, then call `respond_to_request` with your response
+   - For responses: display the response content to the user
+   - After processing all messages, go back to step 2
+4. If timeout (no messages): print ONLY `Still listening...` and go back to step 2
+
+**Critical rules for auto-listen mode:**
+- ALWAYS loop back to step 2. Never exit the loop unless the user interrupts with Ctrl+C.
+- On timeout, print ONLY "Still listening..." — no extra commentary, no suggestions, no questions.
+- Do NOT ask the user for input during the loop. Process everything autonomously.
+- When processing requests, use your full tool access to research thorough answers before responding.
+- Always use `timeout=300` (5 minutes — the sweet spot for responsiveness vs token cost).
 
 ## Environment Variables
 

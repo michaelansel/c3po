@@ -128,3 +128,18 @@ class TestWaitForMessageImpl:
         """Should raise ToolError for invalid type parameter."""
         with pytest.raises(ToolError):
             _wait_for_message_impl(message_manager, "b", timeout=1, message_type="invalid")
+
+    def test_timeout_clamped_to_max(self, message_manager):
+        """Timeout > 3600 should be clamped, not error. Pre-queue a message so it returns immediately."""
+        message_manager.send_request("sender", "agent-a", "hello")
+        result = _wait_for_message_impl(message_manager, "agent-a", timeout=9999)
+        assert result["status"] == "received"
+        assert len(result["messages"]) == 1
+
+    def test_timeout_minimum_floor(self, message_manager):
+        """Timeout <= 0 should be floored to 1, not error."""
+        result = _wait_for_message_impl(message_manager, "agent-a", timeout=0)
+        assert result["status"] == "timeout"
+
+        result = _wait_for_message_impl(message_manager, "agent-a", timeout=-5)
+        assert result["status"] == "timeout"

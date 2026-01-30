@@ -358,6 +358,7 @@ def _register_agent_impl(
 # Validation patterns
 AGENT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,63}$")
 MAX_MESSAGE_LENGTH = 50000  # 50KB max message size
+MAX_WAIT_TIMEOUT = 3600  # 1 hour max
 
 
 def _validate_agent_id(agent_id: str, field_name: str = "agent_id") -> None:
@@ -503,6 +504,12 @@ def _wait_for_message_impl(
 
     Returns the messages directly, not a notification.
     """
+    # Clamp timeout to valid range
+    if timeout < 1:
+        timeout = 1
+    if timeout > MAX_WAIT_TIMEOUT:
+        timeout = MAX_WAIT_TIMEOUT
+
     if message_type is not None and message_type not in ("request", "response"):
         err = invalid_request("type", "must be 'request', 'response', or omitted for both")
         raise ToolError(f"{err.message} {err.suggestion}")
@@ -688,7 +695,7 @@ async def wait_for_message(
 
     Args:
         ctx: MCP context (injected automatically)
-        timeout: Maximum seconds to wait (default 60)
+        timeout: Maximum seconds to wait (default 60, max 3600)
         type: Optional filter - "request" for incoming requests only,
               "response" for responses only, or omit for both
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
