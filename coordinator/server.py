@@ -568,6 +568,9 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
 
 
 # Register tools with MCP server
+# NOTE: When adding a new tool, also update:
+#   - plugin/hooks/hooks.json  (PreToolUse matcher list)
+#   - plugin/hooks/ensure_agent_id.py  (TOOLS_NEEDING_AGENT_ID, if it uses agent_id)
 @mcp.tool()
 def ping() -> dict:
     """Check coordinator health. Returns pong with timestamp."""

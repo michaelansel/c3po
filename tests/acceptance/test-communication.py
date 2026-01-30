@@ -95,7 +95,7 @@ async def run_test():
 
                     # Test 3: Bob receives the request
                     log(f"Test 3: {bob_id} checking pending requests...")
-                    result = await session_bob.call_tool("get_pending_requests", {})
+                    result = await session_bob.call_tool("get_messages", {"type": "request"})
                     result_text = str(result)
                     print(result_text)
 
@@ -120,8 +120,8 @@ async def run_test():
 
                     # Test 5: Alice receives the response
                     log(f"Test 5: {alice_id} waiting for response...")
-                    result = await session_alice.call_tool("wait_for_response", {
-                        "request_id": request_id,
+                    result = await session_alice.call_tool("wait_for_message", {
+                        "type": "response",
                         "timeout": 10
                     })
                     result_text = str(result)
