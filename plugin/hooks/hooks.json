@@ -25,6 +25,7 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "mcp__c3po__ping|mcp__c3po__list_agents|mcp__c3po__register_agent|mcp__c3po__send_request|mcp__c3po__get_messages|mcp__c3po__respond_to_request|mcp__c3po__wait_for_message",
         "hooks": [
           {
             "type": "command",
