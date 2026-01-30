@@ -45,7 +45,7 @@ bash tests/acceptance/run-acceptance.sh
 ### Deployment
 ```bash
 ./scripts/deploy.sh          # Full deployment
-./scripts/enroll.sh          # Enroll a Claude Code instance
+# Enroll via /c3po setup skill inside Claude Code
 ```
 
 ## Architecture
@@ -107,7 +107,7 @@ bash tests/acceptance/run-acceptance.sh
 - `C3PO_SERVER_SECRET` — Shared secret for nginx pre-auth + coordinator validation
 - `C3PO_ADMIN_KEY` — Admin API key (bypasses agent pattern restrictions, manages keys)
 - `C3PO_BEHIND_PROXY` — Set to `true` to trust X-Forwarded-For/X-Real-IP headers
-- `C3PO_API_KEY` — Client bearer token for hook authentication (set by enroll)
+- `C3PO_API_KEY` — Client bearer token for hook authentication (auto-read from ~/.claude.json)
 - `C3PO_CA_CERT` — Path to custom CA certificate for HTTPS (hooks)
 - `C3PO_AGENT_ID` / `C3PO_PROJECT_NAME` / `C3PO_SESSION_ID` — Plugin overrides
 

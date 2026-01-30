@@ -23,34 +23,59 @@ When the user runs this skill, parse the command and use the appropriate MCP too
 
 Guide the user through configuring their C3PO coordinator connection. This is an interactive process.
 
-1. Ask for the coordinator URL (e.g., `http://nas.local:8420`)
-2. Test connectivity using curl (NOT WebFetch - it has network restrictions):
-   ```bash
-   curl -s <url>/api/health
-   ```
-   Expected response: `{"status":"ok","agents_online":N}`
-3. Ask for an agent ID (suggest hostname/project format as default)
-4. Configure the MCP server using `claude mcp add`:
-   ```bash
-   claude mcp add c3po <url>/mcp -t http -s user -H "X-Machine-Name: <machine-name>"
-   ```
-5. Verify the configuration with `claude mcp list`
-
 IMPORTANT: Always use Bash with curl for HTTP requests, never use WebFetch (it runs in a sandbox with different network access).
+
+**Step 1: Coordinator URL**
+Ask for the coordinator URL (e.g., `http://nas.local:8420`) and test connectivity:
+```bash
+curl -s <url>/api/health
+```
+Expected response: `{"status":"ok","agents_online":N}`
+
+**Step 2: Machine name**
+Ask the user what machine name to use. The default should be the hostname. This becomes the first part of the agent ID (`machine/project`). The project part is added automatically per-session from the working directory.
+
+**Step 3: Authentication**
+The coordinator requires authentication. Ask the user for their **admin bearer token** (this was displayed when the coordinator was deployed). Then generate a per-machine API key:
+
+```bash
+curl -s -X POST <url>/api/admin/keys \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_pattern": "<machine_name>/*", "description": "Enrolled via /c3po setup"}'
+```
+
+Expected response: `{"bearer_token":"<token>","key_id":"...","agent_pattern":"<machine>/*",...}`
+
+Extract the `bearer_token` field — this is the API key for this machine.
+
+If the user doesn't have an admin token, warn them that the coordinator will reject unauthenticated requests and ask if they want to continue anyway.
+
+**Step 4: Configure MCP server**
+Remove any existing config first, then add with all required headers:
+```bash
+claude mcp remove c3po 2>/dev/null
+claude mcp add c3po <url>/mcp -t http -s user \
+  -H "X-Machine-Name: <machine_name>" \
+  -H "Authorization: Bearer <bearer_token>"
+```
+
+If no API key was generated (step 3 skipped), omit the Authorization header.
+
+**Step 5: Verify**
+```bash
+claude mcp list
+```
 
 Output format on success:
 ```
 C3PO Setup Complete!
   Coordinator: http://nas.local:8420
-  Machine ID: macbook (project added automatically per-session)
+  Machine name: macbook (project added automatically per-session)
+  Authentication: configured
 
-Next steps:
-  1. Restart Claude Code to connect
-  2. Use 'list_agents' to see online agents
-  3. Run '/c3po status' to check connection
+Restart Claude Code to connect.
 ```
-
-Note: Users can also run `claude --init` to trigger the Setup hook which provides a similar interactive experience.
 
 ### `/c3po status`
 
