@@ -300,19 +300,24 @@ def run_setup() -> int:
     else:
         machine_name = default_machine_name
 
-    # Generate API key if admin key is available
+    # Generate API key for authentication
     api_key = ""
     admin_key = os.environ.get("C3PO_ADMIN_KEY", "")
+    if not admin_key:
+        print()
+        info("An admin key is needed to generate your API key.")
+        info("(This was shown when the coordinator was deployed.)")
+        info("Leave blank to skip authentication setup.")
+        print()
+        admin_key = prompt("Admin bearer token", "").strip()
+
     if admin_key:
-        info("Admin key detected, generating API key...")
+        info("Generating API key...")
         api_key = generate_api_key(coordinator_url, machine_name, admin_key) or ""
         if api_key:
             log("API key generated successfully")
         else:
-            warn("Could not generate API key (continuing without auth)")
-    else:
-        info("No C3PO_ADMIN_KEY set - skipping API key generation")
-        info("Set C3PO_ADMIN_KEY env var to enable authentication")
+            warn("Could not generate API key (check admin token and coordinator auth settings)")
 
     # Configure MCP server
     print()
@@ -325,9 +330,7 @@ def run_setup() -> int:
         return 1
 
     if api_key:
-        print()
-        info("Set this environment variable for hook authentication:")
-        print(f"  export C3PO_API_KEY='{api_key}'")
+        log("API key stored in MCP config (hooks read it automatically)")
 
     # Success!
     print()
