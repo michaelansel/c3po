@@ -237,13 +237,22 @@ sleep 10
 # -------------------------------------------------------------------
 log "Creating nginx config for mcp.qerk.be..."
 
+# Check if TLS cert already exists (from previous certbot run)
+HAS_TLS=false
+if ssh_run "grep -q 'ssl_certificate' /etc/nginx/sites-available/mcp.qerk.be 2>/dev/null"; then
+    log "TLS certificate found — generating config with HTTPS"
+    HAS_TLS=true
+else
+    warn "No TLS certificate found — generating HTTP-only config"
+    warn "After first deploy, run: sudo certbot --nginx -d mcp.qerk.be"
+fi
+
 ssh_run "cat > ${REMOTE_DIR}/nginx-mcp-qerk-be.conf" << NGINX_EOF
 # C3PO Nginx config for mcp.qerk.be (OAuth + mcp-auth-proxy)
 # Install with:
 #   sudo cp ~/c3po/nginx-mcp-qerk-be.conf /etc/nginx/sites-available/mcp.qerk.be
 #   sudo ln -sf /etc/nginx/sites-available/mcp.qerk.be /etc/nginx/sites-enabled/
-#   sudo nginx -t && sudo systemctl restart nginx
-#   sudo certbot --nginx -d mcp.qerk.be
+#   sudo nginx -t && sudo systemctl reload nginx
 
 upstream c3po_proxy {
     server 127.0.0.1:8421;
@@ -266,7 +275,6 @@ limit_req_zone \$binary_remote_addr zone=c3po_api:10m rate=30r/s;
 limit_req_zone \$binary_remote_addr zone=c3po_admin:1m rate=5r/m;
 
 server {
-    listen 80;
     server_name mcp.qerk.be;
 
     # Security headers
@@ -388,8 +396,33 @@ server {
     location / {
         return 404;
     }
-}
 NGINX_EOF
+
+# Append TLS or HTTP listen directives
+if [ "$HAS_TLS" = true ]; then
+ssh_run "cat >> ${REMOTE_DIR}/nginx-mcp-qerk-be.conf" << 'TLS_EOF'
+
+    listen 443 ssl;
+    ssl_certificate /etc/letsencrypt/live/mcp.qerk.be/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mcp.qerk.be/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+}
+
+# HTTP -> HTTPS redirect
+server {
+    listen 80;
+    server_name mcp.qerk.be;
+    return 301 https://$host$request_uri;
+}
+TLS_EOF
+else
+ssh_run "cat >> ${REMOTE_DIR}/nginx-mcp-qerk-be.conf" << 'HTTP_EOF'
+
+    listen 80;
+}
+HTTP_EOF
+fi
 
 # -------------------------------------------------------------------
 # Step 7: Verify deployment
