@@ -138,7 +138,8 @@ def get_default_machine_name() -> str:
     return platform.node().split('.')[0]  # hostname without domain
 
 
-def add_mcp_server(url: str, machine_name: str, hook_secret: str = "") -> bool:
+def add_mcp_server(url: str, machine_name: str, hook_secret: str = "",
+                   headless: bool = False) -> bool:
     """Add c3po MCP server to Claude Code config.
 
     Configures headers that the coordinator uses to construct the full agent ID:
@@ -147,9 +148,10 @@ def add_mcp_server(url: str, machine_name: str, hook_secret: str = "") -> bool:
     - X-Session-ID: Session identifier (for same-session detection)
     - X-C3PO-Hook-Secret: Hook secret for REST calls (if provided; used by hooks, not MCP)
 
-    Note: MCP authentication is handled via OAuth by mcp-auth-proxy.
-    The hook secret is stored in the MCP config headers so hooks can read it
-    from ~/.claude.json without needing a separate config file.
+    Auth modes:
+    - Interactive (HTTPS): OAuth 2.1 via mcp-auth-proxy at /mcp (browser required)
+    - Headless (HTTPS): Hook secret auth at /mcp-headless (no browser needed)
+    - Direct (HTTP): No OAuth proxy, connects directly to coordinator at /mcp
     """
     # Use env var expansion so users can override
     machine_name_header = f"${{C3PO_MACHINE_NAME:-{machine_name}}}"
@@ -159,9 +161,12 @@ def add_mcp_server(url: str, machine_name: str, hook_secret: str = "") -> bool:
     # This provides per-instance uniqueness for collision detection
     session_id_header = "${C3PO_SESSION_ID:-$$}"
 
+    # Headless mode uses /mcp-headless (hook secret auth, no OAuth)
+    mcp_path = "/mcp-headless" if headless else "/mcp"
+
     cmd = [
         "claude", "mcp", "add", "c3po",
-        f"{url}/mcp",
+        f"{url}{mcp_path}",
         "-t", "http",
         "-s", "user",
         "-H", f"X-Machine-Name: {machine_name_header}",
@@ -273,28 +278,63 @@ def run_setup() -> int:
     else:
         machine_name = default_machine_name
 
-    # Hook secret for REST authentication
+    # Determine auth mode based on coordinator URL
+    is_https = coordinator_url.startswith("https://")
+    headless = False
+
+    if is_https:
+        print()
+        info("This coordinator uses OAuth 2.1 (GitHub login via browser).")
+        info("On first connection, Claude Code will open a browser for auth.")
+        print()
+        response = prompt("Is this a headless system (no browser)? (y/N)", "n").lower()
+        if response == "y":
+            headless = True
+            info("Headless mode: will use hook-secret auth (no browser needed).")
+            info("A hook secret is REQUIRED for headless mode.")
+        else:
+            info("Interactive mode: OAuth will handle MCP authentication.")
+
+    # Hook secret for REST authentication (and headless MCP auth)
     hook_secret = os.environ.get("C3PO_HOOK_SECRET", "")
     if not hook_secret:
         print()
-        info("Hooks (SessionStart/End/Stop) use a shared secret for REST calls.")
-        info("This was generated during coordinator deployment.")
-        info("Leave blank to skip (hooks won't authenticate).")
+        if headless:
+            info("Hook secret is required for headless mode.")
+            info("This was generated during coordinator deployment.")
+        else:
+            info("Hooks (SessionStart/End/Stop) use a shared secret for REST calls.")
+            info("This was generated during coordinator deployment.")
+            info("Leave blank to skip (hooks won't authenticate).")
         print()
         hook_secret = prompt("Hook secret", "").strip()
+
+    if headless and not hook_secret:
+        error("Hook secret is required for headless mode.")
+        error("Get it from the coordinator admin or deployment output.")
+        return 1
 
     # Configure MCP server
     print()
     log("Configuring Claude Code...")
 
-    if not add_mcp_server(coordinator_url, machine_name, hook_secret):
+    if not add_mcp_server(coordinator_url, machine_name, hook_secret, headless):
         error("Failed to configure MCP server.")
+        mcp_path = "/mcp-headless" if headless else "/mcp"
         error("You can try manual setup with:")
-        print(f"  claude mcp add c3po {coordinator_url}/mcp -t http -s user -H \"X-Machine-Name: {machine_name}\"")
+        print(f"  claude mcp add c3po {coordinator_url}{mcp_path} -t http -s user -H \"X-Machine-Name: {machine_name}\"")
         return 1
 
     if hook_secret:
         log("Hook secret stored in MCP config (hooks read it automatically)")
+
+    # Determine auth mode label
+    if headless:
+        auth_mode = "Headless (hook secret)"
+    elif is_https:
+        auth_mode = "OAuth (interactive)"
+    else:
+        auth_mode = "Direct"
 
     # Success!
     print()
@@ -304,7 +344,11 @@ def run_setup() -> int:
     print()
     print(f"  Coordinator: {coordinator_url}")
     print(f"  Machine name: {machine_name}")
+    print(f"  Auth mode:    {auth_mode}")
     print()
+    if is_https and not headless:
+        print("  On first connection, a browser will open for GitHub login.")
+        print()
     print("  Next steps:")
     print("    1. Restart Claude Code to connect")
     print("    2. Use 'list_agents' tool to see online agents")

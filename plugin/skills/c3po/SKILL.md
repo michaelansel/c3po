@@ -26,7 +26,7 @@ Guide the user through configuring their C3PO coordinator connection. This is an
 IMPORTANT: Always use Bash with curl for HTTP requests, never use WebFetch (it runs in a sandbox with different network access).
 
 **Step 1: Coordinator URL**
-Ask for the coordinator URL (e.g., `http://nas.local:8420`) and test connectivity:
+Ask for the coordinator URL (e.g., `https://mcp.qerk.be` or `http://nas.local:8420`) and test connectivity:
 ```bash
 curl -s <url>/api/health
 ```
@@ -35,32 +35,54 @@ Expected response: `{"status":"ok","agents_online":N}`
 **Step 2: Machine name**
 Ask the user what machine name to use. The default should be the hostname. This becomes the first part of the agent ID (`machine/project`). The project part is added automatically per-session from the working directory.
 
-**Step 3: Authentication**
-The coordinator requires authentication. Ask the user for their **admin bearer token** (this was displayed when the coordinator was deployed). Then generate a per-machine API key:
+**Step 3: Authentication mode**
+There are two authentication paths depending on the coordinator setup:
 
-```bash
-curl -s -X POST <url>/api/admin/keys \
-  -H "Authorization: Bearer <admin_token>" \
-  -H "Content-Type: application/json" \
-  -d '{"agent_pattern": "<machine_name>/*", "description": "Enrolled via /c3po setup"}'
-```
+**A) OAuth (public coordinators with HTTPS, e.g., `https://mcp.qerk.be`):**
+MCP authentication uses OAuth 2.1 via GitHub, handled automatically by the auth proxy. When Claude Code first connects, it will open a browser for GitHub login. No manual token configuration needed for MCP.
 
-Expected response: `{"bearer_token":"<token>","key_id":"...","agent_pattern":"<machine>/*",...}`
+However, hooks (SessionStart/End/Stop) use a separate **hook secret** for REST API calls. Ask the user for the hook secret (displayed during coordinator deployment). If they don't have it, warn that hooks won't be able to register/unregister the agent.
 
-Extract the `bearer_token` field — this is the API key for this machine.
+**B) Headless (no browser available, e.g., SSH servers, `claude -p` pipelines):**
+If the user is on a headless system with no browser, use the `/mcp-headless` endpoint instead. This authenticates via hook secret (no OAuth/browser needed). The hook secret is **required** for headless mode.
 
-If the user doesn't have an admin token, warn them that the coordinator will reject unauthenticated requests and ask if they want to continue anyway.
+**C) Direct (local/private coordinators with HTTP, e.g., `http://nas.local:8420`):**
+No OAuth proxy involved. MCP connects directly to the coordinator. Ask for the hook secret if the coordinator requires authentication.
 
 **Step 4: Configure MCP server**
 Remove any existing config first, then add with all required headers:
+
+For **OAuth (interactive)** mode:
 ```bash
 claude mcp remove c3po 2>/dev/null
 claude mcp add c3po <url>/mcp -t http -s user \
   -H "X-Machine-Name: <machine_name>" \
-  -H "Authorization: Bearer <bearer_token>"
+  -H "X-Project-Name: \${C3PO_PROJECT_NAME:-\${PWD##*/}}" \
+  -H "X-Session-ID: \${C3PO_SESSION_ID:-\$\$}" \
+  -H "X-C3PO-Hook-Secret: <hook_secret>"
 ```
 
-If no API key was generated (step 3 skipped), omit the Authorization header.
+For **headless** mode (hook secret required):
+```bash
+claude mcp remove c3po 2>/dev/null
+claude mcp add c3po <url>/mcp-headless -t http -s user \
+  -H "X-Machine-Name: <machine_name>" \
+  -H "X-Project-Name: \${C3PO_PROJECT_NAME:-\${PWD##*/}}" \
+  -H "X-Session-ID: \${C3PO_SESSION_ID:-\$\$}" \
+  -H "X-C3PO-Hook-Secret: <hook_secret>"
+```
+
+For **direct** mode (local coordinator, no OAuth):
+```bash
+claude mcp remove c3po 2>/dev/null
+claude mcp add c3po <url>/mcp -t http -s user \
+  -H "X-Machine-Name: <machine_name>" \
+  -H "X-Project-Name: \${C3PO_PROJECT_NAME:-\${PWD##*/}}" \
+  -H "X-Session-ID: \${C3PO_SESSION_ID:-\$\$}" \
+  -H "X-C3PO-Hook-Secret: <hook_secret>"
+```
+
+If no hook secret was provided, omit the `X-C3PO-Hook-Secret` header.
 
 **Step 5: Verify**
 ```bash
@@ -70,9 +92,9 @@ claude mcp list
 Output format on success:
 ```
 C3PO Setup Complete!
-  Coordinator: http://nas.local:8420
+  Coordinator: https://mcp.qerk.be
   Machine name: macbook (project added automatically per-session)
-  Authentication: configured
+  Auth mode: OAuth (interactive) / Headless (hook secret) / Direct
 
 Restart Claude Code to connect.
 ```

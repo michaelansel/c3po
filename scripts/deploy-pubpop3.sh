@@ -137,7 +137,7 @@ services:
       --no-auto-tls
       --trusted-proxies 172.16.0.0/12
       --http-streaming-only
-      -- http://coordinator:8420/mcp
+      -- http://coordinator:8420
     ports:
       - "127.0.0.1:8421:8421"
     volumes:
@@ -345,10 +345,33 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
-    # MCP endpoint - supports SSE for long-poll
+    # MCP endpoint - supports SSE for long-poll (OAuth via mcp-auth-proxy)
     location /mcp {
         limit_req zone=c3po_api burst=20 nodelay;
         proxy_pass http://c3po_proxy;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Connection "";
+        proxy_http_version 1.1;
+        # SSE/long-poll support
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3700s;
+    }
+
+    # Headless MCP endpoint - hook secret auth (no browser/OAuth needed)
+    location /mcp-headless {
+        if (\$hook_auth_valid = 0) {
+            return 401 '{"error": "Unauthorized: invalid hook secret"}';
+        }
+        limit_req zone=c3po_api burst=20 nodelay;
+        # Strip hook secret, inject proxy bearer token, rewrite path to /mcp
+        proxy_set_header X-C3PO-Hook-Secret "";
+        proxy_set_header Authorization "Bearer ${PROXY_BEARER_TOKEN}";
+        rewrite ^/mcp-headless(.*)$ /mcp\$1 break;
+        proxy_pass http://c3po_coordinator;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
