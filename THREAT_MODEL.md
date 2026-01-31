@@ -11,6 +11,9 @@ Claude Code (MCP)  ─────┘         │                               
                                   │         (OAuth flow + proxy-bearer-token)
 Hook scripts (REST) ──> nginx ────┘──────────────────────────────> coordinator:8420
                         (hook secret → injects proxy-bearer-token)
+
+Claude Code (headless) ──> nginx ──> /mcp-headless ──────────────> coordinator:8420
+                           (hook secret → injects proxy-bearer-token, rewrites to /mcp)
 ```
 
 ## Trust Boundaries
@@ -30,6 +33,11 @@ Hook scripts (REST) ──> nginx ────┘──────────�
 - **Protection**: nginx validates `X-C3PO-Hook-Secret` header, injects `Authorization: Bearer <proxy-token>`
 - **Trust level**: Holder of hook secret (assumed to be the enrolled machine)
 
+### Boundary 3b: nginx → coordinator (headless MCP traffic)
+- **What crosses**: MCP requests via `/mcp-headless` from headless systems
+- **Protection**: nginx validates `X-C3PO-Hook-Secret` header, rewrites path to `/mcp`, injects `Authorization: Bearer <proxy-token>`
+- **Trust level**: Holder of hook secret. Same trust level as hook REST traffic, but grants full MCP access (not just REST).
+
 ### Boundary 4: mcp-auth-proxy → coordinator (proxied MCP)
 - **What crosses**: MCP tool calls with proxy bearer token injected
 - **Protection**: Coordinator validates `C3PO_PROXY_BEARER_TOKEN`
@@ -44,7 +52,8 @@ Hook scripts (REST) ──> nginx ────┘──────────�
 
 | Principal | Authentication | Authorization |
 |-----------|---------------|---------------|
-| MCP client (Claude Desktop/Code) | GitHub OAuth via mcp-auth-proxy | `--github-allowed-users` whitelist |
+| MCP client (interactive) | GitHub OAuth via mcp-auth-proxy | `--github-allowed-users` whitelist |
+| MCP client (headless) | `X-C3PO-Hook-Secret` via `/mcp-headless` (validated by nginx) | Full MCP access (same as OAuth-authenticated) |
 | Hook scripts | `X-C3PO-Hook-Secret` header (validated by nginx) | Allowed to call `/api/*` endpoints |
 | Admin (audit access) | Hook secret → proxy bearer token | Any holder of hook secret can access audit |
 | Coordinator | Trusts proxy bearer token | N/A (server-side) |
@@ -83,8 +92,8 @@ This is acceptable for single-user deployments. Multi-tenancy would require upst
 
 ### T5: Hook secret leak from client
 - **Attack**: Hook secret stored in `~/.claude.json` is compromised
-- **Mitigation**: File permissions (0600 for agent ID files). Secret only grants REST API access, not MCP access. Rate limiting applies.
-- **Residual risk**: Local account compromise would expose this. Hook secret scope is limited to REST endpoints.
+- **Mitigation**: File permissions (0600 for agent ID files). Rate limiting applies.
+- **Residual risk**: Local account compromise would expose this. Since the `/mcp-headless` endpoint exists, a leaked hook secret now grants full MCP access (not just REST). This is equivalent to a full session compromise for single-tenant deployments. The hook secret should be treated with the same sensitivity as an OAuth token.
 
 ### T6: OAuth token theft
 - **Attack**: Attacker steals a GitHub OAuth token
@@ -111,7 +120,12 @@ This is acceptable for single-user deployments. Multi-tenancy would require upst
 - **Mitigation**: Defense-in-depth: coordinator still validates proxy bearer token. Docker container isolation, resource limits, restart policy.
 - **Residual risk**: If proxy is bypassed AND attacker obtains proxy bearer token, full access is possible.
 
-### T11: Health endpoint information disclosure
+### T11: Headless endpoint bypasses OAuth
+- **Attack**: Attacker uses `/mcp-headless` with a stolen hook secret to bypass the GitHub OAuth flow entirely
+- **Mitigation**: Hook secret is validated by nginx (same as REST endpoints). Rate limiting applies. The headless endpoint is functionally equivalent to having a valid OAuth token — it does not grant any additional capabilities beyond what OAuth provides.
+- **Residual risk**: The hook secret now serves as a static credential for full MCP access, unlike OAuth tokens which are time-limited and revocable per-session. Compromise of the hook secret requires rotation via redeployment and re-enrollment of all clients. For single-tenant deployments, this is acceptable since the hook secret was already trusted for REST operations.
+
+### T12: Health endpoint information disclosure
 - **Attack**: Unauthenticated access to `/api/health` reveals agent count
 - **Mitigation**: Intentionally unauthenticated for monitoring. Only reveals agent count, no sensitive data.
 - **Residual risk**: Accepted. Agent count is low-sensitivity information.
@@ -135,4 +149,6 @@ This is acceptable for single-user deployments. Multi-tenancy would require upst
 - [ ] Verify health endpoint works without auth: `curl https://mcp.qerk.be/api/health`
 - [ ] Verify hook endpoint rejects without secret: `curl https://mcp.qerk.be/api/register` (should 401)
 - [ ] Verify MCP endpoint requires OAuth: `curl https://mcp.qerk.be/mcp` (should 401/redirect)
+- [ ] Verify headless endpoint rejects without secret: `curl https://mcp.qerk.be/mcp-headless` (should 401)
+- [ ] Verify headless endpoint works with secret: `curl -H "X-C3PO-Hook-Secret: <secret>" https://mcp.qerk.be/mcp-headless` (should connect)
 - [ ] Verify OAuth discovery: `curl https://mcp.qerk.be/.well-known/oauth-authorization-server`
