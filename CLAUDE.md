@@ -57,7 +57,7 @@ bash tests/acceptance/run-acceptance.sh
   - `agents.py` — `AgentManager`: registration, collision detection, heartbeat tracking
   - `messaging.py` — `MessageManager`: request/response queues, notifications
   - `errors.py` — Structured error codes
-  - `auth.py` — `AuthManager`: two-layer bearer token auth (server secret + API key), key CRUD, agent pattern authorization
+  - `auth.py` — `ProxyAuthManager`: validates proxy bearer token (shared with mcp-auth-proxy and nginx)
   - `audit.py` — `AuditLogger`: structured JSON audit logging to Python logger + Redis
   - `rate_limit.py` — `RateLimiter`: per-operation, per-identity sliding window rate limiting
 
@@ -74,9 +74,9 @@ bash tests/acceptance/run-acceptance.sh
 
 **Collision detection**: When two sessions claim the same agent ID, the second gets a suffix (`-2`, `-3`, etc.). Same session reconnecting just updates the heartbeat.
 
-**Dual interface**: MCP tools for agent-to-agent communication within Claude Code sessions; REST API (`/api/register`, `/api/pending`, `/api/unregister`, `/api/health`) for hook scripts that run outside MCP context. Admin endpoints (`/api/admin/keys`, `/api/admin/audit`) require admin authentication.
+**Dual interface**: MCP tools for agent-to-agent communication within Claude Code sessions; REST API (`/api/register`, `/api/pending`, `/api/unregister`, `/api/health`) for hook scripts that run outside MCP context. Admin endpoint (`/api/admin/audit`) requires proxy token authentication.
 
-**Authentication**: Two-layer bearer token scheme (`Bearer <server_secret>.<api_key>`). Server secret is validated first (can be pre-validated by nginx). API key identifies the agent and restricts which agent IDs it can act as via glob patterns. Admin key (`C3PO_ADMIN_KEY`) bypasses agent pattern restrictions. Auth is enforced when `C3PO_SERVER_SECRET` or `C3PO_ADMIN_KEY` env vars are set; otherwise, all requests are allowed (backwards compatibility).
+**Authentication**: OAuth 2.1 via mcp-auth-proxy (GitHub OAuth). MCP traffic goes through the proxy which handles OAuth and injects a proxy bearer token. Hook REST traffic uses a shared `X-C3PO-Hook-Secret` header that nginx validates and converts to the proxy bearer token. The coordinator validates `C3PO_PROXY_BEARER_TOKEN` on all requests. When `C3PO_PROXY_BEARER_TOKEN` is not set, authentication is disabled (dev mode). Single-tenant: the proxy doesn't forward per-user identity.
 
 **Adding MCP tools**: When adding a new tool to `coordinator/server.py`, also update `plugin/hooks/hooks.json` (PreToolUse matcher list) and, if the tool uses `agent_id`, `plugin/hooks/ensure_agent_id.py` (TOOLS_NEEDING_AGENT_ID). The matcher must explicitly list all tool names because prefix patterns don't work in plugin hooks. New modules also need to be added to the `Dockerfile` COPY commands.
 
@@ -95,8 +95,6 @@ bash tests/acceptance/run-acceptance.sh
 - `c3po:notify:{agent_id}` — Notification signals for wait_for_request
 - `c3po:responses:{agent_id}` — Response queue
 - `c3po:rate:{operation}:{identity}` — Rate limit tracking (sorted set)
-- `c3po:api_keys` — Hash of API key hashes to metadata JSON
-- `c3po:key_ids` — Hash of key_id to key hash (for revocation)
 - `c3po:audit` — List of recent audit entries (JSON, newest first)
 
 ### Environment Variables
@@ -104,12 +102,11 @@ bash tests/acceptance/run-acceptance.sh
 - `REDIS_URL` — Redis connection (default: `redis://localhost:6379`)
 - `C3PO_PORT` — Server port (default: `8420`)
 - `C3PO_HOST` — Server bind address (default: `0.0.0.0`)
-- `C3PO_SERVER_SECRET` — Shared secret for nginx pre-auth + coordinator validation
-- `C3PO_ADMIN_KEY` — Admin API key (bypasses agent pattern restrictions, manages keys)
+- `C3PO_PROXY_BEARER_TOKEN` — Shared token between mcp-auth-proxy/nginx and coordinator (auth disabled if not set)
+- `C3PO_HOOK_SECRET` — Shared secret for hook REST calls (validated by nginx, not coordinator)
 - `C3PO_BEHIND_PROXY` — Set to `true` to trust X-Forwarded-For/X-Real-IP headers
-- `C3PO_API_KEY` — Client bearer token for hook authentication (auto-read from ~/.claude.json)
 - `C3PO_CA_CERT` — Path to custom CA certificate for HTTPS (hooks)
-- `C3PO_AGENT_ID` / `C3PO_PROJECT_NAME` / `C3PO_SESSION_ID` — Plugin overrides
+- `C3PO_MACHINE_NAME` / `C3PO_PROJECT_NAME` / `C3PO_SESSION_ID` — Plugin overrides
 
 ## Testing
 

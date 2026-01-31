@@ -11,7 +11,9 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from c3po_common import (
+    auth_headers,
     get_agent_id_file,
+    get_hook_secret,
     get_machine_name,
     get_coordinator_url,
     get_session_id,
@@ -197,3 +199,74 @@ class TestGetSessionId:
     def test_raises_on_empty_session_id(self):
         with pytest.raises(ValueError, match="session_id missing"):
             get_session_id({"session_id": ""})
+
+
+class TestGetHookSecret:
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("C3PO_HOOK_SECRET", "my-secret")
+        assert get_hook_secret() == "my-secret"
+
+    def test_reads_from_claude_json(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("C3PO_HOOK_SECRET", raising=False)
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps({
+            "mcpServers": {
+                "c3po": {
+                    "url": "http://myhost:8420/mcp",
+                    "headers": {
+                        "X-C3PO-Hook-Secret": "${C3PO_HOOK_SECRET:-actual-secret}"
+                    }
+                }
+            }
+        }))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert get_hook_secret() == "actual-secret"
+
+    def test_reads_plain_header_value(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("C3PO_HOOK_SECRET", raising=False)
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps({
+            "mcpServers": {
+                "c3po": {
+                    "url": "http://myhost:8420/mcp",
+                    "headers": {
+                        "X-C3PO-Hook-Secret": "plain-secret"
+                    }
+                }
+            }
+        }))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert get_hook_secret() == "plain-secret"
+
+    def test_returns_none_when_not_configured(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("C3PO_HOOK_SECRET", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))  # No .claude.json
+        assert get_hook_secret() is None
+
+    def test_ignores_unresolvable_shell_var(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("C3PO_HOOK_SECRET", raising=False)
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps({
+            "mcpServers": {
+                "c3po": {
+                    "url": "http://myhost:8420/mcp",
+                    "headers": {
+                        "X-C3PO-Hook-Secret": "$C3PO_HOOK_SECRET"
+                    }
+                }
+            }
+        }))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert get_hook_secret() is None
+
+
+class TestAuthHeaders:
+    def test_returns_hook_secret_header(self, monkeypatch):
+        monkeypatch.setenv("C3PO_HOOK_SECRET", "my-secret")
+        headers = auth_headers()
+        assert headers == {"X-C3PO-Hook-Secret": "my-secret"}
+
+    def test_returns_empty_when_no_secret(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("C3PO_HOOK_SECRET", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))  # No .claude.json
+        assert auth_headers() == {}

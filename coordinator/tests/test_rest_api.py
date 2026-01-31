@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 
 from coordinator.agents import AgentManager
 from coordinator.audit import AuditLogger
-from coordinator.auth import AuthManager
+from coordinator.auth import ProxyAuthManager
 from coordinator.messaging import MessageManager
 from coordinator.rate_limit import RateLimiter
 
@@ -34,7 +34,7 @@ def message_manager(redis_client):
 def mcp_app(redis_client, agent_manager, message_manager, monkeypatch):
     """Create the MCP app with test Redis client."""
     # Disable auth for REST API tests (tests exercise endpoint logic, not auth)
-    monkeypatch.setenv("C3PO_SERVER_SECRET", "none")
+    monkeypatch.delenv("C3PO_PROXY_BEARER_TOKEN", raising=False)
 
     # Monkeypatch the module-level clients before importing server
     import coordinator.server as server_module
@@ -42,7 +42,7 @@ def mcp_app(redis_client, agent_manager, message_manager, monkeypatch):
     monkeypatch.setattr(server_module, "redis_client", redis_client)
     monkeypatch.setattr(server_module, "agent_manager", agent_manager)
     monkeypatch.setattr(server_module, "message_manager", message_manager)
-    monkeypatch.setattr(server_module, "auth_manager", AuthManager(redis_client))
+    monkeypatch.setattr(server_module, "auth_manager", ProxyAuthManager())
     monkeypatch.setattr(server_module, "rate_limiter", RateLimiter(redis_client))
     monkeypatch.setattr(server_module, "audit_logger", AuditLogger(redis_client))
 

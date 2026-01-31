@@ -138,48 +138,18 @@ def get_default_machine_name() -> str:
     return platform.node().split('.')[0]  # hostname without domain
 
 
-def generate_api_key(url: str, machine_name: str, admin_key: str) -> str | None:
-    """Generate an API key using the admin endpoint.
-
-    Args:
-        url: Coordinator URL
-        machine_name: Machine name for agent pattern
-        admin_key: Full admin bearer token
-
-    Returns:
-        Full bearer token string, or None on failure
-    """
-    try:
-        body = json.dumps({
-            "agent_pattern": f"{machine_name}/*",
-            "description": "Enrolled via setup.py",
-        }).encode()
-        req = urllib.request.Request(
-            f"{url}/api/admin/keys",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {admin_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            return data.get("bearer_token")
-    except Exception as e:
-        if os.environ.get("C3PO_DEBUG"):
-            error(f"API key generation failed: {e}")
-        return None
-
-
-def add_mcp_server(url: str, machine_name: str, api_key: str = "") -> bool:
+def add_mcp_server(url: str, machine_name: str, hook_secret: str = "") -> bool:
     """Add c3po MCP server to Claude Code config.
 
     Configures headers that the coordinator uses to construct the full agent ID:
     - X-Machine-Name: Machine identifier (base for agent ID)
     - X-Project-Name: Project name from cwd (coordinator appends to agent ID)
     - X-Session-ID: Session identifier (for same-session detection)
-    - Authorization: Bearer token for authentication (if api_key provided)
+    - X-C3PO-Hook-Secret: Hook secret for REST calls (if provided; used by hooks, not MCP)
+
+    Note: MCP authentication is handled via OAuth by mcp-auth-proxy.
+    The hook secret is stored in the MCP config headers so hooks can read it
+    from ~/.claude.json without needing a separate config file.
     """
     # Use env var expansion so users can override
     machine_name_header = f"${{C3PO_MACHINE_NAME:-{machine_name}}}"
@@ -198,8 +168,9 @@ def add_mcp_server(url: str, machine_name: str, api_key: str = "") -> bool:
         "-H", f"X-Project-Name: {project_header}",
         "-H", f"X-Session-ID: {session_id_header}",
     ]
-    if api_key:
-        cmd.extend(["-H", f"Authorization: Bearer {api_key}"])
+    if hook_secret:
+        hook_secret_header = f"${{C3PO_HOOK_SECRET:-{hook_secret}}}"
+        cmd.extend(["-H", f"X-C3PO-Hook-Secret: {hook_secret_header}"])
 
     try:
         result = subprocess.run(
@@ -302,37 +273,28 @@ def run_setup() -> int:
     else:
         machine_name = default_machine_name
 
-    # Generate API key for authentication
-    api_key = ""
-    admin_key = os.environ.get("C3PO_ADMIN_KEY", "")
-    if not admin_key:
+    # Hook secret for REST authentication
+    hook_secret = os.environ.get("C3PO_HOOK_SECRET", "")
+    if not hook_secret:
         print()
-        info("An admin key is needed to generate your API key.")
-        info("(This was shown when the coordinator was deployed.)")
-        info("Leave blank to skip authentication setup.")
+        info("Hooks (SessionStart/End/Stop) use a shared secret for REST calls.")
+        info("This was generated during coordinator deployment.")
+        info("Leave blank to skip (hooks won't authenticate).")
         print()
-        admin_key = prompt("Admin bearer token", "").strip()
-
-    if admin_key:
-        info("Generating API key...")
-        api_key = generate_api_key(coordinator_url, machine_name, admin_key) or ""
-        if api_key:
-            log("API key generated successfully")
-        else:
-            warn("Could not generate API key (check admin token and coordinator auth settings)")
+        hook_secret = prompt("Hook secret", "").strip()
 
     # Configure MCP server
     print()
     log("Configuring Claude Code...")
 
-    if not add_mcp_server(coordinator_url, machine_name, api_key):
+    if not add_mcp_server(coordinator_url, machine_name, hook_secret):
         error("Failed to configure MCP server.")
         error("You can try manual setup with:")
         print(f"  claude mcp add c3po {coordinator_url}/mcp -t http -s user -H \"X-Machine-Name: {machine_name}\"")
         return 1
 
-    if api_key:
-        log("API key stored in MCP config (hooks read it automatically)")
+    if hook_secret:
+        log("Hook secret stored in MCP config (hooks read it automatically)")
 
     # Success!
     print()

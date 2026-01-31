@@ -85,21 +85,21 @@ ensure_secrets() {
         log "Generating new secrets..."
         local redis_password
         redis_password=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-        local server_secret
-        server_secret=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-        local admin_key
-        admin_key=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+        local proxy_bearer_token
+        proxy_bearer_token=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+        local hook_secret
+        hook_secret=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 
         ssh "$NAS_HOST" "mkdir -p ${NAS_DATA_DIR} && cat > ${SECRETS_FILE} << 'SECRETS_EOF'
 REDIS_PASSWORD=${redis_password}
-C3PO_SERVER_SECRET=${server_secret}
-C3PO_ADMIN_KEY=${admin_key}
+C3PO_PROXY_BEARER_TOKEN=${proxy_bearer_token}
+C3PO_HOOK_SECRET=${hook_secret}
 SECRETS_EOF
 chmod 600 ${SECRETS_FILE}"
 
         log "Secrets generated and stored at ${SECRETS_FILE}"
-        warn "Admin bearer token: ${server_secret}.${admin_key}"
-        warn "Save this token — it is needed for enrollment and key management."
+        warn "Hook secret: ${hook_secret}"
+        warn "Save this — it is needed for client enrollment."
     fi
 }
 
@@ -116,10 +116,9 @@ cmd_deploy() {
     # Load secrets (don't log them)
     local secrets_content
     secrets_content=$(ssh "$NAS_HOST" "cat ${SECRETS_FILE}")
-    local redis_password server_secret admin_key
+    local redis_password proxy_bearer_token
     redis_password=$(echo "$secrets_content" | grep REDIS_PASSWORD | cut -d= -f2)
-    server_secret=$(echo "$secrets_content" | grep C3PO_SERVER_SECRET | cut -d= -f2)
-    admin_key=$(echo "$secrets_content" | grep C3PO_ADMIN_KEY | cut -d= -f2)
+    proxy_bearer_token=$(echo "$secrets_content" | grep C3PO_PROXY_BEARER_TOKEN | cut -d= -f2)
 
     # Stop existing containers
     ssh "$NAS_HOST" "${NAS_DOCKER} stop c3po-coordinator c3po-redis 2>/dev/null || true"
@@ -153,8 +152,7 @@ cmd_deploy() {
         --network c3po-net \
         --restart unless-stopped \
         -e REDIS_URL='${redis_url}' \
-        -e C3PO_SERVER_SECRET='${server_secret}' \
-        -e C3PO_ADMIN_KEY='${admin_key}' \
+        -e C3PO_PROXY_BEARER_TOKEN='${proxy_bearer_token}' \
         -p ${COORDINATOR_PORT}:8420 \
         c3po-coordinator:latest"
 
