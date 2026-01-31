@@ -141,10 +141,8 @@ class AgentIdentityMiddleware(Middleware):
         )
 
         if not machine_name:
-            raise ToolError(
-                "Missing X-Machine-Name header. "
-                "Set this header to identify your machine."
-            )
+            machine_name = "anonymous"
+            logger.warning("no_machine_name: defaulting to 'anonymous' (client may not support custom headers)")
 
         # Construct full agent_id from components
         # Format: machine/project (e.g., "macbook/myproject")
@@ -153,9 +151,18 @@ class AgentIdentityMiddleware(Middleware):
             # Register/heartbeat with full identity
             registration = agent_manager.register_agent(agent_id, session_id)
             actual_agent_id = registration["id"]
+        elif machine_name == "anonymous":
+            # No project name and no machine name — likely Claude Desktop/Claude.ai
+            # which can't set custom headers or run hooks.
+            # Auto-register with "anonymous/chat" so the agent has a valid ID.
+            # Collision detection will append -2, -3, etc. for concurrent sessions.
+            agent_id = "anonymous/chat"
+            registration = agent_manager.register_agent(agent_id, session_id)
+            actual_agent_id = registration["id"]
+            logger.info("auto_registered_anonymous agent_id=%s", actual_agent_id)
         else:
-            # No project name — can't construct full identity from headers alone.
-            # Skip registration (the SessionStart hook already registered).
+            # Has machine name but no project name — Claude Code session where
+            # the SessionStart hook already registered with full identity.
             # Store machine_name as placeholder; _resolve_agent_id() will prefer
             # the explicit agent_id parameter injected by the PreToolUse hook.
             logger.warning(
