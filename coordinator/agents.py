@@ -95,6 +95,25 @@ class AgentManager:
         logger.info("agent_registered agent=%s session=%s", agent_id, session_id)
         return self._add_status(agent_data)
 
+    def touch_heartbeat(self, agent_id: str) -> bool:
+        """Update last_seen for an agent without full registration logic.
+
+        Lightweight heartbeat for long-polling connections (e.g., wait_for_message).
+
+        Args:
+            agent_id: The agent ID to refresh
+
+        Returns:
+            True if agent was found and updated, False otherwise
+        """
+        existing = self._get_agent_raw(agent_id)
+        if existing is None:
+            return False
+        existing["last_seen"] = datetime.now(timezone.utc).isoformat()
+        self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(existing))
+        logger.debug("agent_touch_heartbeat agent=%s", agent_id)
+        return True
+
     def _get_agent_raw(self, agent_id: str) -> Optional[dict]:
         """Get raw agent data without status calculation.
 

@@ -670,6 +670,7 @@ def _wait_for_message_impl(
     agent_id: str,
     timeout: int = 60,
     message_type: Optional[str] = None,
+    heartbeat_fn: Optional[callable] = None,
 ) -> dict:
     """Wait for any message (request or response) to arrive.
 
@@ -685,7 +686,7 @@ def _wait_for_message_impl(
         err = invalid_request("type", "must be 'request', 'response', or omitted for both")
         raise ToolError(f"{err.message} {err.suggestion}")
     logger.info("wait_for_message agent=%s timeout=%d type=%s", agent_id, timeout, message_type)
-    result = msg_manager.wait_for_message(agent_id, timeout, message_type)
+    result = msg_manager.wait_for_message(agent_id, timeout, message_type, heartbeat_fn=heartbeat_fn)
     if result is None:
         return {
             "status": "timeout",
@@ -905,7 +906,8 @@ async def wait_for_message(
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
     return await asyncio.to_thread(
-        _wait_for_message_impl, message_manager, effective_id, timeout, type
+        _wait_for_message_impl, message_manager, effective_id, timeout, type,
+        heartbeat_fn=lambda: agent_manager.touch_heartbeat(effective_id),
     )
 
 

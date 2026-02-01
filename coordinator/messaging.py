@@ -456,6 +456,7 @@ class MessageManager:
         agent_id: str,
         timeout: int = 60,
         message_type: Optional[str] = None,
+        heartbeat_fn: Optional[callable] = None,
     ) -> Optional[list[dict]]:
         """Wait for any message (request or response) to arrive, then return all pending.
 
@@ -489,6 +490,13 @@ class MessageManager:
 
             blpop_timeout = max(1, int(min(remaining, 10)))
             result = self.redis.blpop(notify_key, timeout=blpop_timeout)
+
+            # Refresh heartbeat so long-polling agents stay "online"
+            if heartbeat_fn:
+                try:
+                    heartbeat_fn()
+                except Exception:
+                    pass  # Don't let heartbeat failures break message waiting
 
             if result is not None:
                 # Got a notification — drain messages
