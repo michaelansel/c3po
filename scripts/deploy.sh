@@ -312,7 +312,26 @@ server {
         proxy_pass http://c3po_coordinator;
     }
 
-    # Agent endpoints — server_secret prefix validated by nginx
+    # MCP endpoint — rewrite /agent/mcp to /mcp for FastMCP
+    location = /agent/mcp {
+        if (\$agent_auth_valid = 0) {
+            return 401 '{"error": "Unauthorized"}';
+        }
+        limit_req zone=c3po_api burst=10 nodelay;
+        rewrite ^/agent(/mcp)\$ \$1 break;
+        proxy_pass http://c3po_coordinator;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Connection "";
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3700s;
+    }
+
+    # Agent REST endpoints — server_secret prefix validated by nginx
     location /agent/ {
         if (\$agent_auth_valid = 0) {
             return 401 '{"error": "Unauthorized"}';
@@ -325,7 +344,7 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header Connection "";
         proxy_http_version 1.1;
-        # SSE/long-poll support for /agent/mcp
+        # SSE/long-poll support
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 3700s;

@@ -31,9 +31,26 @@ The script handles all setup interactively (coordinator URL, machine name, API k
 
 ### `/c3po status`
 
-1. Call `ping` tool to verify coordinator connection
-2. Call `list_agents` tool to get online agents
-3. Display connection status and agent count
+**Step 1: Try calling `ping` MCP tool.**
+
+If it works, continue to the normal status display (step 2).
+
+If MCP tools are unavailable (tool not found, connection error, etc.), run diagnostics:
+
+1. Check if credentials file exists: `~/.claude/c3po-credentials.json`
+   - If missing: tell user "C3PO is not set up. Run `/c3po setup` to configure."  Stop here.
+2. Check if MCP server is registered: run `claude mcp list` via Bash and look for `c3po` in the output.
+   - If not found: tell user "C3PO MCP server is not registered. Run `/c3po setup` to configure." Stop here.
+3. If credentials and MCP config both exist but ping still failed: read the `coordinator_url` from the credentials file and `curl` the health endpoint (`<url>/api/health`).
+   - If health check fails: tell user "Coordinator at <url> is unreachable. Check the URL or run `/c3po setup` to reconfigure."
+   - If health check succeeds: tell user "Coordinator is reachable but MCP connection is failing. Try restarting this Claude Code session, or run `/c3po setup` to reconfigure."
+
+Stop here after diagnostics — do not proceed to step 2.
+
+**Step 2: Normal status display.**
+
+1. Call `list_agents` tool to get online agents
+2. Display connection status and agent count
 
 Output format:
 ```
