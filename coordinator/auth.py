@@ -168,28 +168,22 @@ class AuthManager:
     def _validate_admin_key(self, token: str) -> dict:
         """Validate admin key for /admin/* paths.
 
-        Accepts two formats:
-        - New: Bearer <server_secret>.<admin_key> (same prefix as API keys)
-        - Legacy: Bearer <admin_key> (for backwards compatibility)
-
-        The server_secret prefix allows nginx to validate all /admin/* and
-        /agent/* requests with a single prefix check.
+        Format: Bearer <server_secret>.<admin_key>
         """
         if not self._admin_key:
             return {"valid": False, "error": "Admin key not configured"}
+        if not self._server_secret:
+            return {"valid": False, "error": "Server secret not configured (required for admin auth)"}
 
-        # Try new format: server_secret.admin_key
         dot_idx = token.find(".")
-        if dot_idx >= 0 and self._server_secret:
-            provided_secret = token[:dot_idx]
-            provided_admin_key = token[dot_idx + 1:]
-            if (hmac.compare_digest(provided_secret, self._server_secret)
-                    and provided_admin_key
-                    and hmac.compare_digest(provided_admin_key, self._admin_key)):
-                return {"valid": True, "source": "admin"}
+        if dot_idx < 0:
+            return {"valid": False, "error": "Invalid admin key format (expected server_secret.admin_key)"}
 
-        # Legacy format: just admin_key (no dot)
-        if hmac.compare_digest(token, self._admin_key):
+        provided_secret = token[:dot_idx]
+        provided_admin_key = token[dot_idx + 1:]
+        if (hmac.compare_digest(provided_secret, self._server_secret)
+                and provided_admin_key
+                and hmac.compare_digest(provided_admin_key, self._admin_key)):
             return {"valid": True, "source": "admin"}
 
         logger.warning("auth_failed reason=invalid_admin_key")

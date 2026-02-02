@@ -172,6 +172,10 @@ class AgentIdentityMiddleware(Middleware):
         # Format: machine/project (e.g., "macbook/myproject")
         if project_name and project_name.strip():
             agent_id = f"{machine_name}/{project_name.strip()}"
+            # Enforce agent_pattern from API key before registration
+            agent_pattern = context.fastmcp_context.get_state("auth_agent_pattern") or "*"
+            if agent_pattern != "*" and not AuthManager.validate_agent_pattern(agent_id, agent_pattern):
+                raise ToolError(f"Agent ID '{agent_id}' does not match key pattern '{agent_pattern}'")
             # Register/heartbeat with full identity
             registration = agent_manager.register_agent(agent_id, session_id)
             actual_agent_id = registration["id"]
@@ -181,6 +185,10 @@ class AgentIdentityMiddleware(Middleware):
             # Auto-register with "anonymous/chat" so the agent has a valid ID.
             # Collision detection will append -2, -3, etc. for concurrent sessions.
             agent_id = "anonymous/chat"
+            # Enforce agent_pattern from API key before registration
+            agent_pattern = context.fastmcp_context.get_state("auth_agent_pattern") or "*"
+            if agent_pattern != "*" and not AuthManager.validate_agent_pattern(agent_id, agent_pattern):
+                raise ToolError(f"Agent ID '{agent_id}' does not match key pattern '{agent_pattern}'")
             registration = agent_manager.register_agent(agent_id, session_id)
             actual_agent_id = registration["id"]
             logger.info("auto_registered_anonymous agent_id=%s", actual_agent_id)
@@ -937,6 +945,7 @@ def register_agent(
     """
     # Use requested_agent_id so explicit registration can retry collision resolution
     agent_id = ctx.get_state("requested_agent_id") or ctx.get_state("agent_id")
+    _enforce_agent_pattern(ctx, agent_id)
     session_id = ctx.get_state("session_id")
     return _register_agent_impl(agent_manager, agent_id, session_id, name, capabilities)
 
@@ -1101,6 +1110,12 @@ def main():
             "yes" if has_proxy_token else "no",
             "yes" if has_admin_key else "no",
         )
+        if has_admin_key and not has_server_secret:
+            logger.error(
+                "C3PO_ADMIN_KEY is set but C3PO_SERVER_SECRET is not. "
+                "Both must be set for admin authentication to work. "
+                "Admin endpoints will reject all requests."
+            )
     else:
         logger.warning(
             "No auth tokens configured (C3PO_SERVER_SECRET, C3PO_PROXY_BEARER_TOKEN, C3PO_ADMIN_KEY). "

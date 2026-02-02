@@ -110,44 +110,56 @@ class TestAuthManagerAdminKey:
     @pytest.fixture(autouse=True)
     def setup_admin_key(self, monkeypatch):
         monkeypatch.setenv("C3PO_ADMIN_KEY", "test-admin-key")
-        monkeypatch.delenv("C3PO_SERVER_SECRET", raising=False)
+        monkeypatch.setenv("C3PO_SERVER_SECRET", "test-server-secret")
         monkeypatch.delenv("C3PO_PROXY_BEARER_TOKEN", raising=False)
 
-    def test_valid_admin_key_legacy(self):
-        """Correct admin key passes on /admin path (legacy format)."""
+    def test_valid_admin_key_composite(self):
+        """Correct server_secret.admin_key passes on /admin path."""
         manager = AuthManager()
-        result = manager.validate_request("Bearer test-admin-key", "/admin")
+        result = manager.validate_request("Bearer test-server-secret.test-admin-key", "/admin")
         assert result["valid"] is True
         assert result["source"] == "admin"
 
     def test_invalid_admin_key(self):
         """Wrong admin key is rejected."""
         manager = AuthManager()
-        result = manager.validate_request("Bearer wrong-key", "/admin")
+        result = manager.validate_request("Bearer test-server-secret.wrong-key", "/admin")
         assert result["valid"] is False
         assert "Invalid admin key" in result["error"]
 
-    def test_valid_admin_key_composite(self, monkeypatch):
-        """Correct server_secret.admin_key passes on /admin path (new format)."""
-        monkeypatch.setenv("C3PO_SERVER_SECRET", "test-server-secret")
+    def test_bare_admin_key_rejected_with_server_secret(self):
+        """Bare admin_key (without server_secret prefix) is rejected when server_secret is set."""
         manager = AuthManager()
-        result = manager.validate_request("Bearer test-server-secret.test-admin-key", "/admin")
-        assert result["valid"] is True
-        assert result["source"] == "admin"
+        result = manager.validate_request("Bearer test-admin-key", "/admin")
+        assert result["valid"] is False
+        assert "Invalid admin key" in result["error"]
 
-    def test_invalid_admin_key_composite_bad_secret(self, monkeypatch):
+    def test_bare_admin_key_rejected_without_server_secret(self, monkeypatch):
+        """Bare admin_key is rejected when server_secret is not set (server_secret required)."""
+        monkeypatch.delenv("C3PO_SERVER_SECRET", raising=False)
+        manager = AuthManager()
+        result = manager.validate_request("Bearer test-admin-key", "/admin")
+        assert result["valid"] is False
+        assert "Server secret not configured" in result["error"]
+
+    def test_invalid_admin_key_composite_bad_secret(self):
         """Wrong server_secret in composite admin token is rejected."""
-        monkeypatch.setenv("C3PO_SERVER_SECRET", "test-server-secret")
         manager = AuthManager()
         result = manager.validate_request("Bearer wrong-secret.test-admin-key", "/admin")
         assert result["valid"] is False
 
-    def test_invalid_admin_key_composite_bad_key(self, monkeypatch):
+    def test_invalid_admin_key_composite_bad_key(self):
         """Wrong admin_key in composite admin token is rejected."""
-        monkeypatch.setenv("C3PO_SERVER_SECRET", "test-server-secret")
         manager = AuthManager()
         result = manager.validate_request("Bearer test-server-secret.wrong-key", "/admin")
         assert result["valid"] is False
+
+    def test_no_dot_in_token_rejected(self):
+        """Token without dot separator is rejected with format error."""
+        manager = AuthManager()
+        result = manager.validate_request("Bearer nodothere", "/admin")
+        assert result["valid"] is False
+        assert "Invalid admin key format" in result["error"]
 
 
 class TestAuthManagerApiKey:

@@ -67,8 +67,8 @@ def _agent_auth(api_key=None):
 
 
 def _admin_auth():
-    """Return valid admin Authorization header."""
-    return f"Bearer {ADMIN_KEY}"
+    """Return valid admin Authorization header (composite format)."""
+    return f"Bearer {SERVER_SECRET}.{ADMIN_KEY}"
 
 
 class TestHealthEndpointNoAuth:

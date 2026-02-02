@@ -278,7 +278,7 @@ class TestReplyValidation:
         """Valid reply is accepted."""
         result = _reply_impl(
             message_manager,
-            "from-agent",
+            "receiver",
             "sender::receiver::12345678",
             "This is my response"
         )

@@ -289,6 +289,13 @@ class MessageManager:
         # Parse message_id to find original sender
         original_sender, original_recipient = self._parse_message_id(message_id)
 
+        # Authorization: only the original recipient can reply to a message
+        if from_agent != original_recipient:
+            raise ValueError(
+                f"Agent '{from_agent}' is not the recipient of message {message_id} "
+                f"(recipient is '{original_recipient}')"
+            )
+
         now = datetime.now(timezone.utc).isoformat()
 
         reply_data = {

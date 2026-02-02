@@ -333,6 +333,33 @@ class TestReplyHandling:
         assert sender == "alice"
         assert receiver == "bob"
 
+    def test_reply_rejects_unauthorized_agent(self, message_manager):
+        """reply should reject an agent that is not the original recipient."""
+        # agent-a sends to agent-b
+        msg = message_manager.send_message("agent-a", "agent-b", "Help?")
+        message_id = msg["id"]
+
+        # agent-c tries to reply (not the recipient)
+        with pytest.raises(ValueError, match="not the recipient"):
+            message_manager.reply(
+                message_id=message_id,
+                from_agent="agent-c",
+                response="Intercepted!",
+            )
+
+    def test_reply_rejects_crafted_message_id(self, message_manager):
+        """reply should reject a crafted message_id targeting another agent's queue."""
+        # Craft a fake message_id that would route reply to agent-x's queue
+        crafted_id = "agent-x::agent-y::fakeuuid1"
+
+        # agent-z tries to reply using the crafted ID (agent-z != agent-y)
+        with pytest.raises(ValueError, match="not the recipient"):
+            message_manager.reply(
+                message_id=crafted_id,
+                from_agent="agent-z",
+                response="Injected reply",
+            )
+
     def test_reply_with_error_status(self, message_manager):
         """reply should support error status."""
         msg = message_manager.send_message("agent-a", "agent-b", "Do something")

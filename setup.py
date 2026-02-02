@@ -111,7 +111,7 @@ def validate_url(url: str) -> str | None:
 
     # Add http:// if no scheme
     if not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
+        url = f"https://{url}"
 
     # Basic URL validation
     if not re.match(r'^https?://[^\s/$.?#].[^\s]*$', url):
