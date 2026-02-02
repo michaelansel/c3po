@@ -21,83 +21,13 @@ When the user runs this skill, parse the command and use the appropriate MCP too
 
 ### `/c3po setup`
 
-Guide the user through configuring their C3PO coordinator connection. This is an interactive process.
+Run the setup script. Find the plugin root directory (where this skill file is located, two directories up from SKILL.md) and execute:
 
-IMPORTANT: Always use Bash with curl for HTTP requests, never use WebFetch (it runs in a sandbox with different network access).
-
-**Step 1: Coordinator URL**
-Ask for the coordinator URL (e.g., `https://mcp.qerk.be` or `http://nas.local:8420`) and test connectivity:
 ```bash
-curl -s <url>/api/health
-```
-Expected response: `{"status":"ok","agents_online":N}`
-
-**Step 2: Machine name**
-Ask the user what machine name to use. The default should be the hostname. This becomes the first part of the agent ID (`machine/project`). The project part is added automatically per-session from the working directory.
-
-**Step 3: Authentication mode**
-There are two authentication paths depending on the coordinator setup:
-
-**A) OAuth (public coordinators with HTTPS, e.g., `https://mcp.qerk.be`):**
-MCP authentication uses OAuth 2.1 via GitHub, handled automatically by the auth proxy. When Claude Code first connects, it will open a browser for GitHub login. No manual token configuration needed for MCP.
-
-However, hooks (SessionStart/End/Stop) use a separate **hook secret** for REST API calls. Ask the user for the hook secret (displayed during coordinator deployment). If they don't have it, warn that hooks won't be able to register/unregister the agent.
-
-**B) Headless (no browser available, e.g., SSH servers, `claude -p` pipelines):**
-If the user is on a headless system with no browser, use the `/mcp-headless` endpoint instead. This authenticates via hook secret (no OAuth/browser needed). The hook secret is **required** for headless mode.
-
-**C) Direct (local/private coordinators with HTTP, e.g., `http://nas.local:8420`):**
-No OAuth proxy involved. MCP connects directly to the coordinator. Ask for the hook secret if the coordinator requires authentication.
-
-**Step 4: Configure MCP server**
-Remove any existing config first, then add with all required headers:
-
-For **OAuth (interactive)** mode:
-```bash
-claude mcp remove c3po 2>/dev/null
-claude mcp add c3po <url>/mcp -t http -s user \
-  -H "X-Machine-Name: <machine_name>" \
-  -H "X-Project-Name: \${C3PO_PROJECT_NAME:-\${PWD##*/}}" \
-  -H "X-Session-ID: \${C3PO_SESSION_ID:-\$\$}" \
-  -H "X-C3PO-Hook-Secret: <hook_secret>"
+python3 <plugin_root>/setup.py
 ```
 
-For **headless** mode (hook secret required):
-```bash
-claude mcp remove c3po 2>/dev/null
-claude mcp add c3po <url>/mcp-headless -t http -s user \
-  -H "X-Machine-Name: <machine_name>" \
-  -H "X-Project-Name: \${C3PO_PROJECT_NAME:-\${PWD##*/}}" \
-  -H "X-Session-ID: \${C3PO_SESSION_ID:-\$\$}" \
-  -H "X-C3PO-Hook-Secret: <hook_secret>"
-```
-
-For **direct** mode (local coordinator, no OAuth):
-```bash
-claude mcp remove c3po 2>/dev/null
-claude mcp add c3po <url>/mcp -t http -s user \
-  -H "X-Machine-Name: <machine_name>" \
-  -H "X-Project-Name: \${C3PO_PROJECT_NAME:-\${PWD##*/}}" \
-  -H "X-Session-ID: \${C3PO_SESSION_ID:-\$\$}" \
-  -H "X-C3PO-Hook-Secret: <hook_secret>"
-```
-
-If no hook secret was provided, omit the `X-C3PO-Hook-Secret` header.
-
-**Step 5: Verify**
-```bash
-claude mcp list
-```
-
-Output format on success:
-```
-C3PO Setup Complete!
-  Coordinator: https://mcp.qerk.be
-  Machine name: macbook (project added automatically per-session)
-  Auth mode: OAuth (interactive) / Headless (hook secret) / Direct
-
-Restart Claude Code to connect.
-```
+The script handles all setup interactively (coordinator URL, machine name, API key enrollment). No AI interpretation needed.
 
 ### `/c3po status`
 
@@ -132,8 +62,8 @@ Show the description in quotes after the status if the agent has one. Omit it if
 
 ### `/c3po send <agent> <message>`
 
-1. Call `send_request` tool with target_agent=agent and message=message
-2. Call `wait_for_message` with type="response" and `timeout=3600` (user will Ctrl+C if needed)
+1. Call `send_message` tool with to=agent and message=message
+2. Call `wait_for_message` with type="reply" and `timeout=3600` (user will Ctrl+C if needed)
 3. Display the response or timeout message
 
 Example:
@@ -141,8 +71,8 @@ Example:
 User: /c3po send meshtastic "What nodes are online?"
 
 Response:
-Sent request to meshtastic. Waiting for response...
-Response from meshtastic: "Nodes online: node-1234, node-5678"
+Sent message to meshtastic. Waiting for reply...
+Reply from meshtastic: "Nodes online: node-1234, node-5678"
 ```
 
 ### `/c3po auto`
@@ -153,8 +83,8 @@ Enter auto-listen mode: a tight loop that waits for incoming messages with minim
 2. Print: `Auto-listen mode active. Waiting for messages... (Ctrl+C to exit)`
 3. Call `wait_for_message` with `timeout=3600`
 4. If messages received: process each message fully:
-   - For requests: read the request, use any tools needed to research an answer, then call `respond_to_request` with your response
-   - For responses: display the response content to the user
+   - For incoming messages (type="message"): read the message, use any tools needed to research an answer, then call `reply` with your response
+   - For replies (type="reply"): display the reply content to the user
    - After processing all messages, go back to step 3
 5. If timeout (no messages): print ONLY `Still listening...` and go back to step 3
 
@@ -162,7 +92,7 @@ Enter auto-listen mode: a tight loop that waits for incoming messages with minim
 - ALWAYS loop back to step 3. Never exit the loop unless the user interrupts with Ctrl+C.
 - On timeout, print ONLY "Still listening..." — no extra commentary, no suggestions, no questions.
 - Do NOT ask the user for input during the loop. Process everything autonomously.
-- When processing requests, use your full tool access to research thorough answers before responding.
+- When processing messages, use your full tool access to research thorough answers before responding.
 - Always use `timeout=3600` (1 hour — maximum token savings; the user will Ctrl+C if needed).
 
 ## Environment Variables
@@ -180,7 +110,7 @@ The full agent ID is constructed as `{machine}/{project}` (e.g., `macbook/myproj
 
 - If coordinator is unavailable, display a friendly message suggesting to check the URL
 - If target agent not found, list available agents as suggestions
-- If request times out, suggest checking if the target agent is online
+- If message times out, suggest checking if the target agent is online
 
 ## Examples
 
@@ -201,6 +131,6 @@ Ask another agent for help:
 ```
 User: /c3po send meshtastic "What MQTT topics do you publish to?"
 
-Sent request to meshtastic. Waiting for response...
-Response from meshtastic: "I publish to mesh/node/# for node status and mesh/msg/# for messages."
+Sent message to meshtastic. Waiting for reply...
+Reply from meshtastic: "I publish to mesh/node/# for node status and mesh/msg/# for messages."
 ```

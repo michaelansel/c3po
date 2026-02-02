@@ -14,7 +14,8 @@ logger = logging.getLogger("c3po.rate_limit")
 
 # Rate limit configurations: (max_requests, window_seconds)
 RATE_LIMITS = {
-    "send_request": (10, 60),
+    "send_message": (10, 60),
+    "reply": (10, 60),
     "get_messages": (30, 60),
     "wait_for_message": (30, 60),
     "list_agents": (30, 60),

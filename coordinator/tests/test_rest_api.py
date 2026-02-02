@@ -1,4 +1,4 @@
-"""Tests for REST API endpoints (/api/health, /api/pending)."""
+"""Tests for REST API endpoints (/api/health, /agent/api/*, /admin/api/*)."""
 
 import fakeredis
 import pytest
@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 
 from coordinator.agents import AgentManager
 from coordinator.audit import AuditLogger
-from coordinator.auth import ProxyAuthManager
+from coordinator.auth import AuthManager
 from coordinator.messaging import MessageManager
 from coordinator.rate_limit import RateLimiter
 
@@ -34,7 +34,9 @@ def message_manager(redis_client):
 def mcp_app(redis_client, agent_manager, message_manager, monkeypatch):
     """Create the MCP app with test Redis client."""
     # Disable auth for REST API tests (tests exercise endpoint logic, not auth)
+    monkeypatch.delenv("C3PO_SERVER_SECRET", raising=False)
     monkeypatch.delenv("C3PO_PROXY_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("C3PO_ADMIN_KEY", raising=False)
 
     # Monkeypatch the module-level clients before importing server
     import coordinator.server as server_module
@@ -42,7 +44,7 @@ def mcp_app(redis_client, agent_manager, message_manager, monkeypatch):
     monkeypatch.setattr(server_module, "redis_client", redis_client)
     monkeypatch.setattr(server_module, "agent_manager", agent_manager)
     monkeypatch.setattr(server_module, "message_manager", message_manager)
-    monkeypatch.setattr(server_module, "auth_manager", ProxyAuthManager())
+    monkeypatch.setattr(server_module, "auth_manager", AuthManager(redis_client))
     monkeypatch.setattr(server_module, "rate_limiter", RateLimiter(redis_client))
     monkeypatch.setattr(server_module, "audit_logger", AuditLogger(redis_client))
 
@@ -87,34 +89,34 @@ class TestHealthEndpoint:
 
 
 class TestPendingEndpoint:
-    """Tests for /api/pending endpoint."""
+    """Tests for /agent/api/pending endpoint."""
 
     @pytest.mark.asyncio
-    async def test_pending_requires_agent_id_header(self, client):
-        """Pending endpoint should require X-Agent-ID header."""
-        response = await client.get("/api/pending")
+    async def test_pending_requires_machine_name_header(self, client):
+        """Pending endpoint should require X-Machine-Name header."""
+        response = await client.get("/agent/api/pending")
 
         assert response.status_code == 400
         data = response.json()
-        assert "Missing X-Agent-ID header" in data["error"]
+        assert "Missing X-Machine-Name header" in data["error"]
 
     @pytest.mark.asyncio
     async def test_pending_returns_empty_for_unknown_agent(self, client):
         """Pending endpoint should return empty for unknown agent."""
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "unknown-agent/project"}
+            "/agent/api/pending", headers={"X-Machine-Name": "unknown-agent/project"}
         )
 
         assert response.status_code == 200
         data = response.json()
         assert data["count"] == 0
-        assert data["requests"] == []
+        assert data["messages"] == []
 
     @pytest.mark.asyncio
     async def test_pending_rejects_bare_machine_name(self, client):
         """Pending endpoint should reject bare machine name without project."""
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "bare-machine"}
+            "/agent/api/pending", headers={"X-Machine-Name": "bare-machine"}
         )
 
         assert response.status_code == 400
@@ -129,67 +131,67 @@ class TestPendingEndpoint:
         agent_manager.register_agent("sender/proj")
         agent_manager.register_agent("receiver/proj")
 
-        # Send a request
-        message_manager.send_request(
+        # Send a message
+        message_manager.send_message(
             "sender/proj", "receiver/proj", "Test message", context="Test context"
         )
 
         # Check pending - should show 1
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "receiver/proj"}
+            "/agent/api/pending", headers={"X-Machine-Name": "receiver/proj"}
         )
         assert response.status_code == 200
         data = response.json()
         assert data["count"] == 1
-        assert len(data["requests"]) == 1
-        assert data["requests"][0]["message"] == "Test message"
+        assert len(data["messages"]) == 1
+        assert data["messages"][0]["message"] == "Test message"
 
         # Check again - should still show 1 (not consumed)
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "receiver/proj"}
+            "/agent/api/pending", headers={"X-Machine-Name": "receiver/proj"}
         )
         data = response.json()
         assert data["count"] == 1
 
     @pytest.mark.asyncio
-    async def test_pending_returns_multiple_requests(
+    async def test_pending_returns_multiple_messages(
         self, client, message_manager, agent_manager
     ):
-        """Pending endpoint should return all pending requests."""
+        """Pending endpoint should return all pending messages."""
         agent_manager.register_agent("sender/proj")
         agent_manager.register_agent("receiver/proj")
 
-        # Send multiple requests
-        message_manager.send_request("sender/proj", "receiver/proj", "Message 1")
-        message_manager.send_request("sender/proj", "receiver/proj", "Message 2")
-        message_manager.send_request("sender/proj", "receiver/proj", "Message 3")
+        # Send multiple messages
+        message_manager.send_message("sender/proj", "receiver/proj", "Message 1")
+        message_manager.send_message("sender/proj", "receiver/proj", "Message 2")
+        message_manager.send_message("sender/proj", "receiver/proj", "Message 3")
 
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "receiver/proj"}
+            "/agent/api/pending", headers={"X-Machine-Name": "receiver/proj"}
         )
 
         assert response.status_code == 200
         data = response.json()
         assert data["count"] == 3
-        assert len(data["requests"]) == 3
+        assert len(data["messages"]) == 3
 
         # Check FIFO order
-        assert data["requests"][0]["message"] == "Message 1"
-        assert data["requests"][1]["message"] == "Message 2"
-        assert data["requests"][2]["message"] == "Message 3"
+        assert data["messages"][0]["message"] == "Message 1"
+        assert data["messages"][1]["message"] == "Message 2"
+        assert data["messages"][2]["message"] == "Message 3"
 
 
 class TestUnregisterEndpoint:
-    """Tests for /api/unregister endpoint."""
+    """Tests for /agent/api/unregister endpoint."""
 
     @pytest.mark.asyncio
-    async def test_unregister_requires_agent_id_header(self, client):
-        """Unregister endpoint should require X-Agent-ID header."""
-        response = await client.post("/api/unregister")
+    async def test_unregister_requires_machine_name_header(self, client):
+        """Unregister endpoint should require X-Machine-Name header."""
+        response = await client.post("/agent/api/unregister")
 
         assert response.status_code == 400
         data = response.json()
-        assert "Missing X-Agent-ID header" in data["error"]
+        assert "Missing X-Machine-Name header" in data["error"]
 
     @pytest.mark.asyncio
     async def test_unregister_removes_registered_agent(self, client, agent_manager):
@@ -200,13 +202,13 @@ class TestUnregisterEndpoint:
 
         # Unregister the agent
         response = await client.post(
-            "/api/unregister", headers={"X-Agent-ID": "machine/to-remove"}
+            "/agent/api/unregister", headers={"X-Machine-Name": "machine/to-remove"}
         )
 
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
-        assert "unregistered" in data["message"]
+        assert "unregistered" in data["message"].lower() or "Unregistered" in data["message"]
         assert "machine/to-remove" in data["message"]
 
         # Verify agent is no longer registered
@@ -220,7 +222,7 @@ class TestUnregisterEndpoint:
 
         # Unregister should still succeed
         response = await client.post(
-            "/api/unregister", headers={"X-Agent-ID": "machine/nonexistent"}
+            "/agent/api/unregister", headers={"X-Machine-Name": "machine/nonexistent"}
         )
 
         assert response.status_code == 200
@@ -238,7 +240,7 @@ class TestUnregisterEndpoint:
 
         # Unregister one
         response = await client.post(
-            "/api/unregister", headers={"X-Agent-ID": "machine/agent-2"}
+            "/agent/api/unregister", headers={"X-Machine-Name": "machine/agent-2"}
         )
 
         assert response.status_code == 200
@@ -260,11 +262,103 @@ class TestUnregisterEndpoint:
         assert response.json()["agents_online"] == 2
 
         # Unregister one
-        await client.post("/api/unregister", headers={"X-Agent-ID": "machine/agent-1"})
+        await client.post("/agent/api/unregister", headers={"X-Machine-Name": "machine/agent-1"})
 
         # Check updated count
         response = await client.get("/api/health")
         assert response.json()["agents_online"] == 1
+
+
+class TestRegisterEndpoint:
+    """Tests for /agent/api/register endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_register_requires_machine_name_header(self, client):
+        """Register endpoint should require X-Machine-Name header."""
+        response = await client.post("/agent/api/register")
+        assert response.status_code == 400
+        assert "Missing X-Machine-Name header" in response.json()["error"]
+
+    @pytest.mark.asyncio
+    async def test_register_with_machine_and_project(self, client):
+        """Register endpoint should construct agent ID from machine + project."""
+        response = await client.post(
+            "/agent/api/register",
+            headers={
+                "X-Machine-Name": "macbook",
+                "X-Project-Name": "myproject",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == "macbook/myproject"
+
+    @pytest.mark.asyncio
+    async def test_register_with_composite_machine_name(self, client):
+        """Register endpoint should accept composite machine/project in X-Machine-Name."""
+        response = await client.post(
+            "/agent/api/register",
+            headers={"X-Machine-Name": "macbook/myproject"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == "macbook/myproject"
+
+
+class TestAdminKeyEndpoints:
+    """Tests for /admin/api/keys endpoints (dev mode - no auth)."""
+
+    @pytest.mark.asyncio
+    async def test_create_key(self, client):
+        """Should create an API key."""
+        response = await client.post(
+            "/admin/api/keys",
+            json={"agent_pattern": "macbook/*", "description": "Test key"},
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert "key_id" in data
+        assert "api_key" in data
+        assert data["agent_pattern"] == "macbook/*"
+
+    @pytest.mark.asyncio
+    async def test_list_keys(self, client):
+        """Should list API keys."""
+        # Create a key first
+        await client.post(
+            "/admin/api/keys",
+            json={"agent_pattern": "test/*"},
+        )
+        response = await client.get("/admin/api/keys")
+        assert response.status_code == 200
+        data = response.json()
+        assert "keys" in data
+        assert len(data["keys"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_revoke_key(self, client):
+        """Should revoke an API key."""
+        # Create a key first
+        create_resp = await client.post(
+            "/admin/api/keys",
+            json={"agent_pattern": "test/*"},
+        )
+        key_id = create_resp.json()["key_id"]
+
+        # Revoke it
+        response = await client.delete(f"/admin/api/keys/{key_id}")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+
+        # Verify it's gone
+        list_resp = await client.get("/admin/api/keys")
+        assert len(list_resp.json()["keys"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_revoke_nonexistent_key(self, client):
+        """Should return 404 for nonexistent key."""
+        response = await client.delete("/admin/api/keys/nonexistent")
+        assert response.status_code == 404
 
 
 class TestInputValidation:
@@ -274,7 +368,7 @@ class TestInputValidation:
     async def test_pending_rejects_invalid_agent_id_format(self, client):
         """Pending endpoint should reject invalid agent ID format."""
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "-invalid/proj"}
+            "/agent/api/pending", headers={"X-Machine-Name": "-invalid/proj"}
         )
 
         assert response.status_code == 400
@@ -285,7 +379,7 @@ class TestInputValidation:
     async def test_pending_accepts_valid_agent_id(self, client):
         """Pending endpoint should accept valid agent ID format."""
         response = await client.get(
-            "/api/pending", headers={"X-Agent-ID": "valid-agent/proj_123"}
+            "/agent/api/pending", headers={"X-Machine-Name": "valid-agent/proj_123"}
         )
 
         assert response.status_code == 200
@@ -296,7 +390,7 @@ class TestInputValidation:
     async def test_unregister_rejects_invalid_agent_id_format(self, client):
         """Unregister endpoint should reject invalid agent ID format."""
         response = await client.post(
-            "/api/unregister", headers={"X-Agent-ID": " spaces/not-allowed"}
+            "/agent/api/unregister", headers={"X-Machine-Name": " spaces/not-allowed"}
         )
 
         assert response.status_code == 400
@@ -307,7 +401,7 @@ class TestInputValidation:
     async def test_unregister_accepts_valid_agent_id(self, client):
         """Unregister endpoint should accept valid agent ID format."""
         response = await client.post(
-            "/api/unregister", headers={"X-Agent-ID": "valid.agent/proj-1"}
+            "/agent/api/unregister", headers={"X-Machine-Name": "valid.agent/proj-1"}
         )
 
         assert response.status_code == 200

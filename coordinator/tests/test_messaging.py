@@ -8,9 +8,9 @@ import time
 from coordinator.messaging import MessageManager
 from coordinator.agents import AgentManager
 from coordinator.server import (
-    _send_request_impl,
+    _send_message_impl,
     _get_messages_impl,
-    _respond_to_request_impl,
+    _reply_impl,
     _wait_for_message_impl,
 )
 from fastmcp.exceptions import ToolError
@@ -37,9 +37,9 @@ def agent_manager(redis_client):
 class TestMessageManager:
     """Tests for the MessageManager class."""
 
-    def test_send_request_creates_properly_formatted_message(self, message_manager):
-        """send_request should create a properly formatted message in Redis."""
-        result = message_manager.send_request(
+    def test_send_message_creates_properly_formatted_message(self, message_manager):
+        """send_message should create a properly formatted message in Redis."""
+        result = message_manager.send_message(
             from_agent="agent-a",
             to_agent="agent-b",
             message="Hello, can you help?",
@@ -56,72 +56,87 @@ class TestMessageManager:
         # ID format should be {from}::{to}::{uuid}
         assert result["id"].startswith("agent-a::agent-b::")
 
-    def test_get_pending_requests_retrieves_and_removes(self, message_manager):
-        """get_pending_requests should retrieve and remove messages."""
-        message_manager.send_request("a", "b", "message 1")
-        message_manager.send_request("c", "b", "message 2")
+    def test_get_pending_messages_retrieves_and_removes(self, message_manager):
+        """get_pending_messages should retrieve and remove messages."""
+        message_manager.send_message("a", "b", "message 1")
+        message_manager.send_message("c", "b", "message 2")
 
         # First retrieval should get both
-        requests = message_manager.get_pending_requests("b")
-        assert len(requests) == 2
-        assert requests[0]["message"] == "message 1"
-        assert requests[1]["message"] == "message 2"
+        messages = message_manager.get_pending_messages("b")
+        assert len(messages) == 2
+        assert messages[0]["message"] == "message 1"
+        assert messages[1]["message"] == "message 2"
 
         # Second retrieval should be empty (consumed)
-        requests = message_manager.get_pending_requests("b")
-        assert len(requests) == 0
+        messages = message_manager.get_pending_messages("b")
+        assert len(messages) == 0
 
     def test_multiple_messages_queue_fifo(self, message_manager):
         """Messages should queue in FIFO order."""
-        message_manager.send_request("a", "b", "first")
-        message_manager.send_request("c", "b", "second")
-        message_manager.send_request("d", "b", "third")
+        message_manager.send_message("a", "b", "first")
+        message_manager.send_message("c", "b", "second")
+        message_manager.send_message("d", "b", "third")
 
-        requests = message_manager.get_pending_requests("b")
-        assert len(requests) == 3
-        assert requests[0]["message"] == "first"
-        assert requests[1]["message"] == "second"
-        assert requests[2]["message"] == "third"
+        messages = message_manager.get_pending_messages("b")
+        assert len(messages) == 3
+        assert messages[0]["message"] == "first"
+        assert messages[1]["message"] == "second"
+        assert messages[2]["message"] == "third"
 
     def test_empty_inbox_returns_empty_list(self, message_manager):
         """Empty inbox should return empty list."""
-        requests = message_manager.get_pending_requests("nonexistent")
-        assert requests == []
+        messages = message_manager.get_pending_messages("nonexistent")
+        assert messages == []
 
-    def test_peek_pending_requests_does_not_consume(self, message_manager):
-        """peek_pending_requests should not remove messages."""
-        message_manager.send_request("a", "b", "hello")
+    def test_peek_pending_messages_does_not_consume(self, message_manager):
+        """peek_pending_messages should not remove messages."""
+        message_manager.send_message("a", "b", "hello")
 
         # Peek should return the message
-        requests = message_manager.peek_pending_requests("b")
-        assert len(requests) == 1
+        messages = message_manager.peek_pending_messages("b")
+        assert len(messages) == 1
 
         # Peek again should still return the message
-        requests = message_manager.peek_pending_requests("b")
-        assert len(requests) == 1
+        messages = message_manager.peek_pending_messages("b")
+        assert len(messages) == 1
 
         # Now consume it
-        requests = message_manager.get_pending_requests("b")
-        assert len(requests) == 1
+        messages = message_manager.get_pending_messages("b")
+        assert len(messages) == 1
 
         # Now it should be gone
-        requests = message_manager.peek_pending_requests("b")
-        assert len(requests) == 0
+        messages = message_manager.peek_pending_messages("b")
+        assert len(messages) == 0
+
+    def test_backwards_compat_aliases(self, message_manager):
+        """Backwards compat aliases should work."""
+        # send_request alias
+        result = message_manager.send_request("a", "b", "test")
+        assert result["from_agent"] == "a"
+
+        # get_pending_requests alias
+        msgs = message_manager.get_pending_requests("b")
+        assert len(msgs) == 1
+
+        # peek_pending_requests alias
+        message_manager.send_message("a", "b", "test2")
+        msgs = message_manager.peek_pending_requests("b")
+        assert len(msgs) == 1
 
 
-class TestSendRequestTool:
-    """Tests for the send_request tool implementation."""
+class TestSendMessageTool:
+    """Tests for the send_message tool implementation."""
 
-    def test_send_request_to_existing_agent(self, message_manager, agent_manager):
-        """send_request should work when target agent exists."""
+    def test_send_message_to_existing_agent(self, message_manager, agent_manager):
+        """send_message should work when target agent exists."""
         # Register the target agent
         agent_manager.register_agent("agent-b")
 
-        result = _send_request_impl(
+        result = _send_message_impl(
             message_manager,
             agent_manager,
             from_agent="agent-a",
-            target_agent="agent-b",
+            to="agent-b",
             message="Help me please",
         )
 
@@ -129,19 +144,19 @@ class TestSendRequestTool:
         assert result["to_agent"] == "agent-b"
         assert result["message"] == "Help me please"
 
-    def test_send_request_to_unknown_agent_returns_error(
+    def test_send_message_to_unknown_agent_returns_error(
         self, message_manager, agent_manager
     ):
-        """send_request to unknown agent should return helpful error."""
+        """send_message to unknown agent should return helpful error."""
         # Register a different agent
         agent_manager.register_agent("agent-c")
 
         with pytest.raises(ToolError) as exc_info:
-            _send_request_impl(
+            _send_message_impl(
                 message_manager,
                 agent_manager,
                 from_agent="agent-a",
-                target_agent="agent-b",
+                to="agent-b",
                 message="Hello?",
             )
 
@@ -151,24 +166,24 @@ class TestSendRequestTool:
         assert "agent-c" in error_msg  # Should list available agents
 
 
-class TestGetPendingRequestsTool:
-    """Tests for the get_messages tool implementation (request filtering)."""
+class TestGetPendingMessagesTool:
+    """Tests for the get_messages tool implementation (message filtering)."""
 
-    def test_get_messages_returns_requests(self, message_manager):
-        """get_messages with type=request should return pending requests."""
-        message_manager.send_request("a", "b", "request 1")
-        message_manager.send_request("c", "b", "request 2")
+    def test_get_messages_returns_messages(self, message_manager):
+        """get_messages with type=message should return pending messages."""
+        message_manager.send_message("a", "b", "message 1")
+        message_manager.send_message("c", "b", "message 2")
 
-        result = _get_messages_impl(message_manager, "b", message_type="request")
+        result = _get_messages_impl(message_manager, "b", message_type="message")
 
         assert len(result) == 2
-        assert result[0]["message"] == "request 1"
-        assert result[1]["message"] == "request 2"
-        assert all(m["type"] == "request" for m in result)
+        assert result[0]["message"] == "message 1"
+        assert result[1]["message"] == "message 2"
+        assert all(m["type"] == "message" for m in result)
 
     def test_get_messages_consumes_messages(self, message_manager):
         """get_messages should consume messages."""
-        message_manager.send_request("a", "b", "only once")
+        message_manager.send_message("a", "b", "only once")
 
         # First call gets the message
         result = _get_messages_impl(message_manager, "b")
@@ -179,99 +194,110 @@ class TestGetPendingRequestsTool:
         assert len(result) == 0
 
 
-class TestResponseHandling:
-    """Tests for respond_to_request and wait_for_response."""
+class TestReplyHandling:
+    """Tests for reply and wait_for_response."""
 
-    def test_respond_to_request_creates_properly_formatted_response(
+    def test_reply_creates_properly_formatted_response(
         self, message_manager
     ):
-        """respond_to_request should create a properly formatted response."""
-        # First send a request to get a valid request_id
-        request = message_manager.send_request("agent-a", "agent-b", "Help?")
-        request_id = request["id"]
+        """reply should create a properly formatted response."""
+        # First send a message to get a valid message_id
+        msg = message_manager.send_message("agent-a", "agent-b", "Help?")
+        message_id = msg["id"]
 
-        # Now respond
-        result = message_manager.respond_to_request(
-            request_id=request_id,
+        # Now reply
+        result = message_manager.reply(
+            message_id=message_id,
             from_agent="agent-b",
             response="Here's your answer",
             status="success",
         )
 
-        assert result["request_id"] == request_id
+        assert result["message_id"] == message_id
         assert result["from_agent"] == "agent-b"
         assert result["to_agent"] == "agent-a"  # Original sender
         assert result["response"] == "Here's your answer"
         assert result["status"] == "success"
         assert "timestamp" in result
 
+    def test_respond_to_request_backwards_compat(self, message_manager):
+        """respond_to_request backwards compat wrapper should work."""
+        msg = message_manager.send_message("agent-a", "agent-b", "Help?")
+        result = message_manager.respond_to_request(
+            request_id=msg["id"],
+            from_agent="agent-b",
+            response="Answer",
+        )
+        assert result["message_id"] == msg["id"]
+        assert result["response"] == "Answer"
+
     def test_wait_for_response_returns_when_response_arrives(self, message_manager):
         """wait_for_response should return when a response arrives."""
-        # Send a request
-        request = message_manager.send_request("agent-a", "agent-b", "Question?")
-        request_id = request["id"]
+        # Send a message
+        msg = message_manager.send_message("agent-a", "agent-b", "Question?")
+        message_id = msg["id"]
 
-        # Send the response immediately (simulating agent-b responding)
-        message_manager.respond_to_request(
-            request_id=request_id,
+        # Send the reply immediately (simulating agent-b responding)
+        message_manager.reply(
+            message_id=message_id,
             from_agent="agent-b",
             response="Answer!",
         )
 
         # Now wait should return immediately
-        result = message_manager.wait_for_response("agent-a", request_id, timeout=5)
+        result = message_manager.wait_for_response("agent-a", message_id, timeout=5)
 
         assert result is not None
-        assert result["request_id"] == request_id
+        assert result["message_id"] == message_id
         assert result["response"] == "Answer!"
 
     def test_wait_for_response_times_out_correctly(self, message_manager):
         """wait_for_response should return None on timeout."""
-        # Send a request but don't respond
-        request = message_manager.send_request("agent-a", "agent-b", "Question?")
-        request_id = request["id"]
+        # Send a message but don't respond
+        msg = message_manager.send_message("agent-a", "agent-b", "Question?")
+        message_id = msg["id"]
 
         # Wait with a short timeout
         start = time.time()
-        result = message_manager.wait_for_response("agent-a", request_id, timeout=1)
+        result = message_manager.wait_for_response("agent-a", message_id, timeout=1)
         elapsed = time.time() - start
 
         assert result is None
         assert elapsed >= 1  # Should have waited at least 1 second
 
-    def test_full_request_response_cycle(self, message_manager, agent_manager):
-        """Integration test: full send -> receive -> respond -> wait cycle."""
+    def test_full_message_reply_cycle(self, message_manager, agent_manager):
+        """Integration test: full send -> receive -> reply -> wait cycle."""
         # Register both agents
         agent_manager.register_agent("agent-a")
         agent_manager.register_agent("agent-b")
 
-        # Agent A sends request to Agent B
-        request = _send_request_impl(
+        # Agent A sends message to Agent B
+        msg = _send_message_impl(
             message_manager,
             agent_manager,
             from_agent="agent-a",
-            target_agent="agent-b",
+            to="agent-b",
             message="What is 2+2?",
         )
-        request_id = request["id"]
+        message_id = msg["id"]
 
-        # Agent B retrieves the request via get_messages
-        pending = _get_messages_impl(message_manager, "agent-b", message_type="request")
+        # Agent B retrieves the message via get_messages
+        pending = _get_messages_impl(message_manager, "agent-b", message_type="message")
         assert len(pending) == 1
         assert pending[0]["message"] == "What is 2+2?"
-        assert pending[0]["id"] == request_id
+        assert pending[0]["id"] == message_id
 
-        # Agent B responds
-        response = _respond_to_request_impl(
+        # Agent B replies
+        response = _reply_impl(
             message_manager,
             from_agent="agent-b",
-            request_id=request_id,
+            message_id=message_id,
             response="4",
         )
         assert response["to_agent"] == "agent-a"
 
-        # Agent A gets the response via get_messages
-        result = _get_messages_impl(message_manager, "agent-a", message_type="response")
+        # Agent A gets the reply via get_messages
+        result = _get_messages_impl(message_manager, "agent-a", message_type="reply")
         assert len(result) == 1
         assert result[0]["response"] == "4"
         assert result[0]["status"] == "success"
@@ -287,27 +313,33 @@ class TestResponseHandling:
         assert result["status"] == "timeout"
         assert "No messages received" in result["message"]
 
-    def test_parse_request_id(self, message_manager):
-        """_parse_request_id should correctly extract sender and receiver."""
+    def test_parse_message_id(self, message_manager):
+        """_parse_message_id should correctly extract sender and receiver."""
         # Test with simple agent IDs
-        sender, receiver = message_manager._parse_request_id("alice::bob::a1b2c3d4")
+        sender, receiver = message_manager._parse_message_id("alice::bob::a1b2c3d4")
         assert sender == "alice"
         assert receiver == "bob"
 
         # Test with hyphenated agent IDs
-        sender, receiver = message_manager._parse_request_id(
+        sender, receiver = message_manager._parse_message_id(
             "agent-a::agent-b::12345678"
         )
         assert sender == "agent-a"
         assert receiver == "agent-b"
 
-    def test_respond_to_request_with_error_status(self, message_manager):
-        """respond_to_request should support error status."""
-        request = message_manager.send_request("agent-a", "agent-b", "Do something")
-        request_id = request["id"]
+    def test_parse_request_id_backwards_compat(self, message_manager):
+        """_parse_request_id alias should still work."""
+        sender, receiver = message_manager._parse_request_id("alice::bob::a1b2c3d4")
+        assert sender == "alice"
+        assert receiver == "bob"
 
-        result = message_manager.respond_to_request(
-            request_id=request_id,
+    def test_reply_with_error_status(self, message_manager):
+        """reply should support error status."""
+        msg = message_manager.send_message("agent-a", "agent-b", "Do something")
+        message_id = msg["id"]
+
+        result = message_manager.reply(
+            message_id=message_id,
             from_agent="agent-b",
             response="Failed to do that",
             status="error",
@@ -320,10 +352,10 @@ class TestResponseHandling:
 class TestWaitForRequest:
     """Tests for wait_for_request notification behavior."""
 
-    def test_wait_for_request_returns_when_request_arrives(self, message_manager):
-        """wait_for_request should return ready notification when a request arrives."""
-        # Send a request first
-        message_manager.send_request("agent-a", "agent-b", "Hello!")
+    def test_wait_for_request_returns_when_message_arrives(self, message_manager):
+        """wait_for_request should return ready notification when a message arrives."""
+        # Send a message first
+        message_manager.send_message("agent-a", "agent-b", "Hello!")
 
         # Now wait should return immediately with a notification
         result = message_manager.wait_for_request("agent-b", timeout=5)
@@ -334,7 +366,7 @@ class TestWaitForRequest:
 
     def test_wait_for_request_times_out_correctly(self, message_manager):
         """wait_for_request should return None on timeout."""
-        # Don't send any request
+        # Don't send any message
         start = time.time()
         result = message_manager.wait_for_request("agent-b", timeout=1)
         elapsed = time.time() - start
@@ -343,11 +375,11 @@ class TestWaitForRequest:
         assert elapsed >= 1  # Should have waited at least 1 second
 
     def test_wait_for_request_multiple_queued_return_in_order(self, message_manager):
-        """Multiple queued requests: wait_for_request notifies, get_pending_requests consumes in FIFO."""
-        # Queue multiple requests
-        message_manager.send_request("agent-a", "agent-b", "first")
-        message_manager.send_request("agent-c", "agent-b", "second")
-        message_manager.send_request("agent-d", "agent-b", "third")
+        """Multiple queued messages: wait_for_request notifies, get_pending_messages consumes in FIFO."""
+        # Queue multiple messages
+        message_manager.send_message("agent-a", "agent-b", "first")
+        message_manager.send_message("agent-c", "agent-b", "second")
+        message_manager.send_message("agent-d", "agent-b", "third")
 
         # Wait should return a notification with pending >= 1
         result = message_manager.wait_for_request("agent-b", timeout=1)
@@ -355,28 +387,28 @@ class TestWaitForRequest:
         assert result["status"] == "ready"
         assert result["pending"] >= 1
 
-        # Now consume them via get_pending_requests and verify FIFO order
-        pending = message_manager.get_pending_requests("agent-b")
+        # Now consume them via get_pending_messages and verify FIFO order
+        pending = message_manager.get_pending_messages("agent-b")
         assert len(pending) == 3
         assert pending[0]["message"] == "first"
         assert pending[1]["message"] == "second"
         assert pending[2]["message"] == "third"
 
-    def test_wait_for_message_request_type_returns_timeout_dict(self, message_manager):
-        """_wait_for_message_impl with type=request should return timeout dict on timeout."""
+    def test_wait_for_message_message_type_returns_timeout_dict(self, message_manager):
+        """_wait_for_message_impl with type=message should return timeout dict on timeout."""
         result = _wait_for_message_impl(
             message_manager,
             agent_id="agent-b",
             timeout=1,
-            message_type="request",
+            message_type="message",
         )
 
         assert result["status"] == "timeout"
         assert "No messages received" in result["message"]
 
-    def test_wait_for_request_does_not_consume_request(self, message_manager):
-        """wait_for_request should NOT consume the request (it stays in inbox)."""
-        message_manager.send_request("agent-a", "agent-b", "still here")
+    def test_wait_for_request_does_not_consume_message(self, message_manager):
+        """wait_for_request should NOT consume the message (it stays in inbox)."""
+        message_manager.send_message("agent-a", "agent-b", "still here")
 
         # Wait gets the notification
         result = message_manager.wait_for_request("agent-b", timeout=1)
@@ -384,13 +416,13 @@ class TestWaitForRequest:
         assert result["status"] == "ready"
 
         # Inbox should still have the message
-        pending = message_manager.get_pending_requests("agent-b")
+        pending = message_manager.get_pending_messages("agent-b")
         assert len(pending) == 1
         assert pending[0]["message"] == "still here"
 
-    def test_send_request_pushes_notification(self, message_manager, redis_client):
-        """send_request should push a notification signal to the notify key."""
-        message_manager.send_request("agent-a", "agent-b", "hello")
+    def test_send_message_pushes_notification(self, message_manager, redis_client):
+        """send_message should push a notification signal to the notify key."""
+        message_manager.send_message("agent-a", "agent-b", "hello")
 
         notify_key = f"{message_manager.NOTIFY_PREFIX}agent-b"
         length = redis_client.llen(notify_key)
@@ -400,130 +432,115 @@ class TestWaitForRequest:
         self, message_manager, redis_client
     ):
         """If the notification signal is lost, the message should still be in the inbox."""
-        message_manager.send_request("agent-a", "agent-b", "important")
+        message_manager.send_message("agent-a", "agent-b", "important")
 
         # Manually consume the notification signal (simulating connection drop)
         notify_key = f"{message_manager.NOTIFY_PREFIX}agent-b"
         redis_client.lpop(notify_key)
 
         # Notification is gone, but message should still be in inbox
-        pending = message_manager.get_pending_requests("agent-b")
+        pending = message_manager.get_pending_messages("agent-b")
         assert len(pending) == 1
         assert pending[0]["message"] == "important"
 
 
-class TestResponsePutBack:
-    """Tests for response put-back mechanism when request_id doesn't match."""
+class TestReplyPutBack:
+    """Tests for reply put-back mechanism when message_id doesn't match."""
 
-    def test_mismatched_response_is_put_back(self, message_manager):
-        """When wait_for_response gets wrong request_id, it should put it back."""
-        # Send two requests from agent-a to agent-b
-        request1 = message_manager.send_request("agent-a", "agent-b", "Question 1")
-        request2 = message_manager.send_request("agent-a", "agent-b", "Question 2")
-        request1_id = request1["id"]
-        request2_id = request2["id"]
+    def test_mismatched_reply_is_put_back(self, message_manager):
+        """When wait_for_response gets wrong message_id, it should put it back."""
+        # Send two messages from agent-a to agent-b
+        msg1 = message_manager.send_message("agent-a", "agent-b", "Question 1")
+        msg2 = message_manager.send_message("agent-a", "agent-b", "Question 2")
+        msg1_id = msg1["id"]
+        msg2_id = msg2["id"]
 
-        # Agent-b responds to request2 FIRST, then request1
-        message_manager.respond_to_request(
-            request_id=request2_id,
+        # Agent-b replies to msg2 FIRST, then msg1
+        message_manager.reply(
+            message_id=msg2_id,
             from_agent="agent-b",
             response="Answer 2",
         )
-        message_manager.respond_to_request(
-            request_id=request1_id,
+        message_manager.reply(
+            message_id=msg1_id,
             from_agent="agent-b",
             response="Answer 1",
         )
 
-        # Agent-a waits for request1 first - should find it even though request2's
-        # response is in front of the queue
-        result1 = message_manager.wait_for_response("agent-a", request1_id, timeout=5)
+        # Agent-a waits for msg1 first - should find it even though msg2's
+        # reply is in front of the queue
+        result1 = message_manager.wait_for_response("agent-a", msg1_id, timeout=5)
         assert result1 is not None
         assert result1["response"] == "Answer 1"
-        assert result1["request_id"] == request1_id
+        assert result1["message_id"] == msg1_id
 
-        # Now wait for request2 - the put-back response should be available
-        result2 = message_manager.wait_for_response("agent-a", request2_id, timeout=5)
+        # Now wait for msg2 - the put-back reply should be available
+        result2 = message_manager.wait_for_response("agent-a", msg2_id, timeout=5)
         assert result2 is not None
         assert result2["response"] == "Answer 2"
-        assert result2["request_id"] == request2_id
+        assert result2["message_id"] == msg2_id
 
     def test_put_back_maintains_fifo_for_subsequent_waiters(self, message_manager):
-        """Put-back responses should maintain FIFO order using rpush."""
-        # Send 3 requests from agent-a to agent-b
-        request1 = message_manager.send_request("agent-a", "agent-b", "Q1")
-        request2 = message_manager.send_request("agent-a", "agent-b", "Q2")
-        request3 = message_manager.send_request("agent-a", "agent-b", "Q3")
+        """Put-back replies should maintain FIFO order using rpush."""
+        # Send 3 messages from agent-a to agent-b
+        msg1 = message_manager.send_message("agent-a", "agent-b", "Q1")
+        msg2 = message_manager.send_message("agent-a", "agent-b", "Q2")
+        msg3 = message_manager.send_message("agent-a", "agent-b", "Q3")
 
-        # Respond in order: 3, 2, 1 (reverse order)
-        message_manager.respond_to_request(request3["id"], "agent-b", "A3")
-        message_manager.respond_to_request(request2["id"], "agent-b", "A2")
-        message_manager.respond_to_request(request1["id"], "agent-b", "A1")
+        # Reply in order: 3, 2, 1 (reverse order)
+        message_manager.reply(msg3["id"], "agent-b", "A3")
+        message_manager.reply(msg2["id"], "agent-b", "A2")
+        message_manager.reply(msg1["id"], "agent-b", "A1")
 
-        # Wait for request1 - will consume and put back 3 and 2
-        result1 = message_manager.wait_for_response("agent-a", request1["id"], timeout=5)
+        # Wait for msg1 - will consume and put back 3 and 2
+        result1 = message_manager.wait_for_response("agent-a", msg1["id"], timeout=5)
         assert result1["response"] == "A1"
 
-        # Wait for request2 - should find it (was put back)
-        result2 = message_manager.wait_for_response("agent-a", request2["id"], timeout=5)
+        # Wait for msg2 - should find it (was put back)
+        result2 = message_manager.wait_for_response("agent-a", msg2["id"], timeout=5)
         assert result2["response"] == "A2"
 
-        # Wait for request3 - should find it (was put back)
-        result3 = message_manager.wait_for_response("agent-a", request3["id"], timeout=5)
+        # Wait for msg3 - should find it (was put back)
+        result3 = message_manager.wait_for_response("agent-a", msg3["id"], timeout=5)
         assert result3["response"] == "A3"
 
     def test_put_back_uses_rpush_not_lpush(self, message_manager, redis_client):
-        """Verify that put-back uses rpush (FIFO) not lpush (LIFO).
+        """Verify that put-back uses rpush (FIFO) not lpush (LIFO)."""
+        # Send 2 messages
+        msg1 = message_manager.send_message("agent-a", "agent-b", "Q1")
+        msg2 = message_manager.send_message("agent-a", "agent-b", "Q2")
 
-        This is a regression test for the race condition fix where we changed
-        from lpush to rpush to maintain proper FIFO ordering.
-        """
-        # Send 2 requests
-        request1 = message_manager.send_request("agent-a", "agent-b", "Q1")
-        request2 = message_manager.send_request("agent-a", "agent-b", "Q2")
+        # Reply to both (msg2 first)
+        message_manager.reply(msg2["id"], "agent-b", "A2")
+        message_manager.reply(msg1["id"], "agent-b", "A1")
 
-        # Respond to both (request2 first)
-        message_manager.respond_to_request(request2["id"], "agent-b", "A2")
-        message_manager.respond_to_request(request1["id"], "agent-b", "A1")
-
-        # Queue state: [A2, A1] (A2 is at front/left, A1 at back/right)
-
-        # Wait for request1 - this will:
-        # 1. Pop A2 (doesn't match request1)
-        # 2. Put A2 back with rpush (goes to end/right)
-        # 3. Pop A1 (matches!)
-        # 4. Return A1
-        result1 = message_manager.wait_for_response("agent-a", request1["id"], timeout=5)
+        # Wait for msg1
+        result1 = message_manager.wait_for_response("agent-a", msg1["id"], timeout=5)
         assert result1["response"] == "A1"
 
-        # After waiting for request1:
-        # - If we used rpush correctly: queue is [A2]
-        # - If we used lpush incorrectly: queue would also be [A2] but
-        #   with different ordering if there were more items
-
         # Verify A2 is still available
-        result2 = message_manager.wait_for_response("agent-a", request2["id"], timeout=5)
+        result2 = message_manager.wait_for_response("agent-a", msg2["id"], timeout=5)
         assert result2["response"] == "A2"
 
     def test_multiple_agents_concurrent_responses(self, message_manager):
         """Multiple agents waiting for responses should not interfere."""
         # Agent A sends to Agent C, Agent B sends to Agent C
-        request_a = message_manager.send_request("agent-a", "agent-c", "From A")
-        request_b = message_manager.send_request("agent-b", "agent-c", "From B")
+        msg_a = message_manager.send_message("agent-a", "agent-c", "From A")
+        msg_b = message_manager.send_message("agent-b", "agent-c", "From B")
 
-        # Agent C responds to both (B first, then A)
-        message_manager.respond_to_request(request_b["id"], "agent-c", "To B")
-        message_manager.respond_to_request(request_a["id"], "agent-c", "To A")
+        # Agent C replies to both (B first, then A)
+        message_manager.reply(msg_b["id"], "agent-c", "To B")
+        message_manager.reply(msg_a["id"], "agent-c", "To A")
 
-        # Agent A should get their response
+        # Agent A should get their reply
         result_a = message_manager.wait_for_response(
-            "agent-a", request_a["id"], timeout=5
+            "agent-a", msg_a["id"], timeout=5
         )
         assert result_a["response"] == "To A"
 
-        # Agent B should get their response
+        # Agent B should get their reply
         result_b = message_manager.wait_for_response(
-            "agent-b", request_b["id"], timeout=5
+            "agent-b", msg_b["id"], timeout=5
         )
         assert result_b["response"] == "To B"
 
@@ -531,18 +548,18 @@ class TestResponsePutBack:
         """Multiple threads waiting should each get their correct response."""
         import threading
 
-        # Send 3 requests
-        request1 = message_manager.send_request("agent-a", "agent-b", "Q1")
-        request2 = message_manager.send_request("agent-a", "agent-b", "Q2")
-        request3 = message_manager.send_request("agent-a", "agent-b", "Q3")
+        # Send 3 messages
+        msg1 = message_manager.send_message("agent-a", "agent-b", "Q1")
+        msg2 = message_manager.send_message("agent-a", "agent-b", "Q2")
+        msg3 = message_manager.send_message("agent-a", "agent-b", "Q3")
 
         results = {}
         errors = []
 
-        def wait_for(request_id, expected_response, key):
+        def wait_for(message_id, expected_response, key):
             try:
                 result = message_manager.wait_for_response(
-                    "agent-a", request_id, timeout=10
+                    "agent-a", message_id, timeout=10
                 )
                 if result is None:
                     errors.append(f"{key}: Got None (timeout)")
@@ -556,9 +573,9 @@ class TestResponsePutBack:
                 errors.append(f"{key}: Exception: {e}")
 
         # Start 3 threads waiting for responses
-        t1 = threading.Thread(target=wait_for, args=(request1["id"], "A1", "r1"))
-        t2 = threading.Thread(target=wait_for, args=(request2["id"], "A2", "r2"))
-        t3 = threading.Thread(target=wait_for, args=(request3["id"], "A3", "r3"))
+        t1 = threading.Thread(target=wait_for, args=(msg1["id"], "A1", "r1"))
+        t2 = threading.Thread(target=wait_for, args=(msg2["id"], "A2", "r2"))
+        t3 = threading.Thread(target=wait_for, args=(msg3["id"], "A3", "r3"))
 
         t1.start()
         t2.start()
@@ -567,10 +584,10 @@ class TestResponsePutBack:
         # Small delay to ensure threads are waiting
         time.sleep(0.1)
 
-        # Respond in mixed order
-        message_manager.respond_to_request(request2["id"], "agent-b", "A2")
-        message_manager.respond_to_request(request3["id"], "agent-b", "A3")
-        message_manager.respond_to_request(request1["id"], "agent-b", "A1")
+        # Reply in mixed order
+        message_manager.reply(msg2["id"], "agent-b", "A2")
+        message_manager.reply(msg3["id"], "agent-b", "A3")
+        message_manager.reply(msg1["id"], "agent-b", "A1")
 
         t1.join(timeout=15)
         t2.join(timeout=15)
@@ -581,81 +598,103 @@ class TestResponsePutBack:
         assert len(results) == 3, f"Missing results: {set(['r1', 'r2', 'r3']) - set(results.keys())}"
 
 
-class TestGetPendingResponses:
-    """Tests for _get_pending_responses private method."""
+class TestGetPendingReplies:
+    """Tests for _get_pending_replies private method."""
 
     def test_drains_response_queue(self, message_manager):
-        """_get_pending_responses should consume all responses."""
-        # Send and respond to two requests
-        req1 = message_manager.send_request("agent-a", "agent-b", "Q1")
-        req2 = message_manager.send_request("agent-a", "agent-b", "Q2")
-        message_manager.respond_to_request(req1["id"], "agent-b", "A1")
-        message_manager.respond_to_request(req2["id"], "agent-b", "A2")
+        """_get_pending_replies should consume all replies."""
+        # Send and reply to two messages
+        msg1 = message_manager.send_message("agent-a", "agent-b", "Q1")
+        msg2 = message_manager.send_message("agent-a", "agent-b", "Q2")
+        message_manager.reply(msg1["id"], "agent-b", "A1")
+        message_manager.reply(msg2["id"], "agent-b", "A2")
 
-        responses = message_manager._get_pending_responses("agent-a")
-        assert len(responses) == 2
-        assert responses[0]["response"] == "A1"
-        assert responses[1]["response"] == "A2"
+        replies = message_manager._get_pending_replies("agent-a")
+        assert len(replies) == 2
+        assert replies[0]["response"] == "A1"
+        assert replies[1]["response"] == "A2"
 
         # Second call should be empty (consumed)
-        responses = message_manager._get_pending_responses("agent-a")
-        assert len(responses) == 0
+        replies = message_manager._get_pending_replies("agent-a")
+        assert len(replies) == 0
+
+    def test_backwards_compat_alias(self, message_manager):
+        """_get_pending_responses alias should work."""
+        msg = message_manager.send_message("agent-a", "agent-b", "Q")
+        message_manager.reply(msg["id"], "agent-b", "A")
+        replies = message_manager._get_pending_responses("agent-a")
+        assert len(replies) == 1
 
     def test_empty_returns_empty_list(self, message_manager):
         """Empty response queue should return empty list."""
-        responses = message_manager._get_pending_responses("nonexistent")
-        assert responses == []
+        replies = message_manager._get_pending_replies("nonexistent")
+        assert replies == []
 
 
 class TestGetMessages:
     """Tests for the unified get_messages method."""
 
-    def test_returns_both_requests_and_responses(self, message_manager):
+    def test_returns_both_messages_and_replies(self, message_manager):
         """get_messages with no filter should return both types."""
-        # Create a request to agent-b and a response to agent-a
-        req = message_manager.send_request("agent-a", "agent-b", "Question?")
-        message_manager.respond_to_request(req["id"], "agent-b", "Answer!")
+        # Create a message to agent-b and a reply to agent-a
+        msg = message_manager.send_message("agent-a", "agent-b", "Question?")
+        message_manager.reply(msg["id"], "agent-b", "Answer!")
 
-        # Agent-a should see the response
+        # Agent-a should see the reply
         msgs_a = message_manager.get_messages("agent-a")
         assert len(msgs_a) == 1
-        assert msgs_a[0]["type"] == "response"
+        assert msgs_a[0]["type"] == "reply"
         assert msgs_a[0]["response"] == "Answer!"
 
-        # Agent-b should see the request
+        # Agent-b should see the message
         msgs_b = message_manager.get_messages("agent-b")
         assert len(msgs_b) == 1
-        assert msgs_b[0]["type"] == "request"
+        assert msgs_b[0]["type"] == "message"
         assert msgs_b[0]["message"] == "Question?"
 
-    def test_filter_request_only(self, message_manager):
-        """get_messages with type=request should only return requests."""
-        req = message_manager.send_request("agent-a", "agent-b", "Q")
-        message_manager.respond_to_request(req["id"], "agent-b", "A")
+    def test_filter_message_only(self, message_manager):
+        """get_messages with type=message should only return messages."""
+        msg = message_manager.send_message("agent-a", "agent-b", "Q")
+        message_manager.reply(msg["id"], "agent-b", "A")
 
-        # Agent-a: filter for requests only (should be empty, request went to b)
-        msgs = message_manager.get_messages("agent-a", message_type="request")
+        # Agent-a: filter for messages only (should be empty, message went to b)
+        msgs = message_manager.get_messages("agent-a", message_type="message")
         assert len(msgs) == 0
 
-        # Response should still be there (not consumed by request filter)
-        msgs = message_manager.get_messages("agent-a", message_type="response")
+        # Reply should still be there (not consumed by message filter)
+        msgs = message_manager.get_messages("agent-a", message_type="reply")
         assert len(msgs) == 1
 
-    def test_filter_response_only(self, message_manager):
-        """get_messages with type=response should only return responses."""
-        message_manager.send_request("agent-a", "agent-b", "Q")
+    def test_filter_reply_only(self, message_manager):
+        """get_messages with type=reply should only return replies."""
+        message_manager.send_message("agent-a", "agent-b", "Q")
 
-        # Agent-b: filter for responses only (should be empty)
-        msgs = message_manager.get_messages("agent-b", message_type="response")
+        # Agent-b: filter for replies only (should be empty)
+        msgs = message_manager.get_messages("agent-b", message_type="reply")
         assert len(msgs) == 0
 
-        # Request should still be there (not consumed by response filter)
-        msgs = message_manager.get_messages("agent-b", message_type="request")
+        # Message should still be there (not consumed by reply filter)
+        msgs = message_manager.get_messages("agent-b", message_type="message")
         assert len(msgs) == 1
+
+    def test_legacy_type_values(self, message_manager):
+        """get_messages should accept legacy 'request' and 'response' type values."""
+        msg = message_manager.send_message("agent-a", "agent-b", "Q")
+        message_manager.reply(msg["id"], "agent-b", "A")
+
+        # Legacy "request" should work like "message"
+        msgs_b = message_manager.get_messages("agent-b", message_type="request")
+        assert len(msgs_b) == 1
+        assert msgs_b[0]["type"] == "message"
+
+        # Legacy "response" should work like "reply"
+        msgs_a = message_manager.get_messages("agent-a", message_type="response")
+        assert len(msgs_a) == 1
+        assert msgs_a[0]["type"] == "reply"
 
     def test_consumes_messages(self, message_manager):
         """get_messages should consume messages from both queues."""
-        message_manager.send_request("agent-a", "agent-b", "Q")
+        message_manager.send_message("agent-a", "agent-b", "Q")
         msgs = message_manager.get_messages("agent-b")
         assert len(msgs) == 1
 
@@ -669,63 +708,63 @@ class TestGetMessages:
         assert msgs == []
 
 
-class TestRespondNotifiesSender:
-    """Tests that respond_to_request pushes a notification to the sender."""
+class TestReplyNotifiesSender:
+    """Tests that reply pushes a notification to the sender."""
 
-    def test_respond_pushes_notification(self, message_manager, redis_client):
-        """respond_to_request should push a notification signal to the sender's notify key."""
-        req = message_manager.send_request("agent-a", "agent-b", "Q")
+    def test_reply_pushes_notification(self, message_manager, redis_client):
+        """reply should push a notification signal to the sender's notify key."""
+        msg = message_manager.send_message("agent-a", "agent-b", "Q")
 
-        # Clear the notification that send_request pushed to agent-b
+        # Clear the notification that send_message pushed to agent-b
         notify_b = f"{message_manager.NOTIFY_PREFIX}agent-b"
         redis_client.delete(notify_b)
 
-        # Respond
-        message_manager.respond_to_request(req["id"], "agent-b", "A")
+        # Reply
+        message_manager.reply(msg["id"], "agent-b", "A")
 
         # Check notification was pushed to agent-a (the original sender)
         notify_a = f"{message_manager.NOTIFY_PREFIX}agent-a"
         length = redis_client.llen(notify_a)
         assert length == 1
 
-    def test_respond_does_not_notify_responder(self, message_manager, redis_client):
-        """respond_to_request should notify the original sender, not the responder."""
-        req = message_manager.send_request("agent-a", "agent-b", "Q")
+    def test_reply_does_not_notify_responder(self, message_manager, redis_client):
+        """reply should notify the original sender, not the responder."""
+        msg = message_manager.send_message("agent-a", "agent-b", "Q")
 
         # Clear all notifications
         redis_client.delete(f"{message_manager.NOTIFY_PREFIX}agent-a")
         redis_client.delete(f"{message_manager.NOTIFY_PREFIX}agent-b")
 
-        message_manager.respond_to_request(req["id"], "agent-b", "A")
+        message_manager.reply(msg["id"], "agent-b", "A")
 
         # agent-a should have a notification
         assert redis_client.llen(f"{message_manager.NOTIFY_PREFIX}agent-a") == 1
-        # agent-b should NOT have a notification from respond
+        # agent-b should NOT have a notification from reply
         assert redis_client.llen(f"{message_manager.NOTIFY_PREFIX}agent-b") == 0
 
 
 class TestWaitForMessage:
     """Tests for the unified wait_for_message method."""
 
-    def test_wakes_on_request(self, message_manager):
-        """wait_for_message should return when a request is already queued."""
-        message_manager.send_request("agent-a", "agent-b", "Hello!")
+    def test_wakes_on_message(self, message_manager):
+        """wait_for_message should return when a message is already queued."""
+        message_manager.send_message("agent-a", "agent-b", "Hello!")
 
         result = message_manager.wait_for_message("agent-b", timeout=5)
         assert result is not None
         assert len(result) >= 1
-        assert result[0]["type"] == "request"
+        assert result[0]["type"] == "message"
         assert result[0]["message"] == "Hello!"
 
-    def test_wakes_on_response(self, message_manager):
-        """wait_for_message should return when a response is already queued."""
-        req = message_manager.send_request("agent-a", "agent-b", "Q")
-        message_manager.respond_to_request(req["id"], "agent-b", "A")
+    def test_wakes_on_reply(self, message_manager):
+        """wait_for_message should return when a reply is already queued."""
+        msg = message_manager.send_message("agent-a", "agent-b", "Q")
+        message_manager.reply(msg["id"], "agent-b", "A")
 
         result = message_manager.wait_for_message("agent-a", timeout=5)
         assert result is not None
         assert len(result) >= 1
-        assert result[0]["type"] == "response"
+        assert result[0]["type"] == "reply"
         assert result[0]["response"] == "A"
 
     def test_times_out(self, message_manager):
@@ -737,26 +776,26 @@ class TestWaitForMessage:
         assert result is None
         assert elapsed >= 1
 
-    def test_filter_request_type(self, message_manager):
-        """wait_for_message with type=request should only return requests."""
-        message_manager.send_request("agent-a", "agent-b", "Hello!")
+    def test_filter_message_type(self, message_manager):
+        """wait_for_message with type=message should only return messages."""
+        message_manager.send_message("agent-a", "agent-b", "Hello!")
 
-        result = message_manager.wait_for_message("agent-b", timeout=5, message_type="request")
+        result = message_manager.wait_for_message("agent-b", timeout=5, message_type="message")
         assert result is not None
-        assert all(m["type"] == "request" for m in result)
+        assert all(m["type"] == "message" for m in result)
 
-    def test_filter_response_type(self, message_manager):
-        """wait_for_message with type=response should only return responses."""
-        req = message_manager.send_request("agent-a", "agent-b", "Q")
-        message_manager.respond_to_request(req["id"], "agent-b", "A")
+    def test_filter_reply_type(self, message_manager):
+        """wait_for_message with type=reply should only return replies."""
+        msg = message_manager.send_message("agent-a", "agent-b", "Q")
+        message_manager.reply(msg["id"], "agent-b", "A")
 
-        result = message_manager.wait_for_message("agent-a", timeout=5, message_type="response")
+        result = message_manager.wait_for_message("agent-a", timeout=5, message_type="reply")
         assert result is not None
-        assert all(m["type"] == "response" for m in result)
+        assert all(m["type"] == "reply" for m in result)
 
     def test_returns_messages_directly(self, message_manager):
         """wait_for_message should return messages directly, not a notification."""
-        message_manager.send_request("agent-a", "agent-b", "Direct")
+        message_manager.send_message("agent-a", "agent-b", "Direct")
 
         result = message_manager.wait_for_message("agent-b", timeout=5)
         assert isinstance(result, list)
@@ -764,7 +803,7 @@ class TestWaitForMessage:
 
     def test_impl_returns_received_dict(self, message_manager):
         """_wait_for_message_impl should wrap results in status dict."""
-        message_manager.send_request("agent-a", "agent-b", "Test")
+        message_manager.send_message("agent-a", "agent-b", "Test")
 
         result = _wait_for_message_impl(message_manager, "agent-b", timeout=5)
         assert result["status"] == "received"

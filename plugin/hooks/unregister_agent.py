@@ -42,10 +42,10 @@ def main() -> None:
         print("[c3po] Warning: no agent ID file found, skipping unregister", file=sys.stderr)
     else:
         try:
-            unreg_headers = {"X-Agent-ID": assigned_id}
+            unreg_headers = {"X-Machine-Name": assigned_id}
             unreg_headers.update(auth_headers())
             req = urllib.request.Request(
-                f"{COORDINATOR_URL}/api/unregister",
+                f"{COORDINATOR_URL}/agent/api/unregister",
                 headers=unreg_headers,
                 method="POST",
             )

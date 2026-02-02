@@ -6,8 +6,8 @@ from datetime import datetime, timezone, timedelta
 import json
 
 from coordinator.server import (
-    _send_request_impl,
-    _respond_to_request_impl,
+    _send_message_impl,
+    _reply_impl,
     _validate_agent_id,
     _validate_message,
     MAX_MESSAGE_LENGTH,
@@ -166,10 +166,10 @@ class TestRateLimiting:
         is_allowed, _ = message_manager.check_rate_limit("agent-b")
         assert is_allowed
 
-    def test_send_request_rate_limited(
+    def test_send_message_rate_limited(
         self, message_manager, agent_manager
     ):
-        """send_request rejects when rate limited."""
+        """send_message rejects when rate limited."""
         agent_manager.register_agent("sender")
         agent_manager.register_agent("target")
 
@@ -178,7 +178,7 @@ class TestRateLimiting:
             message_manager.record_request("sender")
 
         with pytest.raises(ToolError) as exc_info:
-            _send_request_impl(
+            _send_message_impl(
                 message_manager,
                 agent_manager,
                 "sender",
@@ -239,23 +239,23 @@ class TestMessageExpiration:
         redis_client.rpush(inbox_key, json.dumps(new_message))
 
         # Peek should only show the fresh message
-        pending = message_manager.peek_pending_requests("receiver")
+        pending = message_manager.peek_pending_messages("receiver")
         assert len(pending) == 1
         assert pending[0]["id"] == "new-msg"
 
         # Get should also only return the fresh message
-        pending = message_manager.get_pending_requests("receiver")
+        pending = message_manager.get_pending_messages("receiver")
         assert len(pending) == 1
         assert pending[0]["id"] == "new-msg"
 
 
-class TestRespondToRequestValidation:
-    """Tests for respond_to_request validation."""
+class TestReplyValidation:
+    """Tests for reply validation."""
 
     def test_empty_response_rejected(self, message_manager):
         """Empty response raises error."""
         with pytest.raises(ToolError) as exc_info:
-            _respond_to_request_impl(
+            _reply_impl(
                 message_manager,
                 "from-agent",
                 "sender::receiver::12345678",
@@ -263,10 +263,10 @@ class TestRespondToRequestValidation:
             )
         assert "cannot be empty" in str(exc_info.value)
 
-    def test_invalid_request_id_rejected(self, message_manager):
-        """Invalid request_id format raises error."""
+    def test_invalid_message_id_rejected(self, message_manager):
+        """Invalid message_id format raises error."""
         with pytest.raises(ToolError) as exc_info:
-            _respond_to_request_impl(
+            _reply_impl(
                 message_manager,
                 "from-agent",
                 "invalid-format",
@@ -274,9 +274,9 @@ class TestRespondToRequestValidation:
             )
         assert "invalid format" in str(exc_info.value)
 
-    def test_valid_response_accepted(self, message_manager):
-        """Valid response is accepted."""
-        result = _respond_to_request_impl(
+    def test_valid_reply_accepted(self, message_manager):
+        """Valid reply is accepted."""
+        result = _reply_impl(
             message_manager,
             "from-agent",
             "sender::receiver::12345678",

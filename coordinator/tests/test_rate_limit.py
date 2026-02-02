@@ -23,35 +23,35 @@ class TestRateLimiter:
 
     def test_allows_under_limit(self, limiter):
         """Requests under limit are allowed."""
-        allowed, count = limiter.check_and_record("send_request", "agent-a")
+        allowed, count = limiter.check_and_record("send_message", "agent-a")
         assert allowed is True
         assert count == 1
 
     def test_blocks_over_limit(self, limiter):
         """Requests over limit are blocked."""
-        max_req = RATE_LIMITS["send_request"][0]
+        max_req = RATE_LIMITS["send_message"][0]
         for _ in range(max_req):
-            limiter.check_and_record("send_request", "agent-a")
+            limiter.check_and_record("send_message", "agent-a")
 
-        allowed, count = limiter.check_and_record("send_request", "agent-a")
+        allowed, count = limiter.check_and_record("send_message", "agent-a")
         assert allowed is False
         assert count == max_req
 
     def test_per_identity(self, limiter):
         """Rate limits are per-identity."""
-        max_req = RATE_LIMITS["send_request"][0]
+        max_req = RATE_LIMITS["send_message"][0]
         for _ in range(max_req):
-            limiter.check_and_record("send_request", "agent-a")
+            limiter.check_and_record("send_message", "agent-a")
 
         # Different identity should still be allowed
-        allowed, _ = limiter.check_and_record("send_request", "agent-b")
+        allowed, _ = limiter.check_and_record("send_message", "agent-b")
         assert allowed is True
 
     def test_per_operation(self, limiter):
         """Rate limits are per-operation."""
-        max_req = RATE_LIMITS["send_request"][0]
+        max_req = RATE_LIMITS["send_message"][0]
         for _ in range(max_req):
-            limiter.check_and_record("send_request", "agent-a")
+            limiter.check_and_record("send_message", "agent-a")
 
         # Different operation should still be allowed
         allowed, _ = limiter.check_and_record("list_agents", "agent-a")
@@ -78,8 +78,8 @@ class TestRateLimiter:
         assert count == 0
 
     def test_different_operations_have_different_limits(self, limiter):
-        """send_request (10/60s) vs list_agents (30/60s) have different limits."""
-        send_limit = RATE_LIMITS["send_request"][0]
+        """send_message (10/60s) vs list_agents (30/60s) have different limits."""
+        send_limit = RATE_LIMITS["send_message"][0]
         list_limit = RATE_LIMITS["list_agents"][0]
         assert send_limit != list_limit  # They should differ
 

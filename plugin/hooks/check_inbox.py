@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-C3PO Stop Hook - Check for pending coordination requests.
+C3PO Stop Hook - Check for pending coordination messages.
 
 This hook runs when Claude finishes responding. If there are pending
-requests in the agent's inbox, it blocks Claude from stopping and
-instructs it to process the pending requests.
+messages in the agent's inbox, it blocks Claude from stopping and
+instructs it to process the pending messages.
 
 Exit codes:
-- 0: Allow stop (no pending requests, or check failed - fail open)
+- 0: Allow stop (no pending messages, or check failed - fail open)
 - 0 with JSON {"decision": "block", "reason": "..."}: Block stop
 
 Environment variables:
@@ -35,10 +35,10 @@ def _heartbeat(assigned_id: str) -> None:
     keep the agent marked as online.
     """
     try:
-        headers = {"X-Agent-ID": assigned_id}
+        headers = {"X-Machine-Name": assigned_id}
         headers.update(auth_headers())
         req = urllib.request.Request(
-            f"{COORDINATOR_URL}/api/register",
+            f"{COORDINATOR_URL}/agent/api/register",
             data=b"",
             headers=headers,
             method="POST",
@@ -81,10 +81,10 @@ def main() -> None:
         sys.exit(0)
 
     try:
-        pending_headers = {"X-Agent-ID": assigned_id}
+        pending_headers = {"X-Machine-Name": assigned_id}
         pending_headers.update(auth_headers())
         req = urllib.request.Request(
-            f"{COORDINATOR_URL}/api/pending",
+            f"{COORDINATOR_URL}/agent/api/pending",
             headers=pending_headers,
         )
         with urlopen_with_ssl(req, timeout=5) as resp:
@@ -92,30 +92,30 @@ def main() -> None:
 
         count = data.get("count", 0)
         if count > 0:
-            # Format the pending requests for Claude
-            requests = data.get("requests", [])
-            request_summary = []
-            for req_data in requests[:3]:  # Show first 3
-                from_agent = req_data.get("from_agent", "unknown")
-                message_preview = req_data.get("message", "")[:100]
-                if len(req_data.get("message", "")) > 100:
+            # Format the pending messages for Claude
+            messages = data.get("messages", [])
+            message_summary = []
+            for msg_data in messages[:3]:  # Show first 3
+                from_agent = msg_data.get("from_agent", "unknown")
+                message_preview = msg_data.get("message", "")[:100]
+                if len(msg_data.get("message", "")) > 100:
                     message_preview += "..."
-                request_summary.append(f"  - From {from_agent}: {message_preview}")
+                message_summary.append(f"  - From {from_agent}: {message_preview}")
 
             if count > 3:
-                request_summary.append(f"  ... and {count - 3} more")
+                message_summary.append(f"  ... and {count - 3} more")
 
-            summary = "\n".join(request_summary)
+            summary = "\n".join(message_summary)
 
             # Output JSON to block Claude from stopping
             output = {
                 "decision": "block",
                 "reason": (
-                    f"You have {count} pending coordination request(s) from other agents:\n"
+                    f"You have {count} pending coordination message(s) from other agents:\n"
                     f"{summary}\n\n"
-                    "Use the get_pending_requests tool to retrieve the full request(s), "
-                    "then use respond_to_request to send your response. "
-                    "After responding to all requests, you may stop."
+                    "Use the get_messages tool to retrieve the full message(s), "
+                    "then use reply to send your response. "
+                    "After responding to all messages, you may stop."
                 ),
             }
             print(json.dumps(output))

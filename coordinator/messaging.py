@@ -31,11 +31,11 @@ class MessageManager:
         """
         self.redis = redis_client
 
-    # Delimiter for request IDs that's unlikely to be in agent IDs
-    REQUEST_ID_DELIMITER = "::"
+    # Delimiter for message IDs that's unlikely to be in agent IDs
+    MESSAGE_ID_DELIMITER = "::"
 
-    def _generate_request_id(self, from_agent: str, to_agent: str) -> str:
-        """Generate a unique request ID.
+    def _generate_message_id(self, from_agent: str, to_agent: str) -> str:
+        """Generate a unique message ID.
 
         Format: {from_agent}::{to_agent}::{uuid}
         Uses :: as delimiter (unlikely to be in agent IDs).
@@ -45,10 +45,10 @@ class MessageManager:
             to_agent: Target agent ID
 
         Returns:
-            Unique request ID string
+            Unique message ID string
         """
         unique = uuid.uuid4().hex[:8]
-        return f"{from_agent}{self.REQUEST_ID_DELIMITER}{to_agent}{self.REQUEST_ID_DELIMITER}{unique}"
+        return f"{from_agent}{self.MESSAGE_ID_DELIMITER}{to_agent}{self.MESSAGE_ID_DELIMITER}{unique}"
 
     def check_rate_limit(self, agent_id: str) -> tuple[bool, int]:
         """Check if an agent has exceeded rate limit.
@@ -91,29 +91,29 @@ class MessageManager:
         # Set expiry on the rate limit key
         self.redis.expire(rate_key, self.RATE_LIMIT_WINDOW_SECONDS * 2)
 
-    def send_request(
+    def send_message(
         self,
         from_agent: str,
         to_agent: str,
         message: str,
         context: Optional[str] = None,
     ) -> dict:
-        """Send a request from one agent to another.
+        """Send a message from one agent to another.
 
         Args:
             from_agent: ID of the sending agent
             to_agent: ID of the target agent
-            message: The request message
-            context: Optional context/background for the request
+            message: The message content
+            context: Optional context/background for the message
 
         Returns:
-            Request data dict with id, from_agent, to_agent, message, etc.
+            Message data dict with id, from_agent, to_agent, message, etc.
         """
-        request_id = self._generate_request_id(from_agent, to_agent)
+        message_id = self._generate_message_id(from_agent, to_agent)
         now = datetime.now(timezone.utc).isoformat()
 
-        request_data = {
-            "id": request_id,
+        message_data = {
+            "id": message_id,
             "from_agent": from_agent,
             "to_agent": to_agent,
             "message": message,
@@ -124,19 +124,22 @@ class MessageManager:
 
         # Push to target agent's inbox (RPUSH for FIFO order)
         inbox_key = f"{self.INBOX_PREFIX}{to_agent}"
-        self.redis.rpush(inbox_key, json.dumps(request_data))
+        self.redis.rpush(inbox_key, json.dumps(message_data))
 
         # Set TTL on inbox key (24h default) - prevents stale messages accumulating
         self.redis.expire(inbox_key, self.MESSAGE_TTL_SECONDS)
 
-        # Push a lightweight notification signal so wait_for_request wakes up
+        # Push a lightweight notification signal so wait_for_message wakes up
         notify_key = f"{self.NOTIFY_PREFIX}{to_agent}"
         self.redis.rpush(notify_key, "1")
         self.redis.expire(notify_key, self.MESSAGE_TTL_SECONDS)
 
-        logger.info("request_sent request_id=%s from=%s to=%s inbox_key=%s", request_id, from_agent, to_agent, inbox_key)
+        logger.info("message_sent message_id=%s from=%s to=%s inbox_key=%s", message_id, from_agent, to_agent, inbox_key)
 
-        return request_data
+        return message_data
+
+    # Backwards compat alias
+    send_request = send_message
 
     def _is_message_expired(self, message: dict) -> bool:
         """Check if a message has expired based on its timestamp.
@@ -170,20 +173,20 @@ class MessageManager:
         """
         return [m for m in messages if not self._is_message_expired(m)]
 
-    def get_pending_requests(self, agent_id: str) -> list[dict]:
-        """Get and consume all pending requests for an agent.
+    def get_pending_messages(self, agent_id: str) -> list[dict]:
+        """Get and consume all pending incoming messages for an agent.
 
-        This removes the requests from the inbox (they are consumed).
+        This removes the messages from the inbox (they are consumed).
         Expired messages are automatically filtered out.
 
         Args:
             agent_id: The agent whose inbox to check
 
         Returns:
-            List of request dicts, oldest first (FIFO), excluding expired
+            List of message dicts, oldest first (FIFO), excluding expired
         """
         inbox_key = f"{self.INBOX_PREFIX}{agent_id}"
-        requests = []
+        messages = []
 
         # Pop all messages from the list
         while True:
@@ -197,14 +200,17 @@ class MessageManager:
             message = json.loads(data)
             # Skip expired messages
             if not self._is_message_expired(message):
-                requests.append(message)
+                messages.append(message)
 
-        logger.info("inbox_consumed agent=%s inbox_key=%s count=%d", agent_id, inbox_key, len(requests))
+        logger.info("inbox_consumed agent=%s inbox_key=%s count=%d", agent_id, inbox_key, len(messages))
 
-        return requests
+        return messages
 
-    def peek_pending_requests(self, agent_id: str) -> list[dict]:
-        """Peek at pending requests without consuming them.
+    # Backwards compat alias
+    get_pending_requests = get_pending_messages
+
+    def peek_pending_messages(self, agent_id: str) -> list[dict]:
+        """Peek at pending messages without consuming them.
 
         Used by REST API for hooks to check status.
         Expired messages are automatically filtered out.
@@ -213,13 +219,13 @@ class MessageManager:
             agent_id: The agent whose inbox to check
 
         Returns:
-            List of request dicts, oldest first (FIFO), excluding expired
+            List of message dicts, oldest first (FIFO), excluding expired
         """
         inbox_key = f"{self.INBOX_PREFIX}{agent_id}"
 
         # Get all items without removing (LRANGE 0 -1 gets all)
         raw_items = self.redis.lrange(inbox_key, 0, -1)
-        requests = []
+        messages = []
 
         for data in raw_items:
             if isinstance(data, bytes):
@@ -227,60 +233,66 @@ class MessageManager:
             message = json.loads(data)
             # Skip expired messages
             if not self._is_message_expired(message):
-                requests.append(message)
+                messages.append(message)
 
-        logger.debug("inbox_peeked agent=%s inbox_key=%s count=%d", agent_id, inbox_key, len(requests))
+        logger.debug("inbox_peeked agent=%s inbox_key=%s count=%d", agent_id, inbox_key, len(messages))
 
-        return requests
+        return messages
+
+    # Backwards compat alias
+    peek_pending_requests = peek_pending_messages
 
     RESPONSES_PREFIX = "c3po:responses:"
 
-    def _parse_request_id(self, request_id: str) -> tuple[str, str]:
-        """Parse a request ID to extract the original sender and receiver.
+    def _parse_message_id(self, message_id: str) -> tuple[str, str]:
+        """Parse a message ID to extract the original sender and receiver.
 
-        Request ID format: {from_agent}::{to_agent}::{uuid}
+        Message ID format: {from_agent}::{to_agent}::{uuid}
 
         Args:
-            request_id: The request ID to parse
+            message_id: The message ID to parse
 
         Returns:
             Tuple of (from_agent, to_agent)
 
         Raises:
-            ValueError: If request_id is invalid
+            ValueError: If message_id is invalid
         """
-        parts = request_id.split(self.REQUEST_ID_DELIMITER)
+        parts = message_id.split(self.MESSAGE_ID_DELIMITER)
         if len(parts) != 3:
-            raise ValueError(f"Invalid request_id format: {request_id}")
+            raise ValueError(f"Invalid message_id format: {message_id}")
 
         from_agent, to_agent, _ = parts
         return from_agent, to_agent
 
-    def respond_to_request(
+    # Backwards compat alias
+    _parse_request_id = _parse_message_id
+
+    def reply(
         self,
-        request_id: str,
+        message_id: str,
         from_agent: str,
         response: str,
         status: str = "success",
     ) -> dict:
-        """Send a response to a previous request.
+        """Send a reply to a previous message.
 
         Args:
-            request_id: The ID of the original request
-            from_agent: The agent sending the response (must be the original recipient)
-            response: The response message
-            status: Response status, default "success"
+            message_id: The ID of the original message
+            from_agent: The agent sending the reply (must be the original recipient)
+            response: The reply content
+            status: Reply status, default "success"
 
         Returns:
-            Response data dict with request_id, from_agent, to_agent, response, etc.
+            Reply data dict with message_id, from_agent, to_agent, response, etc.
         """
-        # Parse request_id to find original sender
-        original_sender, original_recipient = self._parse_request_id(request_id)
+        # Parse message_id to find original sender
+        original_sender, original_recipient = self._parse_message_id(message_id)
 
         now = datetime.now(timezone.utc).isoformat()
 
-        response_data = {
-            "request_id": request_id,
+        reply_data = {
+            "message_id": message_id,
             "from_agent": from_agent,
             "to_agent": original_sender,
             "response": response,
@@ -290,16 +302,26 @@ class MessageManager:
 
         # Push to original sender's response queue
         response_key = f"{self.RESPONSES_PREFIX}{original_sender}"
-        self.redis.rpush(response_key, json.dumps(response_data))
+        self.redis.rpush(response_key, json.dumps(reply_data))
 
-        logger.info("response_sent request_id=%s from=%s to=%s status=%s", request_id, from_agent, original_sender, status)
+        logger.info("reply_sent message_id=%s from=%s to=%s status=%s", message_id, from_agent, original_sender, status)
 
-        # Push notification so wait_for_message wakes on responses too
+        # Push notification so wait_for_message wakes on replies too
         notify_key = f"{self.NOTIFY_PREFIX}{original_sender}"
         self.redis.rpush(notify_key, "1")
         self.redis.expire(notify_key, self.MESSAGE_TTL_SECONDS)
 
-        return response_data
+        return reply_data
+
+    def respond_to_request(
+        self,
+        request_id: str,
+        from_agent: str,
+        response: str,
+        status: str = "success",
+    ) -> dict:
+        """Backwards compat wrapper for reply()."""
+        return self.reply(request_id, from_agent, response, status)
 
     def wait_for_response(
         self,
@@ -307,17 +329,17 @@ class MessageManager:
         request_id: str,
         timeout: int = 60,
     ) -> Optional[dict]:
-        """Wait for a response to a specific request.
+        """Wait for a reply to a specific message.
 
-        Uses Redis BLPOP to block until a response arrives or timeout.
+        Uses Redis BLPOP to block until a reply arrives or timeout.
 
         Args:
-            agent_id: The agent waiting for the response
-            request_id: The request ID to wait for
+            agent_id: The agent waiting for the reply
+            request_id: The message ID to wait for
             timeout: Timeout in seconds (default 60)
 
         Returns:
-            Response dict if received, or None if timeout
+            Reply dict if received, or None if timeout
         """
         response_key = f"{self.RESPONSES_PREFIX}{agent_id}"
         deadline = datetime.now(timezone.utc).timestamp() + timeout
@@ -325,7 +347,7 @@ class MessageManager:
         while True:
             remaining = deadline - datetime.now(timezone.utc).timestamp()
             if remaining <= 0:
-                logger.info("wait_response_timeout agent=%s request_id=%s timeout=%d", agent_id, request_id, timeout)
+                logger.info("wait_response_timeout agent=%s message_id=%s timeout=%d", agent_id, request_id, timeout)
                 return None
 
             # BLPOP returns (key, value) or None on timeout
@@ -342,14 +364,15 @@ class MessageManager:
 
             response = json.loads(data)
 
-            # Check if this is the response we're waiting for
-            if response.get("request_id") == request_id:
-                logger.info("wait_response_matched agent=%s request_id=%s", agent_id, request_id)
+            # Check if this is the reply we're waiting for (support both old and new field names)
+            resp_id = response.get("message_id") or response.get("request_id")
+            if resp_id == request_id:
+                logger.info("wait_response_matched agent=%s message_id=%s", agent_id, request_id)
                 return response
 
-            # Not our response, put it back for another waiter
+            # Not our reply, put it back for another waiter
             # Use rpush to maintain FIFO order (append to end of queue)
-            logger.debug("wait_response_putback agent=%s got_request_id=%s wanted=%s", agent_id, response.get("request_id"), request_id)
+            logger.debug("wait_response_putback agent=%s got_id=%s wanted=%s", agent_id, resp_id, request_id)
             self.redis.rpush(response_key, json.dumps(response))
 
     def wait_for_request(
@@ -357,14 +380,14 @@ class MessageManager:
         agent_id: str,
         timeout: int = 60,
     ) -> Optional[dict]:
-        """Wait for notification that a request is available, without consuming it.
+        """Wait for notification that a message is available, without consuming it.
 
         Blocks on a notification channel until a signal arrives or timeout.
-        The actual message remains in the inbox for get_pending_requests to consume.
+        The actual message remains in the inbox for get_pending_messages to consume.
         Uses a polling loop with max 10-second BLPOP intervals for HTTP health.
 
         Args:
-            agent_id: The agent waiting for requests
+            agent_id: The agent waiting for messages
             timeout: Timeout in seconds (default 60)
 
         Returns:
@@ -385,24 +408,24 @@ class MessageManager:
 
             if result is not None:
                 # Got a notification — peek at inbox for count
-                pending = self.peek_pending_requests(agent_id)
+                pending = self.peek_pending_messages(agent_id)
                 logger.info("wait_request_notified agent=%s pending=%d", agent_id, len(pending))
                 return {"status": "ready", "pending": len(pending)}
 
-    def _get_pending_responses(self, agent_id: str) -> list[dict]:
-        """Get and consume all pending responses for an agent.
+    def _get_pending_replies(self, agent_id: str) -> list[dict]:
+        """Get and consume all pending replies for an agent.
 
-        This removes the responses from the queue (they are consumed).
+        This removes the replies from the queue (they are consumed).
         Expired messages are automatically filtered out.
 
         Args:
             agent_id: The agent whose response queue to check
 
         Returns:
-            List of response dicts, oldest first (FIFO), excluding expired
+            List of reply dicts, oldest first (FIFO), excluding expired
         """
         response_key = f"{self.RESPONSES_PREFIX}{agent_id}"
-        responses = []
+        replies = []
 
         while True:
             data = self.redis.lpop(response_key)
@@ -414,38 +437,49 @@ class MessageManager:
 
             message = json.loads(data)
             if not self._is_message_expired(message):
-                responses.append(message)
+                replies.append(message)
 
-        logger.info("responses_consumed agent=%s count=%d", agent_id, len(responses))
-        return responses
+        logger.info("replies_consumed agent=%s count=%d", agent_id, len(replies))
+        return replies
+
+    # Backwards compat alias
+    _get_pending_responses = _get_pending_replies
 
     def get_messages(
         self,
         agent_id: str,
         message_type: Optional[str] = None,
     ) -> list[dict]:
-        """Get all pending messages (requests and/or responses) for an agent.
+        """Get all pending messages (incoming and replies) for an agent.
 
         Consumes messages from the matching queues. Each message gets a "type"
-        field ("request" or "response") so the caller can distinguish them.
+        field ("message" or "reply") so the caller can distinguish them.
 
         Args:
             agent_id: The agent whose messages to retrieve
-            message_type: Optional filter - "request", "response", or None (both)
+            message_type: Optional filter - "message", "reply", or None (both).
+                          Also accepts legacy values "request" and "response".
 
         Returns:
             List of message dicts with added "type" field, oldest first
         """
+        # Normalize legacy type values
+        normalized_type = message_type
+        if message_type == "request":
+            normalized_type = "message"
+        elif message_type == "response":
+            normalized_type = "reply"
+
         messages = []
 
-        if message_type is None or message_type == "request":
-            for msg in self.get_pending_requests(agent_id):
-                msg["type"] = "request"
+        if normalized_type is None or normalized_type == "message":
+            for msg in self.get_pending_messages(agent_id):
+                msg["type"] = "message"
                 messages.append(msg)
 
-        if message_type is None or message_type == "response":
-            for msg in self._get_pending_responses(agent_id):
-                msg["type"] = "response"
+        if normalized_type is None or normalized_type == "reply":
+            for msg in self._get_pending_replies(agent_id):
+                msg["type"] = "reply"
                 messages.append(msg)
 
         logger.info("get_messages agent=%s type=%s count=%d", agent_id, message_type, len(messages))
@@ -458,7 +492,7 @@ class MessageManager:
         message_type: Optional[str] = None,
         heartbeat_fn: Optional[callable] = None,
     ) -> Optional[list[dict]]:
-        """Wait for any message (request or response) to arrive, then return all pending.
+        """Wait for any message (incoming or reply) to arrive, then return all pending.
 
         First checks for existing messages (non-blocking). If none, blocks on the
         notification channel until a signal arrives or timeout. Then drains via
@@ -467,7 +501,8 @@ class MessageManager:
         Args:
             agent_id: The agent waiting for messages
             timeout: Timeout in seconds (default 60)
-            message_type: Optional filter - "request", "response", or None (both)
+            message_type: Optional filter - "message", "reply", or None (both).
+                          Also accepts legacy "request" and "response".
 
         Returns:
             List of message dicts if any arrived, or None if timeout

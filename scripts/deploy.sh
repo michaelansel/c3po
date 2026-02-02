@@ -81,25 +81,37 @@ ensure_secrets() {
     # Check if secrets file exists on NAS
     if ssh "$NAS_HOST" "test -f ${SECRETS_FILE}"; then
         log "Loading existing secrets"
+        # Check if new auth keys exist, add them if missing (migration from v0.5.x)
+        local has_server_secret
+        has_server_secret=$(ssh "$NAS_HOST" "grep -c C3PO_SERVER_SECRET ${SECRETS_FILE} || true")
+        if [[ "$has_server_secret" == "0" ]]; then
+            log "Migrating secrets: adding C3PO_SERVER_SECRET and C3PO_ADMIN_KEY..."
+            local server_secret admin_key
+            server_secret=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+            admin_key=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+            ssh "$NAS_HOST" "echo 'C3PO_SERVER_SECRET=${server_secret}' >> ${SECRETS_FILE} && echo 'C3PO_ADMIN_KEY=${admin_key}' >> ${SECRETS_FILE}"
+            warn "New secrets added. Admin key: ${admin_key}"
+            warn "Save the admin key — it is needed for client enrollment."
+        fi
     else
         log "Generating new secrets..."
-        local redis_password
+        local redis_password proxy_bearer_token server_secret admin_key
         redis_password=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-        local proxy_bearer_token
         proxy_bearer_token=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-        local hook_secret
-        hook_secret=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+        server_secret=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+        admin_key=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 
         ssh "$NAS_HOST" "mkdir -p ${NAS_DATA_DIR} && cat > ${SECRETS_FILE} << 'SECRETS_EOF'
 REDIS_PASSWORD=${redis_password}
 C3PO_PROXY_BEARER_TOKEN=${proxy_bearer_token}
-C3PO_HOOK_SECRET=${hook_secret}
+C3PO_SERVER_SECRET=${server_secret}
+C3PO_ADMIN_KEY=${admin_key}
 SECRETS_EOF
 chmod 600 ${SECRETS_FILE}"
 
         log "Secrets generated and stored at ${SECRETS_FILE}"
-        warn "Hook secret: ${hook_secret}"
-        warn "Save this — it is needed for client enrollment."
+        warn "Admin key: ${admin_key}"
+        warn "Save the admin key — it is needed for client enrollment."
     fi
 }
 
@@ -116,9 +128,11 @@ cmd_deploy() {
     # Load secrets (don't log them)
     local secrets_content
     secrets_content=$(ssh "$NAS_HOST" "cat ${SECRETS_FILE}")
-    local redis_password proxy_bearer_token
-    redis_password=$(echo "$secrets_content" | grep REDIS_PASSWORD | cut -d= -f2)
-    proxy_bearer_token=$(echo "$secrets_content" | grep C3PO_PROXY_BEARER_TOKEN | cut -d= -f2)
+    local redis_password proxy_bearer_token server_secret admin_key
+    redis_password=$(echo "$secrets_content" | grep REDIS_PASSWORD | cut -d= -f2 || true)
+    proxy_bearer_token=$(echo "$secrets_content" | grep C3PO_PROXY_BEARER_TOKEN | cut -d= -f2 || true)
+    server_secret=$(echo "$secrets_content" | grep C3PO_SERVER_SECRET | cut -d= -f2 || true)
+    admin_key=$(echo "$secrets_content" | grep C3PO_ADMIN_KEY | cut -d= -f2 || true)
 
     # Stop existing containers
     ssh "$NAS_HOST" "${NAS_DOCKER} stop c3po-coordinator c3po-redis 2>/dev/null || true"
@@ -153,6 +167,8 @@ cmd_deploy() {
         --restart unless-stopped \
         -e REDIS_URL='${redis_url}' \
         -e C3PO_PROXY_BEARER_TOKEN='${proxy_bearer_token}' \
+        -e C3PO_SERVER_SECRET='${server_secret}' \
+        -e C3PO_ADMIN_KEY='${admin_key}' \
         -p ${COORDINATOR_PORT}:8420 \
         c3po-coordinator:latest"
 

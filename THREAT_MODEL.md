@@ -1,19 +1,22 @@
 # C3PO Threat Model
 
-This document describes the security architecture, trust boundaries, and threat mitigations for the C3PO multi-agent coordination system using the OAuth + mcp-auth-proxy gateway.
+This document describes the security architecture, trust boundaries, and threat mitigations for the C3PO multi-agent coordination system.
 
 ## Architecture Overview
 
 ```
 Claude Desktop/Mobile ──┐
                         ├──> nginx (TLS) ──> mcp-auth-proxy:8421 ──> coordinator:8420
-Claude Code (MCP)  ─────┘         │                                        ↑
-                                  │         (OAuth flow + proxy-bearer-token)
-Hook scripts (REST) ──> nginx ────┘──────────────────────────────> coordinator:8420
-                        (hook secret → injects proxy-bearer-token)
+Claude Code (OAuth)  ───┘         │              (OAuth flow)           /oauth/mcp
+                                  │
+Claude Code (API key) ──> nginx ──┼─────────────────────────────────> coordinator:8420
+                           (TLS)  │                                    /agent/mcp
+                                  │
+Hook scripts (REST) ──> nginx ────┘─────────────────────────────────> coordinator:8420
+                         (TLS)                                         /agent/api/*
 
-Claude Code (headless) ──> nginx ──> /mcp-headless ──────────────> coordinator:8420
-                           (hook secret → injects proxy-bearer-token, rewrites to /mcp)
+Admin tools ──> nginx ──────────────────────────────────────────────> coordinator:8420
+                 (TLS)                                                 /admin/api/*
 ```
 
 ## Trust Boundaries
@@ -23,28 +26,28 @@ Claude Code (headless) ──> nginx ──> /mcp-headless ───────
 - **Protection**: TLS 1.2+, rate limiting, request size limits
 - **Trust level**: Untrusted
 
-### Boundary 2: nginx → mcp-auth-proxy (MCP traffic)
-- **What crosses**: OAuth-authenticated MCP requests
+### Boundary 2: nginx → mcp-auth-proxy (OAuth MCP traffic)
+- **What crosses**: OAuth-authenticated MCP requests on `/oauth/*`
 - **Protection**: mcp-auth-proxy validates GitHub OAuth tokens, restricts allowed users
 - **Trust level**: Authenticated user identity (but not forwarded to coordinator)
 
-### Boundary 3: nginx → coordinator (hook REST traffic)
-- **What crosses**: Hook REST requests (`/api/*`)
-- **Protection**: nginx validates `X-C3PO-Hook-Secret` header, injects `Authorization: Bearer <proxy-token>`
-- **Trust level**: Holder of hook secret (assumed to be the enrolled machine)
+### Boundary 3: nginx → coordinator (API key traffic)
+- **What crosses**: MCP and REST requests on `/agent/*` with `Authorization: Bearer <server_secret>.<api_key>`
+- **Protection**: Coordinator validates server_secret, hashes api_key, looks up in Redis. Agent pattern enforcement via fnmatch restricts which agent IDs a key can use.
+- **Trust level**: Holder of a valid API key (scoped to agent_pattern)
 
-### Boundary 3b: nginx → coordinator (headless MCP traffic)
-- **What crosses**: MCP requests via `/mcp-headless` from headless systems
-- **Protection**: nginx validates `X-C3PO-Hook-Secret` header, rewrites path to `/mcp`, injects `Authorization: Bearer <proxy-token>`
-- **Trust level**: Holder of hook secret. Same trust level as hook REST traffic, but grants full MCP access (not just REST).
+### Boundary 4: nginx → coordinator (admin traffic)
+- **What crosses**: Admin REST requests on `/admin/*` with `Authorization: Bearer <admin_key>`
+- **Protection**: Coordinator validates admin key against `C3PO_ADMIN_KEY` env var
+- **Trust level**: Holder of admin key (full admin access)
 
-### Boundary 4: mcp-auth-proxy → coordinator (proxied MCP)
+### Boundary 5: mcp-auth-proxy → coordinator (proxied MCP)
 - **What crosses**: MCP tool calls with proxy bearer token injected
 - **Protection**: Coordinator validates `C3PO_PROXY_BEARER_TOKEN`
 - **Trust level**: Fully trusted (proxy has already authenticated the user)
 
-### Boundary 5: coordinator → Redis
-- **What crosses**: All state (agents, messages, rate limits, audit)
+### Boundary 6: coordinator → Redis
+- **What crosses**: All state (agents, messages, rate limits, audit, API keys)
 - **Protection**: Redis password, Docker network isolation
 - **Trust level**: Internal, trusted
 
@@ -52,90 +55,93 @@ Claude Code (headless) ──> nginx ──> /mcp-headless ───────
 
 | Principal | Authentication | Authorization |
 |-----------|---------------|---------------|
-| MCP client (interactive) | GitHub OAuth via mcp-auth-proxy | `--github-allowed-users` whitelist |
-| MCP client (headless) | `X-C3PO-Hook-Secret` via `/mcp-headless` (validated by nginx) | Full MCP access (same as OAuth-authenticated) |
-| Hook scripts | `X-C3PO-Hook-Secret` header (validated by nginx) | Allowed to call `/api/*` endpoints |
-| Admin (audit access) | Hook secret → proxy bearer token | Any holder of hook secret can access audit |
-| Coordinator | Trusts proxy bearer token | N/A (server-side) |
+| MCP client (OAuth) | GitHub OAuth via mcp-auth-proxy | `--github-allowed-users` whitelist |
+| MCP client (API key) | `Bearer <server_secret>.<api_key>` on `/agent/mcp` | agent_pattern restricts usable agent IDs |
+| Hook scripts | `Bearer <server_secret>.<api_key>` on `/agent/api/*` | agent_pattern restricts usable agent IDs |
+| Admin | `Bearer <admin_key>` on `/admin/api/*` | Full admin access (key management, audit) |
+| Coordinator | Validates tokens per path prefix | N/A (server-side) |
 
 ## Single-Tenant Limitation
 
-mcp-auth-proxy does not forward per-user identity to the coordinator. All authenticated requests appear the same to the coordinator. This means:
+mcp-auth-proxy does not forward per-user identity to the coordinator. All OAuth-authenticated requests appear the same to the coordinator. For API key auth, agent_pattern provides some scoping but multiple keys can have overlapping patterns.
 
-- Any authenticated user can act as any agent ID
-- Any authenticated user can read any agent's messages
-- The `--github-allowed-users` restriction at the proxy is the sole access control
+This means:
+- Any OAuth-authenticated user can act as any agent ID
+- API key users are restricted to agent IDs matching their key's agent_pattern
+- The `--github-allowed-users` restriction at the proxy is the sole OAuth access control
 
 This is acceptable for single-user deployments. Multi-tenancy would require upstream changes to mcp-auth-proxy to forward identity headers.
 
 ## Threat Analysis
 
 ### T1: Unauthenticated MCP access
-- **Attack**: Attacker sends MCP requests without OAuth
-- **Mitigation**: mcp-auth-proxy rejects unauthenticated requests; coordinator validates proxy bearer token as defense-in-depth
-- **Residual risk**: None if both layers are configured
+- **Attack**: Attacker sends MCP requests without credentials
+- **Mitigation**: `/oauth/mcp` requires OAuth via mcp-auth-proxy; `/agent/mcp` requires valid API key; coordinator validates tokens as defense-in-depth
+- **Residual risk**: None if auth is configured
 
 ### T2: Unauthenticated REST access
-- **Attack**: Attacker sends REST requests without hook secret
-- **Mitigation**: nginx validates `X-C3PO-Hook-Secret` and rejects requests with invalid/missing secret
-- **Residual risk**: None if nginx config is correct
+- **Attack**: Attacker sends REST requests without credentials
+- **Mitigation**: `/agent/api/*` requires valid API key; `/admin/api/*` requires admin key; coordinator validates on every request
+- **Residual risk**: None if auth is configured
 
-### T3: Hook secret brute force
-- **Attack**: Attacker tries to guess the hook secret
-- **Mitigation**: nginx rate limiting (30r/s for API, 5r/m for admin); secret is a random value
-- **Residual risk**: Low. Secrets should be 32+ bytes of random data.
+### T3: API key brute force
+- **Attack**: Attacker tries to guess API keys
+- **Mitigation**: nginx rate limiting; coordinator rate limiting (rest_register: 5/60s); API keys are random UUIDs (128 bits of entropy); server_secret adds another layer
+- **Residual risk**: Low. Combined server_secret + API key makes brute force infeasible.
 
-### T4: Proxy bearer token leak
-- **Attack**: Attacker obtains the proxy bearer token
-- **Mitigation**: Token only exists in coordinator env, mcp-auth-proxy config, and nginx config (all server-side). Never sent to clients.
-- **Residual risk**: Server compromise would expose this. Standard server hardening applies.
+### T4: API key leak from client
+- **Attack**: API key stored in `~/.claude/c3po-credentials.json` is compromised
+- **Mitigation**: File permissions (0o600). Keys are scoped by agent_pattern (limits which agent IDs can be used). Individual keys can be revoked via admin API without affecting other agents.
+- **Residual risk**: Local account compromise would expose the key. Unlike the old hook secret, compromised keys can be individually revoked and are scoped to specific agent patterns.
 
-### T5: Hook secret leak from client
-- **Attack**: Hook secret stored in `~/.claude.json` is compromised
-- **Mitigation**: File permissions (0600 for agent ID files). Rate limiting applies.
-- **Residual risk**: Local account compromise would expose this. Since the `/mcp-headless` endpoint exists, a leaked hook secret now grants full MCP access (not just REST). This is equivalent to a full session compromise for single-tenant deployments. The hook secret should be treated with the same sensitivity as an OAuth token.
+### T5: Server secret leak
+- **Attack**: Server secret (`C3PO_SERVER_SECRET`) is compromised
+- **Mitigation**: Only exists in server environment variables. Never sent to clients (clients only get API keys).
+- **Residual risk**: Server compromise would expose this. However, the attacker would also need a valid API key hash in Redis to authenticate. Server secret alone is not sufficient.
 
-### T6: OAuth token theft
+### T6: Admin key leak
+- **Attack**: Admin key is compromised
+- **Mitigation**: Only used during enrollment (setup.py). Not stored in credentials file after enrollment. Rate limiting on admin endpoints.
+- **Residual risk**: Leaked admin key allows creating new API keys and viewing audit logs. Can be rotated by changing `C3PO_ADMIN_KEY` env var and redeploying.
+
+### T7: OAuth token theft
 - **Attack**: Attacker steals a GitHub OAuth token
 - **Mitigation**: Tokens are managed by mcp-auth-proxy with standard OAuth flows (PKCE, short-lived tokens). GitHub account security applies.
 - **Residual risk**: Standard OAuth risks. GitHub's own security measures apply.
 
-### T7: Message interception between agents
+### T8: Message interception between agents
 - **Attack**: Attacker reads messages between coordinated agents
 - **Mitigation**: All traffic is TLS-encrypted. Messages stored in Redis (Docker-internal, password-protected).
 - **Residual risk**: Server compromise would expose stored messages. Messages expire after 24h.
 
-### T8: Agent impersonation
+### T9: Agent impersonation
 - **Attack**: Authenticated user registers as another agent ID
-- **Mitigation**: None at the coordinator level (single-tenant). The `--github-allowed-users` restriction limits who can authenticate at all.
-- **Residual risk**: Accepted for single-user deployments. Any authenticated user can claim any agent ID.
+- **Mitigation**: API key auth enforces agent_pattern via fnmatch. A key with pattern `macbook/*` cannot register as `other-machine/project`.
+- **Residual risk**: OAuth users are not restricted by agent_pattern (single-tenant assumption). Keys with wildcard patterns (`*`) can impersonate any agent.
 
-### T9: Denial of service
+### T10: Denial of service
 - **Attack**: Attacker floods the coordinator with requests
 - **Mitigation**: nginx rate limiting, coordinator-level per-operation rate limiting, Docker resource limits (CPU, memory), Redis memory limits
 - **Residual risk**: Determined attacker with valid credentials could exhaust rate limits
 
-### T10: mcp-auth-proxy compromise
-- **Attack**: Vulnerability in mcp-auth-proxy allows bypass
-- **Mitigation**: Defense-in-depth: coordinator still validates proxy bearer token. Docker container isolation, resource limits, restart policy.
-- **Residual risk**: If proxy is bypassed AND attacker obtains proxy bearer token, full access is possible.
-
-### T11: Headless endpoint bypasses OAuth
-- **Attack**: Attacker uses `/mcp-headless` with a stolen hook secret to bypass the GitHub OAuth flow entirely
-- **Mitigation**: Hook secret is validated by nginx (same as REST endpoints). Rate limiting applies. The headless endpoint is functionally equivalent to having a valid OAuth token — it does not grant any additional capabilities beyond what OAuth provides.
-- **Residual risk**: The hook secret now serves as a static credential for full MCP access, unlike OAuth tokens which are time-limited and revocable per-session. Compromise of the hook secret requires rotation via redeployment and re-enrollment of all clients. For single-tenant deployments, this is acceptable since the hook secret was already trusted for REST operations.
-
-### T12: Health endpoint information disclosure
+### T11: Health endpoint information disclosure
 - **Attack**: Unauthenticated access to `/api/health` reveals agent count
 - **Mitigation**: Intentionally unauthenticated for monitoring. Only reveals agent count, no sensitive data.
 - **Residual risk**: Accepted. Agent count is low-sensitivity information.
+
+### T12: Redis API key storage compromise
+- **Attack**: Attacker with Redis access reads API key hashes
+- **Mitigation**: API keys are stored as SHA-256 hashes, not plaintext. Even with Redis access, keys cannot be recovered from hashes.
+- **Residual risk**: Attacker could delete keys (DoS) or add new keys if they also know the hash format. Redis access implies server compromise.
 
 ## Secret Inventory
 
 | Secret | Stored In | Rotated By | Scope |
 |--------|-----------|------------|-------|
-| `C3PO_PROXY_BEARER_TOKEN` | Server `.env`, coordinator env, mcp-auth-proxy config, nginx config | Manual (redeploy) | All authenticated access to coordinator |
-| `C3PO_HOOK_SECRET` | Server `.env`, nginx config, client `~/.claude.json` | Manual (redeploy + re-enroll) | REST API access via nginx |
+| `C3PO_SERVER_SECRET` | Server `.env`, coordinator env | Manual (redeploy) | Validates API key bearer tokens |
+| `C3PO_ADMIN_KEY` | Server `.env`, coordinator env | Manual (redeploy) | Admin API access |
+| `C3PO_PROXY_BEARER_TOKEN` | Server `.env`, coordinator env, mcp-auth-proxy config | Manual (redeploy) | OAuth proxy → coordinator trust |
+| Per-agent API keys | Client `~/.claude/c3po-credentials.json`, Redis (hashed) | `DELETE /admin/api/keys/{id}` | Per-agent MCP and REST access |
 | `GITHUB_CLIENT_SECRET` | Server `.env`, mcp-auth-proxy config | Via GitHub OAuth App settings | OAuth authentication |
 | `REDIS_PASSWORD` | Server `.env`, coordinator env, Redis config | Manual (redeploy) | Redis access |
 
@@ -143,12 +149,13 @@ This is acceptable for single-user deployments. Multi-tenancy would require upst
 
 - [ ] Generate strong random values for all secrets (32+ bytes)
 - [ ] Set `--github-allowed-users` to restrict OAuth access
-- [ ] Verify nginx config has correct hook secret value
-- [ ] Verify nginx config has correct proxy bearer token value
+- [ ] Set `C3PO_SERVER_SECRET`, `C3PO_ADMIN_KEY`, `C3PO_PROXY_BEARER_TOKEN` in coordinator env
+- [ ] Configure nginx path-based routing: `/oauth/` → proxy, `/agent/` + `/admin/` → coordinator
 - [ ] Enable TLS via certbot
 - [ ] Verify health endpoint works without auth: `curl https://mcp.qerk.be/api/health`
-- [ ] Verify hook endpoint rejects without secret: `curl https://mcp.qerk.be/api/register` (should 401)
-- [ ] Verify MCP endpoint requires OAuth: `curl https://mcp.qerk.be/mcp` (should 401/redirect)
-- [ ] Verify headless endpoint rejects without secret: `curl https://mcp.qerk.be/mcp-headless` (should 401)
-- [ ] Verify headless endpoint works with secret: `curl -H "X-C3PO-Hook-Secret: <secret>" https://mcp.qerk.be/mcp-headless` (should connect)
+- [ ] Verify agent endpoint rejects without credentials: `curl https://mcp.qerk.be/agent/api/register` (should 401)
+- [ ] Verify admin endpoint rejects without credentials: `curl https://mcp.qerk.be/admin/api/keys` (should 401)
+- [ ] Verify OAuth MCP endpoint requires OAuth: `curl https://mcp.qerk.be/oauth/mcp` (should 401/redirect)
+- [ ] Verify API key MCP endpoint works with valid key: `curl -H "Authorization: Bearer <secret>.<key>" https://mcp.qerk.be/agent/mcp`
 - [ ] Verify OAuth discovery: `curl https://mcp.qerk.be/.well-known/oauth-authorization-server`
+- [ ] Enroll at least one agent via `setup.py --enroll` and verify connectivity

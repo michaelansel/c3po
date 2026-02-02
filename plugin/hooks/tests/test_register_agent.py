@@ -54,7 +54,7 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
         if self.response_delay:
             time.sleep(self.response_delay)
 
-        if self.path == "/api/register":
+        if self.path == "/agent/api/register":
             self.send_response(self.response_code)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

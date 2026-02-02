@@ -106,10 +106,10 @@ class TestGetMessagesImpl:
 
     def test_returns_messages(self, message_manager):
         """Should return messages from get_messages."""
-        message_manager.send_request("a", "b", "hello")
+        message_manager.send_message("a", "b", "hello")
         result = _get_messages_impl(message_manager, "b")
         assert len(result) == 1
-        assert result[0]["type"] == "request"
+        assert result[0]["type"] == "message"
 
     def test_invalid_type_raises(self, message_manager):
         """Should raise ToolError for invalid type parameter."""
@@ -117,14 +117,29 @@ class TestGetMessagesImpl:
             _get_messages_impl(message_manager, "b", message_type="invalid")
 
     def test_none_type_returns_both(self, message_manager):
-        """Should return both requests and responses when type is None."""
-        req = message_manager.send_request("a", "b", "Q")
-        message_manager.respond_to_request(req["id"], "b", "A")
+        """Should return both messages and replies when type is None."""
+        req = message_manager.send_message("a", "b", "Q")
+        message_manager.reply(req["id"], "b", "A")
 
-        # Agent a gets responses, agent b gets requests
+        # Agent a gets replies, agent b gets messages
         msgs_a = _get_messages_impl(message_manager, "a", message_type=None)
         assert len(msgs_a) == 1
-        assert msgs_a[0]["type"] == "response"
+        assert msgs_a[0]["type"] == "reply"
+
+    def test_legacy_type_request_accepted(self, message_manager):
+        """Should accept legacy type='request' and return messages."""
+        message_manager.send_message("a", "b", "hello")
+        result = _get_messages_impl(message_manager, "b", message_type="request")
+        assert len(result) == 1
+        assert result[0]["type"] == "message"
+
+    def test_legacy_type_response_accepted(self, message_manager):
+        """Should accept legacy type='response' and return replies."""
+        req = message_manager.send_message("a", "b", "Q")
+        message_manager.reply(req["id"], "b", "A")
+        result = _get_messages_impl(message_manager, "a", message_type="response")
+        assert len(result) == 1
+        assert result[0]["type"] == "reply"
 
 
 class TestWaitForMessageImpl:
@@ -138,7 +153,7 @@ class TestWaitForMessageImpl:
 
     def test_returns_received_dict(self, message_manager):
         """Should return received dict with messages."""
-        message_manager.send_request("a", "b", "hello")
+        message_manager.send_message("a", "b", "hello")
         result = _wait_for_message_impl(message_manager, "b", timeout=5)
         assert result["status"] == "received"
         assert len(result["messages"]) == 1
@@ -150,7 +165,7 @@ class TestWaitForMessageImpl:
 
     def test_timeout_clamped_to_max(self, message_manager):
         """Timeout > 3600 should be clamped, not error. Pre-queue a message so it returns immediately."""
-        message_manager.send_request("sender", "agent-a", "hello")
+        message_manager.send_message("sender", "agent-a", "hello")
         result = _wait_for_message_impl(message_manager, "agent-a", timeout=9999)
         assert result["status"] == "received"
         assert len(result["messages"]) == 1

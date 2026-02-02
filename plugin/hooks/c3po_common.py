@@ -3,7 +3,7 @@ Shared utilities for C3PO hook scripts.
 
 Provides common functionality used across SessionStart, PreToolUse, Stop,
 and SessionEnd hooks: coordinator URL discovery, agent ID file I/O,
-and stdin JSON parsing.
+credentials management, and stdin JSON parsing.
 """
 
 from __future__ import annotations
@@ -17,27 +17,47 @@ import sys
 import urllib.request
 
 
+CREDENTIALS_FILE = os.path.expanduser("~/.claude/c3po-credentials.json")
+
+
+def get_credentials() -> dict:
+    """Load credentials from ~/.claude/c3po-credentials.json.
+
+    Returns:
+        Dict with coordinator_url, server_secret, api_key, key_id, agent_pattern.
+        Returns empty dict if file doesn't exist or is invalid.
+    """
+    try:
+        with open(CREDENTIALS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
+        return {}
+
+
+def save_credentials(credentials: dict) -> None:
+    """Save credentials to ~/.claude/c3po-credentials.json with 0o600 perms.
+
+    Args:
+        credentials: Dict with coordinator_url, server_secret, api_key, etc.
+    """
+    os.makedirs(os.path.dirname(CREDENTIALS_FILE), exist_ok=True)
+    fd = os.open(CREDENTIALS_FILE, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(credentials, f, indent=2)
+        f.write("\n")
+
+
 def get_machine_name() -> str:
     """Get the configured machine name from MCP headers or environment.
 
     Priority:
     1. C3PO_MACHINE_NAME environment variable
-    2. C3PO_AGENT_ID environment variable (deprecated fallback)
-    3. X-Machine-Name header default from ~/.claude.json MCP config
+    2. X-Machine-Name header default from ~/.claude.json MCP config
        (parses shell syntax like "${C3PO_MACHINE_NAME:-Michaels-Mac-mini}")
-       Falls back to X-Agent-ID header for old configs.
-    4. Fallback to hostname
-
-    This ensures hooks use the same machine name that was configured
-    during setup, rather than independently computing the hostname
-    (which may differ, e.g. inside containers).
+    3. Fallback to hostname
     """
     if machine_name := os.environ.get("C3PO_MACHINE_NAME"):
         return machine_name
-
-    if agent_id := os.environ.get("C3PO_AGENT_ID"):
-        print("[c3po] Warning: C3PO_AGENT_ID is deprecated, use C3PO_MACHINE_NAME instead", file=sys.stderr)
-        return agent_id
 
     # Read from ~/.claude.json MCP header config
     claude_json = os.path.expanduser("~/.claude.json")
@@ -47,10 +67,9 @@ def get_machine_name() -> str:
         mcp_servers = config.get("mcpServers", {})
         c3po_config = mcp_servers.get("c3po", {})
         headers = c3po_config.get("headers", {})
-        # Try X-Machine-Name first, fall back to X-Agent-ID for old configs
-        header_value = headers.get("X-Machine-Name", "") or headers.get("X-Agent-ID", "")
+        header_value = headers.get("X-Machine-Name", "")
         if header_value:
-            # Parse shell variable syntax: "${C3PO_MACHINE_NAME:-default}" or "${C3PO_AGENT_ID:-default}"
+            # Parse shell variable syntax: "${C3PO_MACHINE_NAME:-default}"
             match = re.match(r'\$\{[^:}]+:-([^}]+)\}', header_value)
             if match:
                 return match.group(1)
@@ -63,19 +82,21 @@ def get_machine_name() -> str:
     return platform.node().split('.')[0]
 
 
-# Deprecated alias for backwards compatibility
-get_configured_machine_name = get_machine_name
-
-
 def get_coordinator_url() -> str:
-    """Get coordinator URL from environment or claude.json MCP config.
+    """Get coordinator URL from credentials file, environment, or claude.json MCP config.
 
     Priority:
     1. C3PO_COORDINATOR_URL environment variable (allows override)
-    2. MCP server URL from ~/.claude.json
-    3. Fallback to localhost
+    2. Credentials file (~/.claude/c3po-credentials.json)
+    3. MCP server URL from ~/.claude.json
+    4. Fallback to localhost
     """
     if url := os.environ.get("C3PO_COORDINATOR_URL"):
+        return url
+
+    # Try credentials file
+    creds = get_credentials()
+    if url := creds.get("coordinator_url"):
         return url
 
     claude_json = os.path.expanduser("~/.claude.json")
@@ -86,7 +107,11 @@ def get_coordinator_url() -> str:
         c3po_config = mcp_servers.get("c3po", {})
         url = c3po_config.get("url", "")
         if url:
-            return url.rsplit("/mcp", 1)[0]
+            # Strip /agent/mcp or /oauth/mcp suffix to get base URL
+            for suffix in ("/agent/mcp", "/oauth/mcp", "/mcp-headless", "/mcp"):
+                if url.endswith(suffix):
+                    return url[:-len(suffix)]
+            return url
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
         pass
 
@@ -114,53 +139,20 @@ def urlopen_with_ssl(req, timeout=5):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-def get_hook_secret() -> str | None:
-    """Get the hook secret for authenticating REST calls to the coordinator.
-
-    Hooks can't do OAuth (they run outside MCP sessions), so they
-    authenticate via a shared secret that nginx validates and converts
-    to the proxy bearer token.
-
-    Priority:
-    1. C3PO_HOOK_SECRET environment variable
-    2. Hook secret stored in ~/.claude.json MCP config headers
-       (written by setup.py during enrollment)
-    """
-    if secret := os.environ.get("C3PO_HOOK_SECRET"):
-        return secret
-
-    # Read from ~/.claude.json MCP header config
-    claude_json = os.path.expanduser("~/.claude.json")
-    try:
-        with open(claude_json) as f:
-            config = json.load(f)
-        mcp_servers = config.get("mcpServers", {})
-        c3po_config = mcp_servers.get("c3po", {})
-        headers = c3po_config.get("headers", {})
-        hook_secret = headers.get("X-C3PO-Hook-Secret", "")
-        if hook_secret:
-            # Handle shell variable syntax: "${C3PO_HOOK_SECRET:-actual_secret}"
-            match = re.match(r'\$\{[^:}]+:-([^}]+)\}', hook_secret)
-            if match:
-                return match.group(1)
-            # Plain value (no shell syntax)
-            if not hook_secret.startswith("$"):
-                return hook_secret
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass
-
-    return None
-
-
 def auth_headers() -> dict:
     """Return authentication headers for hook REST calls.
 
-    Returns X-C3PO-Hook-Secret header if configured.
-    Returns empty dict if no secret is set (dev mode / backwards compatibility).
+    Reads credentials from ~/.claude/c3po-credentials.json and returns
+    Authorization: Bearer <server_secret>.<api_key> header.
+    Returns empty dict if no credentials are set (dev mode).
     """
-    secret = get_hook_secret()
-    if secret:
-        return {"X-C3PO-Hook-Secret": secret}
+    creds = get_credentials()
+    server_secret = creds.get("server_secret", "")
+    api_key = creds.get("api_key", "")
+
+    if server_secret and api_key:
+        return {"Authorization": f"Bearer {server_secret}.{api_key}"}
+
     return {}
 
 
@@ -228,8 +220,7 @@ def get_session_id(stdin_data: dict) -> str:
     """Extract session_id from parsed hook stdin.
 
     Claude Code provides session_id (a stable UUID) in the stdin JSON
-    for all hooks. Raises an error if missing — the PPID fallback was
-    unreliable and masked bugs.
+    for all hooks. Raises an error if missing.
     """
     session_id = stdin_data.get("session_id")
     if not session_id:

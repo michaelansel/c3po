@@ -20,7 +20,7 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
     """Mock HTTP handler for testing coordinator responses."""
 
     # Class-level response configuration
-    pending_response = {"count": 0, "requests": []}
+    pending_response = {"count": 0, "messages": []}
     health_response = {"status": "ok", "agents_online": 0}
     response_delay = 0
 
@@ -35,7 +35,7 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
         if self.response_delay:
             time.sleep(self.response_delay)
 
-        if self.path == "/api/pending":
+        if self.path == "/agent/api/pending":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -51,7 +51,7 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Handle POST requests (heartbeat registration)."""
-        if self.path == "/api/register":
+        if self.path == "/agent/api/register":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -64,7 +64,7 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def mock_coordinator():
     """Start a mock coordinator server."""
-    MockCoordinatorHandler.pending_response = {"count": 0, "requests": []}
+    MockCoordinatorHandler.pending_response = {"count": 0, "messages": []}
     MockCoordinatorHandler.response_delay = 0
 
     server = HTTPServer(("127.0.0.1", 0), MockCoordinatorHandler)
@@ -118,9 +118,9 @@ def run_hook(stdin_data: dict, env: dict = None) -> tuple[int, str, str]:
 class TestCheckInboxHook:
     """Tests for the check_inbox stop hook."""
 
-    def test_allows_stop_when_no_pending_requests(self, mock_coordinator, agent_id_file):
-        """Hook should allow stop when there are no pending requests."""
-        MockCoordinatorHandler.pending_response = {"count": 0, "requests": []}
+    def test_allows_stop_when_no_pending_messages(self, mock_coordinator, agent_id_file):
+        """Hook should allow stop when there are no pending messages."""
+        MockCoordinatorHandler.pending_response = {"count": 0, "messages": []}
 
         exit_code, stdout, stderr = run_hook(
             {"stop_hook_active": False},
@@ -134,11 +134,11 @@ class TestCheckInboxHook:
         # No JSON output means allow stop
         assert stdout.strip() == "" or not stdout.strip().startswith("{")
 
-    def test_blocks_stop_when_pending_requests_exist(self, mock_coordinator, agent_id_file):
-        """Hook should block stop and provide reason when requests are pending."""
+    def test_blocks_stop_when_pending_messages_exist(self, mock_coordinator, agent_id_file):
+        """Hook should block stop and provide reason when messages are pending."""
         MockCoordinatorHandler.pending_response = {
             "count": 2,
-            "requests": [
+            "messages": [
                 {
                     "id": "sender::test-agent::abc123",
                     "from_agent": "sender",
@@ -163,16 +163,16 @@ class TestCheckInboxHook:
         assert exit_code == 0
         output = json.loads(stdout)
         assert output["decision"] == "block"
-        assert "2 pending coordination request" in output["reason"]
+        assert "2 pending coordination message" in output["reason"]
         assert "sender" in output["reason"]
-        assert "get_pending_requests" in output["reason"]
-        assert "respond_to_request" in output["reason"]
+        assert "get_messages" in output["reason"]
+        assert "reply" in output["reason"]
 
     def test_respects_stop_hook_active_flag(self, mock_coordinator, agent_id_file):
         """Hook should allow stop when stop_hook_active is True to prevent loops."""
         MockCoordinatorHandler.pending_response = {
             "count": 1,
-            "requests": [{"from_agent": "sender", "message": "Test"}],
+            "messages": [{"from_agent": "sender", "message": "Test"}],
         }
 
         exit_code, stdout, stderr = run_hook(
@@ -223,7 +223,7 @@ class TestCheckInboxHook:
         long_message = "x" * 200
         MockCoordinatorHandler.pending_response = {
             "count": 1,
-            "requests": [{"from_agent": "sender", "message": long_message}],
+            "messages": [{"from_agent": "sender", "message": long_message}],
         }
 
         exit_code, stdout, stderr = run_hook(
@@ -242,11 +242,11 @@ class TestCheckInboxHook:
         # Should not contain the full 200-char message
         assert long_message not in output["reason"]
 
-    def test_shows_and_more_for_many_requests(self, mock_coordinator, agent_id_file):
-        """Hook should show '... and N more' for many pending requests."""
+    def test_shows_and_more_for_many_messages(self, mock_coordinator, agent_id_file):
+        """Hook should show '... and N more' for many pending messages."""
         MockCoordinatorHandler.pending_response = {
             "count": 5,
-            "requests": [
+            "messages": [
                 {"from_agent": f"agent-{i}", "message": f"Message {i}"}
                 for i in range(5)
             ],
@@ -284,7 +284,7 @@ class TestCheckInboxHook:
         """Hook should warn and skip when agent ID file is missing."""
         MockCoordinatorHandler.pending_response = {
             "count": 1,
-            "requests": [{"from_agent": "sender", "message": "Test"}],
+            "messages": [{"from_agent": "sender", "message": "Test"}],
         }
 
         exit_code, stdout, stderr = run_hook(

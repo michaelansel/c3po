@@ -13,12 +13,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from c3po_common import (
     auth_headers,
     get_agent_id_file,
-    get_hook_secret,
+    get_credentials,
     get_machine_name,
     get_coordinator_url,
     get_session_id,
     read_agent_id,
     save_agent_id,
+    save_credentials,
     delete_agent_id_file,
 )
 
@@ -79,8 +80,25 @@ class TestGetCoordinatorUrl:
         monkeypatch.setenv("C3PO_COORDINATOR_URL", "http://custom:9999")
         assert get_coordinator_url() == "http://custom:9999"
 
+    def test_reads_from_credentials_file(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("C3PO_COORDINATOR_URL", raising=False)
+        creds_file = tmp_path / ".claude" / "c3po-credentials.json"
+        creds_file.parent.mkdir(parents=True)
+        creds_file.write_text(json.dumps({
+            "coordinator_url": "http://creds-host:8420",
+            "server_secret": "sec",
+            "api_key": "key",
+        }))
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
+        monkeypatch.setenv("HOME", str(tmp_path))  # No .claude.json
+        assert get_coordinator_url() == "http://creds-host:8420"
+
     def test_reads_from_claude_json(self, tmp_path, monkeypatch):
         monkeypatch.delenv("C3PO_COORDINATOR_URL", raising=False)
+        # No credentials file
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(tmp_path / "nonexistent"))
         claude_json = tmp_path / ".claude.json"
         claude_json.write_text(json.dumps({
             "mcpServers": {
@@ -92,6 +110,8 @@ class TestGetCoordinatorUrl:
 
     def test_fallback_to_localhost(self, tmp_path, monkeypatch):
         monkeypatch.delenv("C3PO_COORDINATOR_URL", raising=False)
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(tmp_path / "nonexistent"))
         monkeypatch.setenv("HOME", str(tmp_path))  # No .claude.json
         assert get_coordinator_url() == "http://localhost:8420"
 
@@ -99,18 +119,9 @@ class TestGetCoordinatorUrl:
 class TestGetMachineName:
     def test_env_c3po_machine_name_takes_priority(self, monkeypatch):
         monkeypatch.setenv("C3PO_MACHINE_NAME", "my-machine")
-        monkeypatch.setenv("C3PO_AGENT_ID", "should-not-use")
         assert get_machine_name() == "my-machine"
 
-    def test_env_c3po_agent_id_deprecated_fallback(self, monkeypatch, capsys):
-        monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
-        monkeypatch.setenv("C3PO_AGENT_ID", "my-custom-id")
-        assert get_machine_name() == "my-custom-id"
-        captured = capsys.readouterr()
-        assert "deprecated" in captured.err.lower()
-
     def test_reads_x_machine_name_header(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
         monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
         claude_json = tmp_path / ".claude.json"
         claude_json.write_text(json.dumps({
@@ -126,26 +137,7 @@ class TestGetMachineName:
         monkeypatch.setenv("HOME", str(tmp_path))
         assert get_machine_name() == "haos"
 
-    def test_falls_back_to_x_agent_id_header(self, tmp_path, monkeypatch):
-        """Old configs with X-Agent-ID should still work."""
-        monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
-        monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
-        claude_json = tmp_path / ".claude.json"
-        claude_json.write_text(json.dumps({
-            "mcpServers": {
-                "c3po": {
-                    "url": "http://myhost:8420/mcp",
-                    "headers": {
-                        "X-Agent-ID": "${C3PO_AGENT_ID:-haos}"
-                    }
-                }
-            }
-        }))
-        monkeypatch.setenv("HOME", str(tmp_path))
-        assert get_machine_name() == "haos"
-
     def test_reads_plain_header_value(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
         monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
         claude_json = tmp_path / ".claude.json"
         claude_json.write_text(json.dumps({
@@ -162,7 +154,6 @@ class TestGetMachineName:
         assert get_machine_name() == "plain-name"
 
     def test_fallback_to_hostname(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
         monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))  # No .claude.json
         expected = platform.node().split('.')[0]
@@ -170,7 +161,6 @@ class TestGetMachineName:
 
     def test_ignores_unresolvable_shell_var(self, tmp_path, monkeypatch):
         """If header is just a shell variable with no default, fall back to hostname."""
-        monkeypatch.delenv("C3PO_AGENT_ID", raising=False)
         monkeypatch.delenv("C3PO_MACHINE_NAME", raising=False)
         claude_json = tmp_path / ".claude.json"
         claude_json.write_text(json.dumps({
@@ -201,72 +191,80 @@ class TestGetSessionId:
             get_session_id({"session_id": ""})
 
 
-class TestGetHookSecret:
-    def test_env_override(self, monkeypatch):
-        monkeypatch.setenv("C3PO_HOOK_SECRET", "my-secret")
-        assert get_hook_secret() == "my-secret"
+class TestGetCredentials:
+    def test_returns_credentials_from_file(self, tmp_path, monkeypatch):
+        creds_file = tmp_path / "creds.json"
+        creds_data = {
+            "coordinator_url": "http://example.com:8420",
+            "server_secret": "my-secret",
+            "api_key": "my-key",
+            "key_id": "kid-123",
+            "agent_pattern": "machine/*",
+        }
+        creds_file.write_text(json.dumps(creds_data))
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
+        result = get_credentials()
+        assert result == creds_data
 
-    def test_reads_from_claude_json(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("C3PO_HOOK_SECRET", raising=False)
-        claude_json = tmp_path / ".claude.json"
-        claude_json.write_text(json.dumps({
-            "mcpServers": {
-                "c3po": {
-                    "url": "http://myhost:8420/mcp",
-                    "headers": {
-                        "X-C3PO-Hook-Secret": "${C3PO_HOOK_SECRET:-actual-secret}"
-                    }
-                }
-            }
-        }))
-        monkeypatch.setenv("HOME", str(tmp_path))
-        assert get_hook_secret() == "actual-secret"
+    def test_returns_empty_dict_when_file_missing(self, tmp_path, monkeypatch):
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(tmp_path / "nonexistent"))
+        assert get_credentials() == {}
 
-    def test_reads_plain_header_value(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("C3PO_HOOK_SECRET", raising=False)
-        claude_json = tmp_path / ".claude.json"
-        claude_json.write_text(json.dumps({
-            "mcpServers": {
-                "c3po": {
-                    "url": "http://myhost:8420/mcp",
-                    "headers": {
-                        "X-C3PO-Hook-Secret": "plain-secret"
-                    }
-                }
-            }
-        }))
-        monkeypatch.setenv("HOME", str(tmp_path))
-        assert get_hook_secret() == "plain-secret"
+    def test_returns_empty_dict_on_invalid_json(self, tmp_path, monkeypatch):
+        creds_file = tmp_path / "creds.json"
+        creds_file.write_text("not valid json")
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
+        assert get_credentials() == {}
 
-    def test_returns_none_when_not_configured(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("C3PO_HOOK_SECRET", raising=False)
-        monkeypatch.setenv("HOME", str(tmp_path))  # No .claude.json
-        assert get_hook_secret() is None
 
-    def test_ignores_unresolvable_shell_var(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("C3PO_HOOK_SECRET", raising=False)
-        claude_json = tmp_path / ".claude.json"
-        claude_json.write_text(json.dumps({
-            "mcpServers": {
-                "c3po": {
-                    "url": "http://myhost:8420/mcp",
-                    "headers": {
-                        "X-C3PO-Hook-Secret": "$C3PO_HOOK_SECRET"
-                    }
-                }
-            }
-        }))
-        monkeypatch.setenv("HOME", str(tmp_path))
-        assert get_hook_secret() is None
+class TestSaveCredentials:
+    def test_saves_and_reads_back(self, tmp_path, monkeypatch):
+        creds_file = tmp_path / ".claude" / "c3po-credentials.json"
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
+        creds_data = {
+            "coordinator_url": "http://example.com:8420",
+            "server_secret": "sec",
+            "api_key": "key",
+        }
+        save_credentials(creds_data)
+        assert get_credentials() == creds_data
+
+    def test_file_has_restricted_permissions(self, tmp_path, monkeypatch):
+        creds_file = tmp_path / ".claude" / "c3po-credentials.json"
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
+        save_credentials({"test": "data"})
+        mode = os.stat(str(creds_file)).st_mode & 0o777
+        assert mode == 0o600
 
 
 class TestAuthHeaders:
-    def test_returns_hook_secret_header(self, monkeypatch):
-        monkeypatch.setenv("C3PO_HOOK_SECRET", "my-secret")
+    def test_returns_bearer_token_from_credentials(self, tmp_path, monkeypatch):
+        creds_file = tmp_path / "creds.json"
+        creds_file.write_text(json.dumps({
+            "server_secret": "my-secret",
+            "api_key": "my-key",
+        }))
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
         headers = auth_headers()
-        assert headers == {"X-C3PO-Hook-Secret": "my-secret"}
+        assert headers == {"Authorization": "Bearer my-secret.my-key"}
 
-    def test_returns_empty_when_no_secret(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("C3PO_HOOK_SECRET", raising=False)
-        monkeypatch.setenv("HOME", str(tmp_path))  # No .claude.json
+    def test_returns_empty_when_no_credentials(self, tmp_path, monkeypatch):
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(tmp_path / "nonexistent"))
+        assert auth_headers() == {}
+
+    def test_returns_empty_when_partial_credentials(self, tmp_path, monkeypatch):
+        """Should return empty if only server_secret but no api_key."""
+        creds_file = tmp_path / "creds.json"
+        creds_file.write_text(json.dumps({
+            "server_secret": "my-secret",
+        }))
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
         assert auth_headers() == {}

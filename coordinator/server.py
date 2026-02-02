@@ -1,6 +1,7 @@
 """C3PO Coordinator - FastMCP server for multi-agent coordination."""
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -18,7 +19,7 @@ logger = logging.getLogger("c3po.server")
 
 from coordinator.agents import AgentManager
 from coordinator.audit import AuditLogger
-from coordinator.auth import ProxyAuthManager
+from coordinator.auth import AuthManager
 from coordinator.errors import (
     agent_not_found,
     invalid_request,
@@ -64,8 +65,8 @@ agent_manager = AgentManager(redis_client)
 # Message manager
 message_manager = MessageManager(redis_client)
 
-# Auth manager
-auth_manager = ProxyAuthManager()
+# Auth manager (with Redis for API key lookups)
+auth_manager = AuthManager(redis_client)
 
 # Rate limiter
 rate_limiter = RateLimiter(redis_client)
@@ -74,29 +75,47 @@ rate_limiter = RateLimiter(redis_client)
 audit_logger = AuditLogger(redis_client)
 
 
+def _determine_path_prefix(path: str) -> str:
+    """Determine the auth path prefix from a request path.
+
+    Returns one of: "/agent", "/oauth", "/admin", "/api", or "" for unknown.
+    """
+    if path.startswith("/agent/") or path.startswith("/agent"):
+        return "/agent"
+    elif path.startswith("/oauth/") or path.startswith("/oauth"):
+        return "/oauth"
+    elif path.startswith("/admin/") or path.startswith("/admin"):
+        return "/admin"
+    elif path.startswith("/api/health"):
+        return "/api"
+    else:
+        return ""
+
+
 def _authenticate_rest_request(request) -> dict:
     """Authenticate a REST API request.
 
-    Returns auth_result dict from ProxyAuthManager.validate_request().
+    Returns auth_result dict from AuthManager.validate_request().
     """
     auth_header = request.headers.get("authorization", "")
-    result = auth_manager.validate_request(auth_header)
+    path_prefix = _determine_path_prefix(request.url.path)
+    result = auth_manager.validate_request(auth_header, path_prefix)
     if result.get("valid"):
-        audit_logger.auth_success(result.get("source", ""), "", source="rest")
+        audit_logger.auth_success(result.get("key_id", result.get("source", "")), result.get("agent_pattern", ""), source="rest")
     else:
         audit_logger.auth_failure(result.get("error", "unknown"), source="rest")
     return result
 
 
-def _authenticate_mcp_headers(headers: dict) -> dict:
+def _authenticate_mcp_headers(headers: dict, path_prefix: str = "/agent") -> dict:
     """Authenticate an MCP tool call from headers.
 
-    Returns auth_result dict from ProxyAuthManager.validate_request().
+    Returns auth_result dict from AuthManager.validate_request().
     """
     auth_header = headers.get("authorization", "")
-    result = auth_manager.validate_request(auth_header)
+    result = auth_manager.validate_request(auth_header, path_prefix)
     if result.get("valid"):
-        audit_logger.auth_success(result.get("source", ""), "", source="mcp")
+        audit_logger.auth_success(result.get("key_id", result.get("source", "")), result.get("agent_pattern", ""), source="mcp")
     else:
         audit_logger.auth_failure(result.get("error", "unknown"), source="mcp")
     return result
@@ -106,7 +125,7 @@ class AgentIdentityMiddleware(Middleware):
     """Extract agent identity from headers and auto-register.
 
     Constructs full agent_id from components:
-    - X-Machine-Name: Machine/base identifier (required; falls back to X-Agent-ID)
+    - X-Machine-Name: Machine/base identifier (required)
     - X-Project-Name: Project name (optional, appended to agent_id)
     - X-Session-ID: Session identifier (for same-session detection)
 
@@ -115,23 +134,28 @@ class AgentIdentityMiddleware(Middleware):
     When project_name is missing (MCP calls from static config), we skip
     registration and rely on the PreToolUse hook's explicit agent_id parameter
     to provide the correct identity via _resolve_agent_id().
+
+    For API key auth, enforces agent_pattern from the key metadata.
     """
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         headers = get_http_headers()
 
         # Authenticate MCP request
-        auth_result = _authenticate_mcp_headers(headers)
+        # Determine path prefix from referer or default to /agent
+        auth_result = _authenticate_mcp_headers(headers, "/agent")
         if not auth_result.get("valid"):
             raise ToolError(
                 f"Authentication failed: {auth_result.get('error', 'Invalid credentials')}. "
                 f"Provide a valid Authorization header."
             )
 
-        # Prefer X-Machine-Name, fall back to X-Agent-ID for old configs
-        machine_name = headers.get("x-machine-name") or headers.get("x-agent-id")
-        if headers.get("x-agent-id") and not headers.get("x-machine-name"):
-            logger.warning("deprecated_header: X-Agent-ID used instead of X-Machine-Name")
+        # Store auth info in context for pattern enforcement
+        context.fastmcp_context.set_state("auth_source", auth_result.get("source", ""))
+        context.fastmcp_context.set_state("auth_key_id", auth_result.get("key_id", ""))
+        context.fastmcp_context.set_state("auth_agent_pattern", auth_result.get("agent_pattern", "*"))
+
+        machine_name = headers.get("x-machine-name")
         project_name = headers.get("x-project-name")
         session_id = headers.get("x-session-id")
 
@@ -192,8 +216,8 @@ mcp = FastMCP(
     name="c3po",
     instructions=(
         "C3PO coordinates multiple Claude Code instances. "
-        "Use list_agents to see available agents, send_request to communicate with them. "
-        "Use get_messages to check for replies and incoming requests, "
+        "Use list_agents to see available agents, send_message to communicate with them. "
+        "Use get_messages to check for replies and incoming messages, "
         "or wait_for_message to block until a message arrives. "
         "When you start a session, call set_description with a brief summary of what "
         "you can help with, so other agents know your capabilities."
@@ -240,7 +264,10 @@ def _check_rest_rate_limit(request, operation: str, identity: str) -> JSONRespon
     return None
 
 
-# REST API endpoints for hooks (non-MCP access)
+# ============================================================
+# Public endpoints (no auth)
+# ============================================================
+
 @mcp.custom_route("/api/health", methods=["GET"])
 async def api_health(request):
     """Health check endpoint.
@@ -261,15 +288,18 @@ async def api_health(request):
         )
 
 
-@mcp.custom_route("/api/register", methods=["POST"])
+# ============================================================
+# Agent endpoints (/agent/api/*) — API key auth
+# ============================================================
+
+@mcp.custom_route("/agent/api/register", methods=["POST"])
 async def api_register(request):
     """Register an agent via REST API (used by hooks).
 
     Hooks can't use MCP (requires session handshake), so this provides
     the same registration functionality via a simple REST endpoint.
 
-    Requires X-Machine-Name header (falls back to X-Agent-ID),
-    optionally X-Project-Name and X-Session-ID.
+    Requires X-Machine-Name header, optionally X-Project-Name and X-Session-ID.
     Returns the assigned agent_id (may differ from requested if collision resolved).
     """
     auth_result = _authenticate_rest_request(request)
@@ -285,8 +315,7 @@ async def api_register(request):
     if rate_resp:
         return rate_resp
 
-    # Prefer X-Machine-Name, fall back to X-Agent-ID for old configs
-    machine_name = request.headers.get("x-machine-name") or request.headers.get("x-agent-id")
+    machine_name = request.headers.get("x-machine-name")
     project_name = request.headers.get("x-project-name")
     session_id = request.headers.get("x-session-id")
 
@@ -307,6 +336,14 @@ async def api_register(request):
         return JSONResponse(
             {"error": "Invalid agent ID format"},
             status_code=400,
+        )
+
+    # Enforce agent_pattern from API key
+    agent_pattern = auth_result.get("agent_pattern", "*")
+    if not AuthManager.validate_agent_pattern(agent_id, agent_pattern):
+        return JSONResponse(
+            {"error": f"Agent ID '{agent_id}' does not match key pattern '{agent_pattern}'"},
+            status_code=403,
         )
 
     try:
@@ -347,11 +384,12 @@ def _construct_agent_id(machine_name: str, project_name: Optional[str]) -> str:
     return machine_name
 
 
-@mcp.custom_route("/api/pending", methods=["GET"])
+@mcp.custom_route("/agent/api/pending", methods=["GET"])
 async def api_pending(request):
-    """Check pending requests for an agent without consuming them.
+    """Check pending messages for an agent without consuming them.
 
-    Requires X-Agent-ID header, optionally X-Project-Name.
+    Requires X-Machine-Name header (with optional X-Project-Name),
+    or a composite machine/project in X-Machine-Name.
     Used by Stop hooks to check inbox.
     Does NOT consume messages - just peeks at the inbox.
     """
@@ -368,12 +406,12 @@ async def api_pending(request):
     if rate_resp:
         return rate_resp
 
-    base_id = request.headers.get("x-agent-id")
+    base_id = request.headers.get("x-machine-name")
     project_name = request.headers.get("x-project-name")
 
     if not base_id:
         return JSONResponse(
-            {"error": "Missing X-Agent-ID header"},
+            {"error": "Missing X-Machine-Name header"},
             status_code=400,
         )
 
@@ -391,11 +429,11 @@ async def api_pending(request):
         )
 
     try:
-        requests = message_manager.peek_pending_requests(agent_id)
-        logger.info("rest_pending agent_id=%s count=%d", agent_id, len(requests))
+        messages = message_manager.peek_pending_messages(agent_id)
+        logger.info("rest_pending agent_id=%s count=%d", agent_id, len(messages))
         return JSONResponse({
-            "count": len(requests),
-            "requests": requests,
+            "count": len(messages),
+            "messages": messages,
         })
     except Exception as e:
         return JSONResponse(
@@ -404,11 +442,11 @@ async def api_pending(request):
         )
 
 
-@mcp.custom_route("/api/unregister", methods=["POST"])
+@mcp.custom_route("/agent/api/unregister", methods=["POST"])
 async def api_unregister(request):
     """Unregister an agent when it disconnects gracefully.
 
-    Requires X-Agent-ID header, optionally X-Project-Name.
+    Requires X-Machine-Name header (with optional X-Project-Name).
     Called by SessionEnd hook.
     Removes the agent from the registry so list_agents doesn't show stale entries.
     """
@@ -425,12 +463,12 @@ async def api_unregister(request):
     if rate_resp:
         return rate_resp
 
-    base_id = request.headers.get("x-agent-id")
+    base_id = request.headers.get("x-machine-name")
     project_name = request.headers.get("x-project-name")
 
     if not base_id:
         return JSONResponse(
-            {"error": "Missing X-Agent-ID header"},
+            {"error": "Missing X-Machine-Name header"},
             status_code=400,
         )
 
@@ -467,9 +505,103 @@ async def api_unregister(request):
         )
 
 
-@mcp.custom_route("/api/admin/audit", methods=["GET"])
+# ============================================================
+# Admin endpoints (/admin/api/*) — admin key auth
+# ============================================================
+
+@mcp.custom_route("/admin/api/keys", methods=["POST"])
+async def admin_create_key(request):
+    """Create a new API key for agent authentication.
+
+    Requires admin key authentication.
+    Body JSON: {"agent_pattern": "macbook/*", "description": "My laptop"}
+    Returns: {"key_id": "...", "api_key": "...", "agent_pattern": "...", "created_at": "..."}
+    """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("error", "Authentication required")},
+            status_code=401,
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    agent_pattern = body.get("agent_pattern", "*")
+    description = body.get("description", "")
+
+    try:
+        result = auth_manager.create_api_key(agent_pattern=agent_pattern, description=description)
+        audit_logger.admin_key_create(result["key_id"], agent_pattern)
+        return SecureJSONResponse(result, status_code=201)
+    except Exception as e:
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500,
+        )
+
+
+@mcp.custom_route("/admin/api/keys", methods=["GET"])
+async def admin_list_keys(request):
+    """List all API keys (metadata only).
+
+    Requires admin key authentication.
+    Returns: {"keys": [...]}
+    """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("error", "Authentication required")},
+            status_code=401,
+        )
+
+    try:
+        keys = auth_manager.list_api_keys()
+        return SecureJSONResponse({"keys": keys})
+    except Exception as e:
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500,
+        )
+
+
+@mcp.custom_route("/admin/api/keys/{key_id}", methods=["DELETE"])
+async def admin_revoke_key(request):
+    """Revoke an API key.
+
+    Requires admin key authentication.
+    Returns: {"status": "ok"} or 404
+    """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("error", "Authentication required")},
+            status_code=401,
+        )
+
+    key_id = request.path_params.get("key_id", "")
+    if not key_id:
+        return JSONResponse({"error": "Missing key_id"}, status_code=400)
+
+    try:
+        revoked = auth_manager.revoke_api_key(key_id)
+        if revoked:
+            audit_logger.admin_key_revoke(key_id)
+            return SecureJSONResponse({"status": "ok", "key_id": key_id})
+        else:
+            return JSONResponse({"error": f"Key '{key_id}' not found"}, status_code=404)
+    except Exception as e:
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500,
+        )
+
+
+@mcp.custom_route("/admin/api/audit", methods=["GET"])
 async def api_admin_audit(request):
-    """Query recent audit events. Requires proxy token authentication."""
+    """Query recent audit events. Requires admin key authentication."""
     auth_result = _authenticate_rest_request(request)
     if not auth_result.get("valid"):
         return JSONResponse(
@@ -485,7 +617,10 @@ async def api_admin_audit(request):
     return JSONResponse({"entries": entries, "count": len(entries)})
 
 
+# ============================================================
 # Tool implementations (testable standalone functions)
+# ============================================================
+
 def _ping_impl() -> dict:
     """Check coordinator health. Returns pong with timestamp."""
     return {
@@ -507,7 +642,6 @@ def _register_agent_impl(
     capabilities: Optional[list[str]] = None,
 ) -> dict:
     """Register an agent with optional name and capabilities."""
-    # Use provided name or agent_id as the identifier
     return manager.register_agent(agent_id, session_id, capabilities)
 
 
@@ -560,6 +694,25 @@ def _validate_message(message: str) -> None:
         raise ToolError(f"{err.message} {err.suggestion}")
 
 
+def _enforce_agent_pattern(ctx: Context, agent_id: str) -> None:
+    """Enforce that agent_id matches the API key's agent_pattern.
+
+    Args:
+        ctx: MCP context with auth state
+        agent_id: The agent ID being used
+
+    Raises:
+        ToolError: If agent_id doesn't match the pattern
+    """
+    pattern = ctx.get_state("auth_agent_pattern") or "*"
+    if pattern != "*" and not AuthManager.validate_agent_pattern(agent_id, pattern):
+        audit_logger.authorization_denied(agent_id, ctx.get_state("auth_key_id") or "", pattern)
+        raise ToolError(
+            f"Your API key (pattern: '{pattern}') does not authorize agent ID '{agent_id}'. "
+            f"Use an agent ID that matches the pattern."
+        )
+
+
 def _set_description_impl(
     manager: AgentManager,
     agent_id: str,
@@ -575,17 +728,17 @@ def _set_description_impl(
         raise ToolError(f"{err.message} {err.suggestion}")
 
 
-def _send_request_impl(
+def _send_message_impl(
     msg_manager: MessageManager,
     agent_manager: AgentManager,
     from_agent: str,
-    target_agent: str,
+    to: str,
     message: str,
     context: Optional[str] = None,
 ) -> dict:
-    """Send a request to another agent."""
+    """Send a message to another agent."""
     # Validate inputs
-    _validate_agent_id(target_agent, "target_agent")
+    _validate_agent_id(to, "to")
     _validate_message(message)
     if context and len(context) > MAX_MESSAGE_LENGTH:
         err = invalid_request(
@@ -602,23 +755,23 @@ def _send_request_impl(
             msg_manager.RATE_LIMIT_REQUESTS,
             msg_manager.RATE_LIMIT_WINDOW_SECONDS
         )
-        logger.warning("send_rejected from=%s to=%s reason=rate_limited", from_agent, target_agent)
+        logger.warning("send_rejected from=%s to=%s reason=rate_limited", from_agent, to)
         raise ToolError(f"{err.message} {err.suggestion}")
 
     # Check if target agent exists
-    resolved_target = agent_manager.get_agent(target_agent)
+    resolved_target = agent_manager.get_agent(to)
     if resolved_target is None:
         # Get list of available agents for helpful error
         available = agent_manager.list_agents()
         agent_ids = [a["id"] for a in available]
-        err = agent_not_found(target_agent, agent_ids)
-        logger.warning("send_rejected from=%s to=%s reason=agent_not_found", from_agent, target_agent)
+        err = agent_not_found(to, agent_ids)
+        logger.warning("send_rejected from=%s to=%s reason=agent_not_found", from_agent, to)
         raise ToolError(f"{err.message} {err.suggestion}")
 
     # Record request for rate limiting
     msg_manager.record_request(from_agent)
 
-    return msg_manager.send_request(from_agent, target_agent, message, context)
+    return msg_manager.send_message(from_agent, to, message, context)
 
 
 def _get_messages_impl(
@@ -626,22 +779,23 @@ def _get_messages_impl(
     agent_id: str,
     message_type: Optional[str] = None,
 ) -> list[dict]:
-    """Get all pending messages (requests and/or responses) for an agent."""
-    if message_type is not None and message_type not in ("request", "response"):
-        err = invalid_request("type", "must be 'request', 'response', or omitted for both")
+    """Get all pending messages (incoming and/or replies) for an agent."""
+    valid_types = ("message", "reply", "request", "response")  # accept legacy values
+    if message_type is not None and message_type not in valid_types:
+        err = invalid_request("type", "must be 'message', 'reply', or omitted for both")
         raise ToolError(f"{err.message} {err.suggestion}")
     logger.info("get_messages agent=%s type=%s", agent_id, message_type)
     return msg_manager.get_messages(agent_id, message_type)
 
 
-def _respond_to_request_impl(
+def _reply_impl(
     msg_manager: MessageManager,
     from_agent: str,
-    request_id: str,
+    message_id: str,
     response: str,
     status: str = "success",
 ) -> dict:
-    """Send a response to a previous request."""
+    """Send a reply to a previous message."""
     # Validate response
     if not response or not response.strip():
         err = invalid_request("response", "cannot be empty")
@@ -654,15 +808,15 @@ def _respond_to_request_impl(
         )
         raise ToolError(f"{err.message} {err.suggestion}")
 
-    # Validate request_id format
-    if not request_id or "::" not in request_id:
+    # Validate message_id format
+    if not message_id or "::" not in message_id:
         err = invalid_request(
-            "request_id",
-            "invalid format - should be from a previous request"
+            "message_id",
+            "invalid format - should be from a previous message"
         )
         raise ToolError(f"{err.message} {err.suggestion}")
 
-    return msg_manager.respond_to_request(request_id, from_agent, response, status)
+    return msg_manager.reply(message_id, from_agent, response, status)
 
 
 def _wait_for_message_impl(
@@ -672,7 +826,7 @@ def _wait_for_message_impl(
     message_type: Optional[str] = None,
     heartbeat_fn: Optional[callable] = None,
 ) -> dict:
-    """Wait for any message (request or response) to arrive.
+    """Wait for any message (incoming or reply) to arrive.
 
     Returns the messages directly, not a notification.
     """
@@ -682,8 +836,9 @@ def _wait_for_message_impl(
     if timeout > MAX_WAIT_TIMEOUT:
         timeout = MAX_WAIT_TIMEOUT
 
-    if message_type is not None and message_type not in ("request", "response"):
-        err = invalid_request("type", "must be 'request', 'response', or omitted for both")
+    valid_types = ("message", "reply", "request", "response")
+    if message_type is not None and message_type not in valid_types:
+        err = invalid_request("type", "must be 'message', 'reply', or omitted for both")
         raise ToolError(f"{err.message} {err.suggestion}")
     logger.info("wait_for_message agent=%s timeout=%d type=%s", agent_id, timeout, message_type)
     result = msg_manager.wait_for_message(agent_id, timeout, message_type, heartbeat_fn=heartbeat_fn)
@@ -739,10 +894,13 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
     return resolved
 
 
-# Register tools with MCP server
+# ============================================================
+# MCP Tools
+# ============================================================
 # NOTE: When adding a new tool, also update:
 #   - plugin/hooks/hooks.json  (PreToolUse matcher list)
 #   - plugin/hooks/ensure_agent_id.py  (TOOLS_NEEDING_AGENT_ID, if it uses agent_id)
+
 @mcp.tool()
 def ping() -> dict:
     """Check coordinator health. Returns pong with timestamp."""
@@ -800,32 +958,34 @@ def set_description(
         Updated agent data including the description
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
+    _enforce_agent_pattern(ctx, effective_id)
     return _set_description_impl(agent_manager, effective_id, description)
 
 
 @mcp.tool()
-def send_request(
+def send_message(
     ctx: Context,
-    target_agent: str,
+    to: str,
     message: str,
     context: Optional[str] = None,
     agent_id: Optional[str] = None,
 ) -> dict:
-    """Send a request to another agent.
+    """Send a message to another agent.
 
     Args:
         ctx: MCP context (injected automatically)
-        target_agent: The ID of the agent to send the request to
-        message: The request message
-        context: Optional context or background for the request
+        to: The ID of the agent to send the message to
+        message: The message content
+        context: Optional context or background for the message
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
-        Request data including id, status, and timestamp
+        Message data including id, status, and timestamp
     """
     from_agent = _resolve_agent_id(ctx, agent_id)
-    return _send_request_impl(
-        message_manager, agent_manager, from_agent, target_agent=target_agent, message=message, context=context
+    _enforce_agent_pattern(ctx, from_agent)
+    return _send_message_impl(
+        message_manager, agent_manager, from_agent, to=to, message=message, context=context
     )
 
 
@@ -835,49 +995,51 @@ def get_messages(
     type: Optional[str] = None,
     agent_id: Optional[str] = None,
 ) -> list[dict]:
-    """Get all pending messages (requests and responses) for this agent.
+    """Get all pending messages (incoming messages and replies) for this agent.
 
     This consumes the messages - they will not be returned again.
-    Returns both incoming requests (from other agents) and responses
-    (to your previously sent requests) in a single unified list.
-    Each message has a "type" field: "request" or "response".
+    Returns both incoming messages (from other agents) and replies
+    (to your previously sent messages) in a single unified list.
+    Each message has a "type" field: "message" or "reply".
 
     Args:
         ctx: MCP context (injected automatically)
-        type: Optional filter - "request" for incoming requests only,
-              "response" for responses only, or omit for both
+        type: Optional filter - "message" for incoming messages only,
+              "reply" for replies only, or omit for both
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
-        List of message dicts with type, id/request_id, from_agent, message/response, etc.
+        List of message dicts with type, id/message_id, from_agent, message/response, etc.
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
+    _enforce_agent_pattern(ctx, effective_id)
     return _get_messages_impl(message_manager, effective_id, type)
 
 
 @mcp.tool()
-def respond_to_request(
+def reply(
     ctx: Context,
-    request_id: str,
+    message_id: str,
     response: str,
     status: str = "success",
     agent_id: Optional[str] = None,
 ) -> dict:
-    """Respond to a request from another agent.
+    """Reply to a message from another agent.
 
     Args:
         ctx: MCP context (injected automatically)
-        request_id: The ID of the request to respond to
-        response: Your response message
-        status: Response status (default "success", can be "error" for failures)
+        message_id: The ID of the message to reply to
+        response: Your reply message
+        status: Reply status (default "success", can be "error" for failures)
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
-        Response data including request_id, status, and timestamp
+        Reply data including message_id, status, and timestamp
     """
     from_agent = _resolve_agent_id(ctx, agent_id)
-    return _respond_to_request_impl(
-        message_manager, from_agent, request_id, response, status
+    _enforce_agent_pattern(ctx, from_agent)
+    return _reply_impl(
+        message_manager, from_agent, message_id, response, status
     )
 
 
@@ -888,7 +1050,7 @@ async def wait_for_message(
     type: Optional[str] = None,
     agent_id: Optional[str] = None,
 ) -> dict:
-    """Wait for any message (request or response) to arrive.
+    """Wait for any message (incoming message or reply) to arrive.
 
     This is a blocking call - it will wait until a message arrives
     or the timeout is reached. Returns the messages directly.
@@ -897,14 +1059,15 @@ async def wait_for_message(
     Args:
         ctx: MCP context (injected automatically)
         timeout: Maximum seconds to wait (default 60, max 3600)
-        type: Optional filter - "request" for incoming requests only,
-              "response" for responses only, or omit for both
+        type: Optional filter - "message" for incoming messages only,
+              "reply" for replies only, or omit for both
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
         Dict with status="received" and messages list, or timeout indicator
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
+    _enforce_agent_pattern(ctx, effective_id)
     return await asyncio.to_thread(
         _wait_for_message_impl, message_manager, effective_id, timeout, type,
         heartbeat_fn=lambda: agent_manager.touch_heartbeat(effective_id),
@@ -929,11 +1092,19 @@ def main():
 
     # Log authentication configuration
     if auth_manager.auth_enabled:
-        logger.info("Proxy bearer token: configured")
+        has_server_secret = bool(os.environ.get("C3PO_SERVER_SECRET"))
+        has_proxy_token = bool(os.environ.get("C3PO_PROXY_BEARER_TOKEN"))
+        has_admin_key = bool(os.environ.get("C3PO_ADMIN_KEY"))
+        logger.info(
+            "Auth configured: server_secret=%s proxy_token=%s admin_key=%s",
+            "yes" if has_server_secret else "no",
+            "yes" if has_proxy_token else "no",
+            "yes" if has_admin_key else "no",
+        )
     else:
         logger.warning(
-            "C3PO_PROXY_BEARER_TOKEN is not set. Authentication is DISABLED. "
-            "Anyone with network access can use this coordinator. "
+            "No auth tokens configured (C3PO_SERVER_SECRET, C3PO_PROXY_BEARER_TOKEN, C3PO_ADMIN_KEY). "
+            "Authentication is DISABLED. Anyone with network access can use this coordinator. "
             "This is only appropriate for local development."
         )
 

@@ -12,7 +12,6 @@ Exit codes:
 Environment variables:
 - C3PO_COORDINATOR_URL: Coordinator URL (default: http://localhost:8420)
 - C3PO_MACHINE_NAME: Machine name identifier (default: from MCP config or hostname)
-- C3PO_AGENT_ID: Deprecated alias for C3PO_MACHINE_NAME
 """
 
 from __future__ import annotations
@@ -52,7 +51,7 @@ def register_with_coordinator(session_id: str) -> dict | None:
     }
     headers.update(auth_headers())
     req = urllib.request.Request(
-        f"{COORDINATOR_URL}/api/register",
+        f"{COORDINATOR_URL}/agent/api/register",
         data=b"",  # POST with empty body
         headers=headers,
         method="POST",
