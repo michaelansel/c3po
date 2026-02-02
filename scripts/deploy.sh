@@ -399,8 +399,11 @@ server {
     }
 
     # OAuth MCP endpoint -> mcp-auth-proxy (handles OAuth + proxies to coordinator)
+    # Strip /oauth prefix so auth-proxy receives /mcp (not /oauth/mcp),
+    # which it then forwards to the coordinator at /mcp.
     location /oauth/ {
         limit_req zone=c3po_api burst=20 nodelay;
+        rewrite ^/oauth(/.*)$ \$1 break;
         proxy_pass http://c3po_proxy;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
