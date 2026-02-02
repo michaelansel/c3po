@@ -25,6 +25,7 @@ fi
 NET="c3po-accept-test"
 REDIS_CTR="c3po-accept-redis"
 COORD_CTR="c3po-accept-coordinator"
+NGINX_CTR="c3po-accept-nginx"
 HOSTA_CTR="c3po-accept-host-a"
 
 # Colors
@@ -46,7 +47,7 @@ cleanup() {
         return
     fi
     log "Tearing down environment..."
-    $DOCKER rm -f "$HOSTA_CTR" "$COORD_CTR" "$REDIS_CTR" 2>/dev/null || true
+    $DOCKER rm -f "$HOSTA_CTR" "$NGINX_CTR" "$COORD_CTR" "$REDIS_CTR" 2>/dev/null || true
     $DOCKER network rm "$NET" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -127,6 +128,29 @@ for i in $(seq 1 60); do
     sleep 2
 done
 
+# Start nginx (in front of coordinator, matching production topology)
+log "Starting nginx..."
+$DOCKER run -d \
+    --name "$NGINX_CTR" \
+    --network "$NET" \
+    -v "$SCRIPT_DIR/nginx-test.conf:/etc/nginx/conf.d/default.conf:ro" \
+    nginx:alpine
+
+# Wait for nginx
+log "Waiting for nginx..."
+for i in $(seq 1 30); do
+    if $DOCKER exec "$NGINX_CTR" wget -q -O /dev/null "http://127.0.0.1:80/api/health" 2>/dev/null; then
+        log "Nginx is ready"
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        error "Nginx failed to start"
+        $DOCKER logs "$NGINX_CTR" 2>&1 | tail -20
+        exit 1
+    fi
+    sleep 1
+done
+
 # Build host image (using Dockerfile.cc-agent)
 log "Building host agent image..."
 $DOCKER build -t c3po-accept-host \
@@ -138,19 +162,19 @@ log "Starting host-a..."
 $DOCKER run -d \
     --name "$HOSTA_CTR" \
     --network "$NET" \
-    -e "C3PO_COORDINATOR_URL=http://$COORD_CTR:8420" \
+    -e "C3PO_COORDINATOR_URL=http://$NGINX_CTR:80" \
     c3po-accept-host
 
-# Verify coordinator reachable from host-a
-log "Verifying coordinator reachable from host-a..."
+# Verify nginx reachable from host-a
+log "Verifying nginx reachable from host-a..."
 for i in $(seq 1 10); do
-    if $DOCKER exec "$HOSTA_CTR" curl -sf "http://$COORD_CTR:8420/api/health" 2>/dev/null; then
+    if $DOCKER exec "$HOSTA_CTR" curl -sf "http://$NGINX_CTR:80/api/health" 2>/dev/null; then
         echo
         log "Phase 0: PASSED"
         break
     fi
     if [ "$i" -eq 10 ]; then
-        error "Coordinator not reachable from host-a"
+        error "Nginx not reachable from host-a"
         exit 1
     fi
     sleep 2
@@ -167,7 +191,7 @@ $DOCKER cp "$SCRIPT_DIR/test_acceptance.py" "$HOSTA_CTR":/tmp/test_acceptance.py
 
 log "Running acceptance test phases..."
 $DOCKER exec \
-    -e "C3PO_COORDINATOR_URL=http://$COORD_CTR:8420" \
+    -e "C3PO_COORDINATOR_URL=http://$NGINX_CTR:80" \
     "$HOSTA_CTR" \
     python3 /tmp/test_acceptance.py $PHASES
 

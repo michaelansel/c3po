@@ -100,7 +100,7 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 
 **Adding MCP tools**: When adding a new tool to `coordinator/server.py`, also update `hooks/hooks.json` (PreToolUse matcher list) and, if the tool uses `agent_id`, `hooks/ensure_agent_id.py` (TOOLS_NEEDING_AGENT_ID). The matcher must explicitly list all tool names because prefix patterns don't work in plugin hooks. New modules also need to be added to the `Dockerfile` COPY commands.
 
-**Version bumping**: When committing a version bump, update `.claude-plugin/plugin.json` in this repo and `plugins/c3po/.claude-plugin/plugin.json` + `.claude-plugin/marketplace.json` in the `michaelansel/claude-code-plugins` marketplace repo. All three must stay in sync.
+**Version bumping**: When committing a version bump, update `.claude-plugin/plugin.json` in this repo. The marketplace (`michaelansel/c3po`) does not need separate updates.
 
 **Message flow**: Messages go to `c3po:inbox:{agent}` Redis lists. Notifications (separate from messages) go to `c3po:notify:{agent}` to wake blocked `wait_for_message` calls without consuming messages. This separation prevents message loss. Messages have type `"message"`, replies have type `"reply"`. Each message gets a `message_id` used for replies.
 

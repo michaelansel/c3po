@@ -3,8 +3,8 @@
 C3PO Acceptance Test Suite
 
 Implements the acceptance test specification from ACCEPTANCE_SPEC.md.
-Tests phases 0, 3-6, 9 using the MCP client library directly.
-Phases 1-2 (plugin install/setup) and 7-8 (stop hook, task delegation)
+Tests phases 0, 3-7, 9-10 using the MCP client library directly.
+Phases 1-2 (plugin install/setup) and 8 (task delegation)
 require actual Claude Code sessions and are tested separately.
 
 Usage:
@@ -104,11 +104,11 @@ async def phase_3():
     from mcp.client.streamable_http import streamablehttp_client
     from mcp import ClientSession
 
-    url = f"{_config['coordinator_url']}/mcp"
+    url = f"{_config['coordinator_url']}/agent/mcp"
     agent_id = f"accept-host-a-{uuid.uuid4().hex[:8]}"
     session_id = str(uuid.uuid4())
     headers = {
-        "X-Agent-ID": agent_id,
+        "X-Machine-Name": agent_id,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": session_id,
     }
@@ -150,19 +150,19 @@ async def phase_4():
     from mcp.client.streamable_http import streamablehttp_client
     from mcp import ClientSession
 
-    url = f"{_config['coordinator_url']}/mcp"
+    url = f"{_config['coordinator_url']}/agent/mcp"
     agent_a_base = f"accept-a-{uuid.uuid4().hex[:8]}"
     agent_b_base = f"accept-b-{uuid.uuid4().hex[:8]}"
     session_a = str(uuid.uuid4())
     session_b = str(uuid.uuid4())
 
     headers_a = {
-        "X-Agent-ID": agent_a_base,
+        "X-Machine-Name": agent_a_base,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": session_a,
     }
     headers_b = {
-        "X-Agent-ID": agent_b_base,
+        "X-Machine-Name": agent_b_base,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": session_b,
     }
@@ -215,19 +215,19 @@ async def phase_5():
     from mcp.client.streamable_http import streamablehttp_client
     from mcp import ClientSession
 
-    url = f"{_config['coordinator_url']}/mcp"
+    url = f"{_config['coordinator_url']}/agent/mcp"
     agent_a_base = f"roundtrip-a-{uuid.uuid4().hex[:8]}"
     agent_b_base = f"roundtrip-b-{uuid.uuid4().hex[:8]}"
     agent_a_full = f"{agent_a_base}/acceptance-test"
     agent_b_full = f"{agent_b_base}/acceptance-test"
 
     headers_a = {
-        "X-Agent-ID": agent_a_base,
+        "X-Machine-Name": agent_a_base,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": str(uuid.uuid4()),
     }
     headers_b = {
-        "X-Agent-ID": agent_b_base,
+        "X-Machine-Name": agent_b_base,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": str(uuid.uuid4()),
     }
@@ -244,62 +244,62 @@ async def phase_5():
                     await sess_b.initialize()
                     await sess_b.call_tool("ping", {})
 
-                    # Step 1: Agent A sends request to Agent B
-                    log("Step 1: Agent A sends request to Agent B")
-                    result = await sess_a.call_tool("send_request", {
-                        "target_agent": agent_b_full,
+                    # Step 1: Agent A sends message to Agent B
+                    log("Step 1: Agent A sends message to Agent B")
+                    result = await sess_a.call_tool("send_message", {
+                        "to": agent_b_full,
                         "message": "What is 2+2?",
                     })
                     result_text = str(result)
 
-                    # Extract request_id
+                    # Extract message_id
                     match = re.search(r'"id":\s*"([^"]+)"', result_text)
                     if not match:
-                        fail(f"send_request did not return a request ID: {result_text}")
+                        fail(f"send_message did not return a message ID: {result_text}")
                         return False
-                    request_id = match.group(1)
+                    message_id = match.group(1)
                     passed = assert_true(
-                        len(request_id) > 0,
-                        f"send_request returns request ID: {request_id}",
-                        "send_request returned empty request ID",
+                        len(message_id) > 0,
+                        f"send_message returns message ID: {message_id}",
+                        "send_message returned empty message ID",
                     ) and passed
 
-                    # Step 2: Agent B gets pending messages (requests)
+                    # Step 2: Agent B gets pending messages
                     log("Step 2: Agent B checks pending messages")
                     result = await sess_b.call_tool("get_messages", {
-                        "type": "request",
+                        "type": "message",
                     })
                     result_text = str(result)
                     passed = assert_true(
                         "What is 2+2" in result_text,
-                        "get_messages returns the request from Agent A",
-                        f"Request not found in messages: {result_text}",
+                        "get_messages returns the message from Agent A",
+                        f"Message not found in messages: {result_text}",
                     ) and passed
 
-                    # Step 3: Agent B responds
-                    log("Step 3: Agent B responds")
-                    result = await sess_b.call_tool("respond_to_request", {
-                        "request_id": request_id,
+                    # Step 3: Agent B replies
+                    log("Step 3: Agent B replies")
+                    result = await sess_b.call_tool("reply", {
+                        "message_id": message_id,
                         "response": "4",
                     })
                     result_text = str(result)
                     passed = assert_true(
                         "success" in result_text.lower(),
-                        "respond_to_request returns success",
-                        f"Response failed: {result_text}",
+                        "reply returns success",
+                        f"Reply failed: {result_text}",
                     ) and passed
 
-                    # Step 4: Agent A waits for message (response)
-                    log("Step 4: Agent A waits for response via wait_for_message")
+                    # Step 4: Agent A waits for reply
+                    log("Step 4: Agent A waits for reply via wait_for_message")
                     result = await sess_a.call_tool("wait_for_message", {
-                        "type": "response",
+                        "type": "reply",
                         "timeout": 30,
                     })
                     result_text = str(result)
                     passed = assert_true(
                         '"4"' in result_text or "'4'" in result_text,
-                        'wait_for_message returns the response "4"',
-                        f"Response not found: {result_text}",
+                        'wait_for_message returns the reply "4"',
+                        f"Reply not found: {result_text}",
                     ) and passed
 
     return passed
@@ -317,10 +317,10 @@ async def phase_6():
     from mcp.client.streamable_http import streamablehttp_client
     from mcp import ClientSession
 
-    url = f"{_config['coordinator_url']}/mcp"
+    url = f"{_config['coordinator_url']}/agent/mcp"
     agent_base = f"blocking-{uuid.uuid4().hex[:8]}"
     headers = {
-        "X-Agent-ID": agent_base,
+        "X-Machine-Name": agent_base,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": str(uuid.uuid4()),
     }
@@ -355,19 +355,19 @@ async def phase_6():
                     f"wait_for_message crashed immediately: {e}",
                 ) and passed
 
-            # Step 2: wait_for_message with type=request filter (timeout)
-            log("Step 2: wait_for_message type=request with timeout=5")
+            # Step 2: wait_for_message with type=message filter (timeout)
+            log("Step 2: wait_for_message type=message with timeout=5")
             start = time.time()
             try:
                 result = await session.call_tool("wait_for_message", {
-                    "type": "request",
+                    "type": "message",
                     "timeout": 5,
                 })
                 result_text = str(result)
                 elapsed = time.time() - start
                 passed = assert_true(
                     "timeout" in result_text.lower(),
-                    f"wait_for_message type=request returns timeout status (took {elapsed:.1f}s)",
+                    f"wait_for_message type=message returns timeout status (took {elapsed:.1f}s)",
                     f"Expected timeout, got: {result_text}",
                 ) and passed
             except Exception as e:
@@ -386,12 +386,12 @@ async def phase_6():
     waiter_full = f"{agent_waiter_base}/acceptance-test"
 
     headers_waiter = {
-        "X-Agent-ID": agent_waiter_base,
+        "X-Machine-Name": agent_waiter_base,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": str(uuid.uuid4()),
     }
     headers_sender = {
-        "X-Agent-ID": agent_sender_base,
+        "X-Machine-Name": agent_sender_base,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": str(uuid.uuid4()),
     }
@@ -406,9 +406,9 @@ async def phase_6():
                     await sess_sender.initialize()
                     await sess_sender.call_tool("ping", {})
 
-                    # Sender sends a request to waiter
-                    send_result = await sess_sender.call_tool("send_request", {
-                        "target_agent": waiter_full,
+                    # Sender sends a message to waiter
+                    send_result = await sess_sender.call_tool("send_message", {
+                        "to": waiter_full,
                         "message": "notification test",
                     })
 
@@ -442,18 +442,18 @@ async def phase_6b():
     from mcp.client.streamable_http import streamablehttp_client
     from mcp import ClientSession
 
-    url = f"{_config['coordinator_url']}/mcp"
+    url = f"{_config['coordinator_url']}/agent/mcp"
 
     agent_blocker_base = f"conc-blocker-{uuid.uuid4().hex[:8]}"
     agent_other_base = f"conc-other-{uuid.uuid4().hex[:8]}"
 
     headers_blocker = {
-        "X-Agent-ID": agent_blocker_base,
+        "X-Machine-Name": agent_blocker_base,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": str(uuid.uuid4()),
     }
     headers_other = {
-        "X-Agent-ID": agent_other_base,
+        "X-Machine-Name": agent_other_base,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": str(uuid.uuid4()),
     }
@@ -500,12 +500,12 @@ async def phase_6b():
                         f"list_agents took {other_elapsed:.1f}s — coordinator was blocked by wait_for_message",
                     ) and passed
 
-                    # Step 2: Same test with wait_for_message type=response
-                    log("Step 2: blocker starts wait_for_message(type=response, timeout=15), other calls ping concurrently")
+                    # Step 2: Same test with wait_for_message type=reply
+                    log("Step 2: blocker starts wait_for_message(type=reply, timeout=15), other calls ping concurrently")
 
                     async def blocker_wait_response():
                         return await sess_blocker.call_tool("wait_for_message", {
-                            "type": "response",
+                            "type": "reply",
                             "timeout": 15,
                         })
 
@@ -557,10 +557,10 @@ async def phase_9():
     from mcp.client.streamable_http import streamablehttp_client
     from mcp import ClientSession
 
-    url = f"{_config['coordinator_url']}/mcp"
+    url = f"{_config['coordinator_url']}/agent/mcp"
     agent_base = f"errors-{uuid.uuid4().hex[:8]}"
     headers = {
-        "X-Agent-ID": agent_base,
+        "X-Machine-Name": agent_base,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": str(uuid.uuid4()),
     }
@@ -572,18 +572,18 @@ async def phase_9():
             await session.initialize()
             await session.call_tool("ping", {})
 
-            # Step 1: send_request to nonexistent agent
-            log("Step 1: send_request to nonexistent agent")
+            # Step 1: send_message to nonexistent agent
+            log("Step 1: send_message to nonexistent agent")
             try:
-                result = await session.call_tool("send_request", {
-                    "target_agent": "nonexistent-agent",
+                result = await session.call_tool("send_message", {
+                    "to": "nonexistent/agent",
                     "message": "hello",
                 })
                 result_text = str(result)
                 # Should have returned an error in the result
                 passed = assert_true(
                     "error" in result_text.lower() or "not found" in result_text.lower(),
-                    "send_request to nonexistent agent returns error (not crash)",
+                    "send_message to nonexistent agent returns error (not crash)",
                     f"Expected error, got: {result_text}",
                 ) and passed
             except Exception as e:
@@ -591,28 +591,28 @@ async def phase_9():
                 err_msg = str(e).lower()
                 passed = assert_true(
                     "not found" in err_msg or "agent" in err_msg or "error" in err_msg,
-                    f"send_request to nonexistent agent raises ToolError (graceful): {e}",
+                    f"send_message to nonexistent agent raises ToolError (graceful): {e}",
                     f"Unexpected error type: {e}",
                 ) and passed
 
-            # Step 2: respond_to_request with fake request_id
-            log("Step 2: respond_to_request with fake request_id")
+            # Step 2: reply with fake message_id
+            log("Step 2: reply with fake message_id")
             try:
-                result = await session.call_tool("respond_to_request", {
-                    "request_id": "fake-id",
+                result = await session.call_tool("reply", {
+                    "message_id": "fake-id",
                     "response": "nope",
                 })
                 result_text = str(result)
                 passed = assert_true(
                     "error" in result_text.lower(),
-                    "respond_to_request with fake ID returns error (not crash)",
+                    "reply with fake ID returns error (not crash)",
                     f"Expected error, got: {result_text}",
                 ) and passed
             except Exception as e:
                 # ToolError is acceptable
                 passed = assert_true(
                     True,
-                    f"respond_to_request with fake ID raises ToolError (graceful): {e}",
+                    f"reply with fake ID raises ToolError (graceful): {e}",
                     f"Unexpected crash: {e}",
                 ) and passed
 
@@ -645,7 +645,7 @@ async def phase_10():
     from mcp.client.streamable_http import streamablehttp_client
     from mcp import ClientSession
 
-    url = f"{_config['coordinator_url']}/mcp"
+    url = f"{_config['coordinator_url']}/agent/mcp"
 
     # Create two agents
     agent_a_base = f"teardown-a-{uuid.uuid4().hex[:8]}"
@@ -653,12 +653,12 @@ async def phase_10():
     agent_b_full = f"{agent_b_base}/acceptance-test"
 
     headers_a = {
-        "X-Agent-ID": agent_a_base,
+        "X-Machine-Name": agent_a_base,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": str(uuid.uuid4()),
     }
     headers_b = {
-        "X-Agent-ID": agent_b_base,
+        "X-Machine-Name": agent_b_base,
         "X-Project-Name": "acceptance-test",
         "X-Session-ID": str(uuid.uuid4()),
     }
@@ -675,11 +675,11 @@ async def phase_10():
     # Agent B's session is now closed - unregister via REST
     try:
         req = urllib.request.Request(
-            f"{_config['coordinator_url']}/api/unregister",
+            f"{_config['coordinator_url']}/agent/api/unregister",
             data=b"",
             method="POST",
             headers={
-                "X-Agent-ID": agent_b_base,
+                "X-Machine-Name": agent_b_base,
                 "X-Project-Name": "acceptance-test",
             },
         )
