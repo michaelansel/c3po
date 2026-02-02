@@ -22,7 +22,7 @@ For local testing:
 ### 2. Enroll Any Claude Code Instance
 
 ```bash
-python3 plugin/setup.py --enroll https://mcp.qerk.be '<admin_token>'
+python3 setup.py --enroll https://mcp.qerk.be '<admin_token>'
 ```
 
 The admin token is printed by the deploy script. This creates an API key scoped to your machine and configures Claude Code's MCP settings.

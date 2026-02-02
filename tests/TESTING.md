@@ -239,7 +239,7 @@ python3 tests/acceptance/test_acceptance.py --coordinator-url http://<host>:8420
 python3 -m pytest coordinator/tests/ -v
 
 # Hook unit tests
-cd plugin/hooks && pytest tests/ -v
+cd hooks && pytest tests/ -v
 ```
 
 ### E2E Integration Test

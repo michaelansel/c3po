@@ -226,7 +226,7 @@ From `detailed-design.md`:
 After improvements, verify:
 
 1. **Unit tests pass**: `cd coordinator && pytest tests/ -v`
-2. **Hook tests pass**: `cd plugin/hooks && pytest tests/ -v`
+2. **Hook tests pass**: `cd hooks && pytest tests/ -v`
 3. **Two-agent test**: Follow PROMPT.md two-agent test procedure
 4. **Documentation accuracy**: Review each doc against implementation
 5. **Middleware tested**: New tests for AgentIdentityMiddleware pass

@@ -31,7 +31,7 @@ python3 -m pytest coordinator/tests/test_agents.py -v
 python3 -m pytest coordinator/tests/test_agents.py::TestAgentManager::test_collision_with_different_session_gets_suffix -v
 
 # Plugin hook tests
-cd plugin/hooks && pytest tests/ -v
+cd hooks && pytest tests/ -v
 
 # E2E tests (requires live coordinator)
 export C3PO_TEST_LIVE=1
@@ -45,7 +45,7 @@ bash tests/acceptance/run-acceptance.sh
 ### Deployment
 ```bash
 bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints nginx sudo commands)
-# Enroll via: python3 plugin/setup.py --enroll https://mcp.qerk.be '<admin_token>'
+# Enroll via: python3 setup.py --enroll https://mcp.qerk.be '<admin_token>'
 ```
 
 ## Architecture
@@ -61,13 +61,13 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
   - `audit.py` — `AuditLogger`: structured JSON audit logging to Python logger + Redis
   - `rate_limit.py` — `RateLimiter`: per-operation, per-identity sliding window rate limiting
 
-- **plugin/** — Claude Code plugin (hooks + skills)
-  - `hooks/register_agent.py` — SessionStart: registers agent via REST
-  - `hooks/check_inbox.py` — Stop: blocks stop if pending messages exist
-  - `hooks/unregister_agent.py` — SessionEnd: unregisters agent
-  - `hooks/ensure_agent_id.py` — PreToolUse: ensures agent_id for MCP calls
-  - `hooks/c3po_common.py` — Shared utilities: credentials file I/O, auth headers, agent ID file management
-  - `setup.py` — Interactive plugin installer with enrollment
+- **hooks/** — Claude Code plugin hooks
+  - `register_agent.py` — SessionStart: registers agent via REST
+  - `check_inbox.py` — Stop: blocks stop if pending messages exist
+  - `unregister_agent.py` — SessionEnd: unregisters agent
+  - `ensure_agent_id.py` — PreToolUse: ensures agent_id for MCP calls
+  - `c3po_common.py` — Shared utilities: credentials file I/O, auth headers, agent ID file management
+- **setup.py** — Interactive plugin installer with enrollment
 
 ### Key Design Patterns
 
@@ -98,9 +98,9 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 
 **MCP tools**: `send_message` (send to another agent), `reply` (respond to a message), `get_messages` (consume pending messages/replies), `wait_for_message` (block until message arrives), `ping`, `list_agents`, `register_agent`, `set_description`.
 
-**Adding MCP tools**: When adding a new tool to `coordinator/server.py`, also update `plugin/hooks/hooks.json` (PreToolUse matcher list) and, if the tool uses `agent_id`, `plugin/hooks/ensure_agent_id.py` (TOOLS_NEEDING_AGENT_ID). The matcher must explicitly list all tool names because prefix patterns don't work in plugin hooks. New modules also need to be added to the `Dockerfile` COPY commands.
+**Adding MCP tools**: When adding a new tool to `coordinator/server.py`, also update `hooks/hooks.json` (PreToolUse matcher list) and, if the tool uses `agent_id`, `hooks/ensure_agent_id.py` (TOOLS_NEEDING_AGENT_ID). The matcher must explicitly list all tool names because prefix patterns don't work in plugin hooks. New modules also need to be added to the `Dockerfile` COPY commands.
 
-**Version bumping**: When committing a version bump, update `plugin/.claude-plugin/plugin.json` in this repo and `plugins/c3po/.claude-plugin/plugin.json` + `.claude-plugin/marketplace.json` in the `michaelansel/claude-code-plugins` marketplace repo. All three must stay in sync.
+**Version bumping**: When committing a version bump, update `.claude-plugin/plugin.json` in this repo and `plugins/c3po/.claude-plugin/plugin.json` + `.claude-plugin/marketplace.json` in the `michaelansel/claude-code-plugins` marketplace repo. All three must stay in sync.
 
 **Message flow**: Messages go to `c3po:inbox:{agent}` Redis lists. Notifications (separate from messages) go to `c3po:notify:{agent}` to wake blocked `wait_for_message` calls without consuming messages. This separation prevents message loss. Messages have type `"message"`, replies have type `"reply"`. Each message gets a `message_id` used for replies.
 
@@ -137,7 +137,7 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 
 Tests are organized in layers from fast/isolated to slow/integrated. Each layer builds confidence that the layer below didn't miss something:
 
-1. **Unit tests** (`coordinator/tests/`, `plugin/hooks/tests/`) — Fast, no network. Use `fakeredis` for in-memory Redis and mock HTTP servers for hook tests. Every module has its own test file. These run in seconds and should always pass before committing.
+1. **Unit tests** (`coordinator/tests/`, `hooks/tests/`) — Fast, no network. Use `fakeredis` for in-memory Redis and mock HTTP servers for hook tests. Every module has its own test file. These run in seconds and should always pass before committing.
 
 2. **E2E integration tests** (`tests/test_e2e_integration.py`) — Real MCP client sessions against a live coordinator. Gated behind `C3PO_TEST_LIVE=1`. Validates that MCP transport, headers, and tool dispatch work end-to-end.
 
@@ -155,7 +155,7 @@ Tests are organized in layers from fast/isolated to slow/integrated. Each layer 
 
 ### What to run when
 
-- **Before committing**: Unit tests (`coordinator/tests/` and `plugin/hooks/tests/`)
+- **Before committing**: Unit tests (`coordinator/tests/` and `hooks/tests/`)
 - **Before deploying**: Acceptance tests (`tests/acceptance/run-acceptance.sh`)
 - **After deploying**: Smoke-check with `scripts/test_e2e.sh` or E2E integration tests
 

@@ -213,7 +213,7 @@ Nice-to-have improvements.
 After each group, run:
 ```bash
 cd coordinator && pytest tests/ -v
-cd plugin/hooks && pytest tests/ -v
+cd hooks && pytest tests/ -v
 ```
 
 ### New Test Files

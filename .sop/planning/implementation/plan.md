@@ -140,7 +140,7 @@ in the "Out of Scope" section of summary.md.
 
 **Implementation Guidance**:
 1. Run: `cd coordinator && pytest tests/ -v`
-2. Run: `cd plugin/hooks && pytest tests/ -v`
+2. Run: `cd hooks && pytest tests/ -v`
 3. If all pass, stage changed files:
    - `coordinator/messaging.py`
    - `coordinator/errors.py`
@@ -571,7 +571,7 @@ Option B (Document current behavior):
 
 **Implementation Guidance**:
 1. Run: `cd coordinator && pytest tests/ -v`
-2. Run: `cd plugin/hooks && pytest tests/ -v`
+2. Run: `cd hooks && pytest tests/ -v`
 3. Stage modified files
 4. Commit with message: "Low priority improvements: input validation, pagination, session ID handling"
 
@@ -593,7 +593,7 @@ Option B (Document current behavior):
 
 **Implementation Guidance**:
 1. Run: `cd coordinator && pytest tests/ -v`
-2. Run: `cd plugin/hooks && pytest tests/ -v`
+2. Run: `cd hooks && pytest tests/ -v`
 3. Verify test count matches or exceeds expectations
 4. Verify no warnings or deprecation notices
 

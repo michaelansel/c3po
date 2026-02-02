@@ -80,7 +80,7 @@ This document defines all test cases for the C3PO multi-agent coordination syste
 | U-HOOK-005 | Stop hook loop prevention | Re-entry detection | Exits 0 to prevent infinite loop | Yes |
 | U-HOOK-006 | Stop coordinator down | Coordinator unavailable | Exits 0 (allow stop) | Yes |
 
-**Location**: `plugin/hooks/tests/test_register_agent.py`, `plugin/hooks/tests/test_check_inbox.py`
+**Location**: `hooks/tests/test_register_agent.py`, `hooks/tests/test_check_inbox.py`
 
 ---
 
@@ -217,7 +217,7 @@ This document defines all test cases for the C3PO multi-agent coordination syste
 python3 -m pytest coordinator/tests/ -v
 
 # Unit tests (hooks)
-cd plugin/hooks && pytest tests/ -v
+cd hooks && pytest tests/ -v
 
 # Integration/E2E tests (requires running coordinator)
 export C3PO_TEST_LIVE=1
