@@ -136,14 +136,42 @@ class AgentIdentityMiddleware(Middleware):
     to provide the correct identity via _resolve_agent_id().
 
     For API key auth, enforces agent_pattern from the key metadata.
+
+    Auth routing workaround (X-C3PO-Auth-Path header):
+        MCP tool calls arrive at the coordinator on a single /mcp endpoint,
+        losing the original URL path prefix that normally distinguishes
+        /agent/* (API key auth) from /oauth/* (proxy token auth). Without
+        the original path, the middleware can't determine which auth
+        validator to use.
+
+        To solve this, nginx injects an ``X-C3PO-Auth-Path`` header on
+        /agent/* requests (value: "/agent"). The middleware reads this
+        header to route to API key validation. When the header is absent
+        (OAuth connections via mcp-auth-proxy, which bypass nginx and
+        connect directly to the coordinator inside Docker), the middleware
+        defaults to proxy token validation (/oauth).
+
+        This is a routing hint only — not a security credential. Each
+        auth validator independently verifies the token. Forging the header
+        without a valid API key will still fail authentication.
+
+        See also: nginx config in scripts/deploy.sh (proxy_set_header
+        X-C3PO-Auth-Path) and the "Auth routing" section in CLAUDE.md.
     """
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         headers = get_http_headers()
 
-        # Authenticate MCP request
-        # Determine path prefix from referer or default to /agent
-        auth_result = _authenticate_mcp_headers(headers, "/agent")
+        # --- Auth routing workaround ---
+        # MCP tool calls lose the original URL path prefix after nginx
+        # rewrites /agent/mcp → /mcp.  nginx injects X-C3PO-Auth-Path
+        # to tell us which auth validator to use.  When the header is
+        # absent (OAuth via mcp-auth-proxy, which connects directly to
+        # the coordinator without nginx), default to /oauth.
+        # See the class docstring above for the full explanation.
+        auth_path = headers.get("x-c3po-auth-path", "")
+        path_prefix = auth_path if auth_path in ("/agent", "/admin") else "/oauth"
+        auth_result = _authenticate_mcp_headers(headers, path_prefix)
         if not auth_result.get("valid"):
             raise ToolError(
                 f"Authentication failed: {auth_result.get('error', 'Invalid credentials')}. "

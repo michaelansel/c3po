@@ -313,11 +313,17 @@ server {
     }
 
     # MCP endpoint — rewrite /agent/mcp to /mcp for FastMCP
+    # IMPORTANT: X-C3PO-Auth-Path tells the coordinator which auth validator
+    # to use.  After the rewrite to /mcp, the original path prefix is lost.
+    # Without this header, the coordinator defaults to OAuth proxy-token
+    # validation, which breaks API key auth from Claude Code.
+    # See AgentIdentityMiddleware docstring in coordinator/server.py.
     location = /agent/mcp {
         if (\$agent_auth_valid = 0) {
             return 401 '{"error": "Unauthorized"}';
         }
         limit_req zone=c3po_api burst=10 nodelay;
+        proxy_set_header X-C3PO-Auth-Path "/agent";
         rewrite ^/agent(/mcp)\$ \$1 break;
         proxy_pass http://c3po_coordinator;
         proxy_set_header Host \$host;
@@ -332,11 +338,13 @@ server {
     }
 
     # Agent REST endpoints — server_secret prefix validated by nginx
+    # X-C3PO-Auth-Path: same auth routing hint as /agent/mcp above.
     location /agent/ {
         if (\$agent_auth_valid = 0) {
             return 401 '{"error": "Unauthorized"}';
         }
         limit_req zone=c3po_api burst=10 nodelay;
+        proxy_set_header X-C3PO-Auth-Path "/agent";
         proxy_pass http://c3po_coordinator;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;

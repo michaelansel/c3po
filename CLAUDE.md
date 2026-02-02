@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 C3PO is a multi-agent coordination framework that enables multiple Claude Code instances to communicate and collaborate through a central coordinator service. Built on FastMCP (MCP protocol) with a Redis message queue backend.
 
+## Python Environment
+
+Always use the project venv: `.venv/` in the repo root. Activate with `source .venv/bin/activate` or prefix commands with `.venv/bin/python3` / `.venv/bin/pytest`.
+
 ## Commands
 
 ### Running the Coordinator
@@ -93,6 +97,8 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 - **OAuth proxy** (`/oauth/*`): `Authorization: Bearer <proxy_token>`. Injected by mcp-auth-proxy after OAuth flow. Used by Claude Desktop and Claude.ai.
 - **Admin key** (`/admin/*`): `Authorization: Bearer <server_secret>.<admin_key>`. nginx validates the server_secret prefix; coordinator validates the admin_key portion. Legacy format `Bearer <admin_key>` also accepted.
 - **Dev mode**: When no auth env vars are set (`C3PO_SERVER_SECRET`, `C3PO_ADMIN_KEY`, `C3PO_PROXY_BEARER_TOKEN`), all requests pass without auth.
+
+**Auth routing for MCP (X-C3PO-Auth-Path header)**: MCP tool calls from both Claude Code (API key) and Claude Desktop (OAuth) arrive at the coordinator's single `/mcp` endpoint. The original URL path prefix (`/agent/mcp` vs `/oauth/mcp`) is lost after nginx rewrites `/agent/mcp` → `/mcp`, so the coordinator can't determine which auth validator to use from the path alone. To solve this, nginx injects an `X-C3PO-Auth-Path: /agent` header on all `/agent/*` requests. The `AgentIdentityMiddleware` reads this header: if present and valid (`/agent` or `/admin`), it routes to that auth validator; if absent, it defaults to `/oauth` (proxy token validation). This works because mcp-auth-proxy connects directly to the coordinator inside Docker, bypassing nginx entirely, so OAuth connections never have this header. The header is a routing hint only — each auth validator independently verifies the token, so forging the header without valid credentials will still fail. Key files: `coordinator/server.py` (AgentIdentityMiddleware), `scripts/deploy.sh` (nginx `proxy_set_header X-C3PO-Auth-Path`).
 
 **Credentials**: Plugin hooks read `~/.claude/c3po-credentials.json` (0o600 perms) for auth. Contains `coordinator_url`, `api_token` (composite `server_secret.api_key`), `key_id`, `agent_pattern`. Legacy format with separate `server_secret` and `api_key` fields is also supported. Created by `setup.py --enroll`.
 
