@@ -44,8 +44,8 @@ bash tests/acceptance/run-acceptance.sh
 
 ### Deployment
 ```bash
-./scripts/deploy.sh          # Full deployment
-# Enroll via /c3po setup skill inside Claude Code
+bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints nginx sudo commands)
+# Enroll via: python3 plugin/setup.py --enroll https://mcp.qerk.be '<admin_token>'
 ```
 
 ## Architecture
@@ -89,18 +89,18 @@ bash tests/acceptance/run-acceptance.sh
 | `/api/health` | None (public) | Health checks |
 
 **Authentication**: Three auth mechanisms, determined by URL path prefix:
-- **API key** (`/agent/*`): `Authorization: Bearer <server_secret>.<api_key>`. Per-agent API keys stored in Redis, scoped by agent_pattern (fnmatch glob). Used by Claude Code instances.
+- **API key** (`/agent/*`): `Authorization: Bearer <server_secret>.<api_key>`. nginx validates the server_secret prefix; coordinator validates the api_key via SHA-256 lookup + bcrypt verification. Per-agent API keys stored in Redis, scoped by agent_pattern (fnmatch glob). Used by Claude Code instances.
 - **OAuth proxy** (`/oauth/*`): `Authorization: Bearer <proxy_token>`. Injected by mcp-auth-proxy after OAuth flow. Used by Claude Desktop and Claude.ai.
-- **Admin key** (`/admin/*`): `Authorization: Bearer <admin_key>`. For API key management and audit access.
+- **Admin key** (`/admin/*`): `Authorization: Bearer <server_secret>.<admin_key>`. nginx validates the server_secret prefix; coordinator validates the admin_key portion. Legacy format `Bearer <admin_key>` also accepted.
 - **Dev mode**: When no auth env vars are set (`C3PO_SERVER_SECRET`, `C3PO_ADMIN_KEY`, `C3PO_PROXY_BEARER_TOKEN`), all requests pass without auth.
 
-**Credentials**: Plugin hooks read `~/.claude/c3po-credentials.json` (0o600 perms) for auth. Contains `coordinator_url`, `server_secret`, `api_key`, `key_id`, `agent_pattern`. Created by `setup.py --enroll`.
+**Credentials**: Plugin hooks read `~/.claude/c3po-credentials.json` (0o600 perms) for auth. Contains `coordinator_url`, `api_token` (composite `server_secret.api_key`), `key_id`, `agent_pattern`. Legacy format with separate `server_secret` and `api_key` fields is also supported. Created by `setup.py --enroll`.
 
 **MCP tools**: `send_message` (send to another agent), `reply` (respond to a message), `get_messages` (consume pending messages/replies), `wait_for_message` (block until message arrives), `ping`, `list_agents`, `register_agent`, `set_description`.
 
 **Adding MCP tools**: When adding a new tool to `coordinator/server.py`, also update `plugin/hooks/hooks.json` (PreToolUse matcher list) and, if the tool uses `agent_id`, `plugin/hooks/ensure_agent_id.py` (TOOLS_NEEDING_AGENT_ID). The matcher must explicitly list all tool names because prefix patterns don't work in plugin hooks. New modules also need to be added to the `Dockerfile` COPY commands.
 
-**Version bumping**: When committing a version bump, update the version in **both** `plugin/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` in addition to the commit message tag. These manifests must stay in sync.
+**Version bumping**: When committing a version bump, update `plugin/.claude-plugin/plugin.json` in this repo and `plugins/c3po/.claude-plugin/plugin.json` + `.claude-plugin/marketplace.json` in the `michaelansel/claude-code-plugins` marketplace repo. All three must stay in sync.
 
 **Message flow**: Messages go to `c3po:inbox:{agent}` Redis lists. Notifications (separate from messages) go to `c3po:notify:{agent}` to wake blocked `wait_for_message` calls without consuming messages. This separation prevents message loss. Messages have type `"message"`, replies have type `"reply"`. Each message gets a `message_id` used for replies.
 
@@ -116,7 +116,7 @@ bash tests/acceptance/run-acceptance.sh
 - `c3po:replies:{agent_id}` — Reply queue
 - `c3po:rate:{operation}:{identity}` — Rate limit tracking (sorted set)
 - `c3po:audit` — List of recent audit entries (JSON, newest first)
-- `c3po:api_keys` — Hash: `sha256(api_key)` → JSON key metadata
+- `c3po:api_keys` — Hash: `sha256(api_key)` → JSON key metadata (includes `bcrypt_hash` for verification)
 - `c3po:key_ids` — Hash: `key_id` → `sha256(api_key)` (reverse lookup)
 
 ### Environment Variables

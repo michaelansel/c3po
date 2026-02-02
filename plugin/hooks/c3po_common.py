@@ -24,7 +24,8 @@ def get_credentials() -> dict:
     """Load credentials from ~/.claude/c3po-credentials.json.
 
     Returns:
-        Dict with coordinator_url, server_secret, api_key, key_id, agent_pattern.
+        Dict with coordinator_url, api_token, key_id, agent_pattern.
+        Also supports legacy format with server_secret + api_key.
         Returns empty dict if file doesn't exist or is invalid.
     """
     try:
@@ -38,7 +39,7 @@ def save_credentials(credentials: dict) -> None:
     """Save credentials to ~/.claude/c3po-credentials.json with 0o600 perms.
 
     Args:
-        credentials: Dict with coordinator_url, server_secret, api_key, etc.
+        credentials: Dict with coordinator_url, api_token, key_id, agent_pattern.
     """
     os.makedirs(os.path.dirname(CREDENTIALS_FILE), exist_ok=True)
     fd = os.open(CREDENTIALS_FILE, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
@@ -143,13 +144,20 @@ def auth_headers() -> dict:
     """Return authentication headers for hook REST calls.
 
     Reads credentials from ~/.claude/c3po-credentials.json and returns
-    Authorization: Bearer <server_secret>.<api_key> header.
+    Authorization: Bearer <api_token> header.
+    Supports both new format (api_token) and legacy format (server_secret + api_key).
     Returns empty dict if no credentials are set (dev mode).
     """
     creds = get_credentials()
+
+    # New format: single composite api_token
+    api_token = creds.get("api_token", "")
+    if api_token:
+        return {"Authorization": f"Bearer {api_token}"}
+
+    # Legacy format: server_secret + api_key (backwards compatibility)
     server_secret = creds.get("server_secret", "")
     api_key = creds.get("api_key", "")
-
     if server_secret and api_key:
         return {"Authorization": f"Bearer {server_secret}.{api_key}"}
 

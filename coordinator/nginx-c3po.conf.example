@@ -1,9 +1,12 @@
 # C3PO Nginx Reverse Proxy Configuration (OAuth + mcp-auth-proxy)
 #
-# This config provides TLS termination and dual-path routing:
-# - MCP traffic goes through mcp-auth-proxy (OAuth 2.1 gateway)
-# - Hook REST traffic uses a shared secret (validated by nginx)
-# - Health endpoint is unauthenticated
+# This config provides TLS termination and path-based routing:
+# - /agent/* and /admin/*: Bearer token with server_secret prefix (validated by nginx)
+# - /oauth/*: OAuth via mcp-auth-proxy
+# - /api/health: Public, no auth
+#
+# nginx validates the server_secret prefix on all /agent/* and /admin/* requests.
+# The coordinator validates the remainder (API key via bcrypt, admin key via compare).
 #
 # Prerequisites:
 # - mcp-auth-proxy running on port 8421
@@ -23,10 +26,12 @@ upstream c3po_coordinator {
     keepalive 8;
 }
 
-# Hook secret validation for REST endpoints
-# TODO: Replace with your actual hook secret value
-map $http_x_c3po_hook_secret $hook_auth_valid {
-    "YOUR_HOOK_SECRET_HERE" 1;
+# Validate server_secret prefix in Bearer token
+# Both /agent/* and /admin/* use: Authorization: Bearer <server_secret>.<key>
+# nginx checks the prefix; coordinator checks the key portion.
+# TODO: Replace SERVER_SECRET_HERE with your actual C3PO_SERVER_SECRET value
+map $http_authorization $agent_auth_valid {
+    "~^Bearer SERVER_SECRET_HERE\." 1;   # TODO: replace SERVER_SECRET_HERE
     default 0;
 }
 
@@ -58,46 +63,47 @@ server {
     # Request body size limit
     client_max_body_size 64k;
 
-    # Health endpoint - no auth required, direct to coordinator
+    # Health endpoint — exact match, no auth required, direct to coordinator
     location = /api/health {
         limit_req zone=c3po_api burst=10 nodelay;
+        limit_except GET { deny all; }
+
+        # Don't forward client headers to health endpoint
+        proxy_pass_request_headers off;
+        proxy_pass_request_body off;
+
         proxy_pass http://c3po_coordinator;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # Hook REST endpoints - validated by hook secret header
-    # nginx strips the hook secret and injects the proxy bearer token
-    location /api/ {
-        if ($hook_auth_valid = 0) {
+    # Agent endpoints — server_secret prefix validated by nginx
+    location /agent/ {
+        if ($agent_auth_valid = 0) {
             return 401 '{"error": "Unauthorized"}';
         }
 
         limit_req zone=c3po_api burst=10 nodelay;
 
-        # Strip hook secret, inject proxy bearer token
-        proxy_set_header X-C3PO-Hook-Secret "";
-        proxy_set_header Authorization "Bearer PROXY_BEARER_TOKEN_VALUE";  # TODO: Replace with actual proxy token
-
         proxy_pass http://c3po_coordinator;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_http_version 1.1;
+
+        # SSE/long-poll support for /agent/mcp
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3700s;  # Slightly longer than max wait_for_message timeout (3600s)
     }
 
-    # Admin endpoints - same auth as hooks, stricter rate limit
-    location /api/admin/ {
-        if ($hook_auth_valid = 0) {
+    # Admin endpoints — same server_secret prefix, stricter rate limit
+    location /admin/ {
+        if ($agent_auth_valid = 0) {
             return 401 '{"error": "Unauthorized"}';
         }
 
         limit_req zone=c3po_admin burst=3 nodelay;
-
-        proxy_set_header X-C3PO-Hook-Secret "";
-        proxy_set_header Authorization "Bearer PROXY_BEARER_TOKEN_VALUE";  # TODO: Replace with actual proxy token
 
         proxy_pass http://c3po_coordinator;
         proxy_set_header Host $host;
@@ -133,8 +139,8 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # MCP endpoint -> mcp-auth-proxy (handles OAuth + proxies to coordinator)
-    location /mcp {
+    # OAuth MCP endpoint -> mcp-auth-proxy (handles OAuth + proxies to coordinator)
+    location /oauth/ {
         limit_req zone=c3po_api burst=20 nodelay;
         proxy_pass http://c3po_proxy;
         proxy_set_header Host $host;
@@ -147,7 +153,7 @@ server {
         # SSE/long-poll support
         proxy_buffering off;
         proxy_cache off;
-        proxy_read_timeout 3700s;  # Slightly longer than max wait_for_message timeout (3600s)
+        proxy_read_timeout 3700s;
     }
 
     # Deny everything else

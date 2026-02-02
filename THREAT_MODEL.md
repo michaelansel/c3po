@@ -37,8 +37,8 @@ Admin tools ──> nginx ──────────────────
 - **Trust level**: Holder of a valid API key (scoped to agent_pattern)
 
 ### Boundary 4: nginx → coordinator (admin traffic)
-- **What crosses**: Admin REST requests on `/admin/*` with `Authorization: Bearer <admin_key>`
-- **Protection**: Coordinator validates admin key against `C3PO_ADMIN_KEY` env var
+- **What crosses**: Admin REST requests on `/admin/*` with `Authorization: Bearer <server_secret>.<admin_key>`
+- **Protection**: nginx validates server_secret prefix (same as /agent/*); coordinator validates admin_key portion against `C3PO_ADMIN_KEY` env var
 - **Trust level**: Holder of admin key (full admin access)
 
 ### Boundary 5: mcp-auth-proxy → coordinator (proxied MCP)
@@ -58,7 +58,7 @@ Admin tools ──> nginx ──────────────────
 | MCP client (OAuth) | GitHub OAuth via mcp-auth-proxy | `--github-allowed-users` whitelist |
 | MCP client (API key) | `Bearer <server_secret>.<api_key>` on `/agent/mcp` | agent_pattern restricts usable agent IDs |
 | Hook scripts | `Bearer <server_secret>.<api_key>` on `/agent/api/*` | agent_pattern restricts usable agent IDs |
-| Admin | `Bearer <admin_key>` on `/admin/api/*` | Full admin access (key management, audit) |
+| Admin | `Bearer <server_secret>.<admin_key>` on `/admin/api/*` | Full admin access (key management, audit) |
 | Coordinator | Validates tokens per path prefix | N/A (server-side) |
 
 ## Single-Tenant Limitation
@@ -90,14 +90,14 @@ This is acceptable for single-user deployments. Multi-tenancy would require upst
 - **Residual risk**: Low. Combined server_secret + API key makes brute force infeasible.
 
 ### T4: API key leak from client
-- **Attack**: API key stored in `~/.claude/c3po-credentials.json` is compromised
-- **Mitigation**: File permissions (0o600). Keys are scoped by agent_pattern (limits which agent IDs can be used). Individual keys can be revoked via admin API without affecting other agents.
-- **Residual risk**: Local account compromise would expose the key. Unlike the old hook secret, compromised keys can be individually revoked and are scoped to specific agent patterns.
+- **Attack**: Composite API token stored in `~/.claude/c3po-credentials.json` is compromised
+- **Mitigation**: File permissions (0o600). Keys are scoped by agent_pattern (limits which agent IDs can be used). Individual keys can be revoked via admin API without affecting other agents. The composite token includes the server_secret prefix, so a leaked token cannot be used to derive the admin key.
+- **Residual risk**: Local account compromise would expose the token. The server_secret is embedded in the composite token, so leaking one client's token reveals the server_secret. However, the attacker still needs a valid API key to authenticate — the server_secret alone is insufficient without the per-key portion.
 
 ### T5: Server secret leak
-- **Attack**: Server secret (`C3PO_SERVER_SECRET`) is compromised
-- **Mitigation**: Only exists in server environment variables. Never sent to clients (clients only get API keys).
-- **Residual risk**: Server compromise would expose this. However, the attacker would also need a valid API key hash in Redis to authenticate. Server secret alone is not sufficient.
+- **Attack**: Server secret (`C3PO_SERVER_SECRET`) is compromised (e.g., via leaked composite token)
+- **Mitigation**: Server secret is the nginx perimeter check. Even with the server_secret, the attacker needs a valid API key (verified by bcrypt in Redis) or the admin key to authenticate. Server secret alone allows bypassing nginx but not the coordinator.
+- **Residual risk**: Attacker with server_secret can reach the coordinator directly (bypassing nginx rate limits) but still needs a valid API key. Rotation requires redeploying coordinator, updating nginx config, and re-enrolling all clients.
 
 ### T6: Admin key leak
 - **Attack**: Admin key is compromised
@@ -131,17 +131,17 @@ This is acceptable for single-user deployments. Multi-tenancy would require upst
 
 ### T12: Redis API key storage compromise
 - **Attack**: Attacker with Redis access reads API key hashes
-- **Mitigation**: API keys are stored as SHA-256 hashes, not plaintext. Even with Redis access, keys cannot be recovered from hashes.
-- **Residual risk**: Attacker could delete keys (DoS) or add new keys if they also know the hash format. Redis access implies server compromise.
+- **Mitigation**: API keys are indexed by SHA-256 hash (for fast lookup) but verified by bcrypt hash (stored in metadata). Even with full Redis access, recovering the actual API key requires brute-forcing bcrypt, which is computationally infeasible. The SHA-256 index alone is insufficient to authenticate — the coordinator performs bcrypt verification on every request.
+- **Residual risk**: Attacker could delete keys (DoS) or add new keys if they craft valid metadata with their own bcrypt hash. Redis access implies server compromise.
 
 ## Secret Inventory
 
 | Secret | Stored In | Rotated By | Scope |
 |--------|-----------|------------|-------|
-| `C3PO_SERVER_SECRET` | Server `.env`, coordinator env | Manual (redeploy) | Validates API key bearer tokens |
-| `C3PO_ADMIN_KEY` | Server `.env`, coordinator env | Manual (redeploy) | Admin API access |
+| `C3PO_SERVER_SECRET` | Server `.env`, coordinator env, embedded in client composite tokens | Manual (redeploy + re-enroll all clients) | nginx perimeter check (Bearer token prefix) |
+| `C3PO_ADMIN_KEY` | Server `.env`, coordinator env | Manual (redeploy) | Admin API access (after server_secret prefix) |
 | `C3PO_PROXY_BEARER_TOKEN` | Server `.env`, coordinator env, mcp-auth-proxy config | Manual (redeploy) | OAuth proxy → coordinator trust |
-| Per-agent API keys | Client `~/.claude/c3po-credentials.json`, Redis (hashed) | `DELETE /admin/api/keys/{id}` | Per-agent MCP and REST access |
+| Per-agent composite tokens | Client `~/.claude/c3po-credentials.json` (as `api_token`), Redis (SHA-256 index + bcrypt hash) | `DELETE /admin/api/keys/{id}` | Per-agent MCP and REST access |
 | `GITHUB_CLIENT_SECRET` | Server `.env`, mcp-auth-proxy config | Via GitHub OAuth App settings | OAuth authentication |
 | `REDIS_PASSWORD` | Server `.env`, coordinator env, Redis config | Manual (redeploy) | Redis access |
 

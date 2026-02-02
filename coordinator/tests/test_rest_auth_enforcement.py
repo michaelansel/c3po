@@ -106,17 +106,17 @@ class TestRegisterRejectsUnauthenticated:
 
     @pytest.mark.asyncio
     async def test_valid_api_key_succeeds(self, client, auth_app):
-        """Valid server_secret.api_key should authenticate on /agent/* paths."""
-        # Get the test API key from the fixture
+        """Valid composite token should authenticate on /agent/* paths."""
+        # Get the composite API token from the fixture (already includes server_secret prefix)
         import coordinator.server as server_module
-        api_key = server_module._test_api_key
+        api_token = server_module._test_api_key
 
         response = await client.post(
             "/agent/api/register",
             headers={
                 "X-Machine-Name": "machine",
                 "X-Project-Name": "proj",
-                "Authorization": f"Bearer {SERVER_SECRET}.{api_key}",
+                "Authorization": f"Bearer {api_token}",
             },
         )
         assert response.status_code == 200
@@ -147,13 +147,13 @@ class TestPendingRejectsUnauthenticated:
     @pytest.mark.asyncio
     async def test_valid_api_key_succeeds(self, client):
         import coordinator.server as server_module
-        api_key = server_module._test_api_key
+        api_token = server_module._test_api_key
 
         response = await client.get(
             "/agent/api/pending",
             headers={
                 "X-Machine-Name": "machine/proj",
-                "Authorization": f"Bearer {SERVER_SECRET}.{api_key}",
+                "Authorization": f"Bearer {api_token}",
             },
         )
         assert response.status_code == 200
@@ -184,13 +184,13 @@ class TestUnregisterRejectsUnauthenticated:
     @pytest.mark.asyncio
     async def test_valid_api_key_succeeds(self, client):
         import coordinator.server as server_module
-        api_key = server_module._test_api_key
+        api_token = server_module._test_api_key
 
         response = await client.post(
             "/agent/api/unregister",
             headers={
                 "X-Machine-Name": "machine/proj",
-                "Authorization": f"Bearer {SERVER_SECRET}.{api_key}",
+                "Authorization": f"Bearer {api_token}",
             },
         )
         assert response.status_code == 200

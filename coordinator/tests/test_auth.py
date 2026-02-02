@@ -1,5 +1,6 @@
 """Tests for C3PO authentication (AuthManager)."""
 
+import hashlib
 import json
 import os
 import pytest
@@ -112,8 +113,8 @@ class TestAuthManagerAdminKey:
         monkeypatch.delenv("C3PO_SERVER_SECRET", raising=False)
         monkeypatch.delenv("C3PO_PROXY_BEARER_TOKEN", raising=False)
 
-    def test_valid_admin_key(self):
-        """Correct admin key passes on /admin path."""
+    def test_valid_admin_key_legacy(self):
+        """Correct admin key passes on /admin path (legacy format)."""
         manager = AuthManager()
         result = manager.validate_request("Bearer test-admin-key", "/admin")
         assert result["valid"] is True
@@ -125,6 +126,28 @@ class TestAuthManagerAdminKey:
         result = manager.validate_request("Bearer wrong-key", "/admin")
         assert result["valid"] is False
         assert "Invalid admin key" in result["error"]
+
+    def test_valid_admin_key_composite(self, monkeypatch):
+        """Correct server_secret.admin_key passes on /admin path (new format)."""
+        monkeypatch.setenv("C3PO_SERVER_SECRET", "test-server-secret")
+        manager = AuthManager()
+        result = manager.validate_request("Bearer test-server-secret.test-admin-key", "/admin")
+        assert result["valid"] is True
+        assert result["source"] == "admin"
+
+    def test_invalid_admin_key_composite_bad_secret(self, monkeypatch):
+        """Wrong server_secret in composite admin token is rejected."""
+        monkeypatch.setenv("C3PO_SERVER_SECRET", "test-server-secret")
+        manager = AuthManager()
+        result = manager.validate_request("Bearer wrong-secret.test-admin-key", "/admin")
+        assert result["valid"] is False
+
+    def test_invalid_admin_key_composite_bad_key(self, monkeypatch):
+        """Wrong admin_key in composite admin token is rejected."""
+        monkeypatch.setenv("C3PO_SERVER_SECRET", "test-server-secret")
+        manager = AuthManager()
+        result = manager.validate_request("Bearer test-server-secret.wrong-key", "/admin")
+        assert result["valid"] is False
 
 
 class TestAuthManagerApiKey:
@@ -141,13 +164,14 @@ class TestAuthManagerApiKey:
         return fakeredis.FakeRedis()
 
     def test_valid_api_key(self, redis_client):
-        """Valid server_secret.api_key token passes."""
+        """Valid server_secret.api_key token passes (composite token from create_api_key)."""
         manager = AuthManager(redis_client)
-        # Create a key first
+        # Create a key first — returns composite token (server_secret.raw_key)
         key_data = manager.create_api_key(agent_pattern="macbook/*", description="test")
-        api_key = key_data["api_key"]
+        composite_key = key_data["api_key"]
 
-        result = manager.validate_request(f"Bearer test-server-secret.{api_key}", "/agent")
+        # The composite key already includes server_secret prefix
+        result = manager.validate_request(f"Bearer {composite_key}", "/agent")
         assert result["valid"] is True
         assert result["source"] == "api_key"
         assert result["agent_pattern"] == "macbook/*"
@@ -204,13 +228,26 @@ class TestApiKeyManagement:
         return AuthManager(redis_client)
 
     def test_create_api_key(self, manager):
-        """create_api_key returns key_id, api_key, pattern, and timestamps."""
+        """create_api_key returns key_id, composite api_key, pattern, and timestamps."""
         result = manager.create_api_key(agent_pattern="laptop/*", description="My laptop")
         assert "key_id" in result
         assert "api_key" in result
         assert result["agent_pattern"] == "laptop/*"
         assert result["description"] == "My laptop"
         assert "created_at" in result
+        # Composite token should contain a dot (server_secret.raw_key)
+        assert "." in result["api_key"]
+
+    def test_create_api_key_stores_bcrypt_hash(self, manager, redis_client):
+        """create_api_key stores bcrypt hash in Redis metadata."""
+        result = manager.create_api_key(agent_pattern="test/*")
+        # Check Redis storage has bcrypt_hash
+        raw_key = result["api_key"].split(".", 1)[1]  # Extract raw key from composite
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        raw = redis_client.hget(AuthManager.API_KEYS_HASH, key_hash)
+        metadata = json.loads(raw.decode())
+        assert "bcrypt_hash" in metadata
+        assert metadata["bcrypt_hash"].startswith("$2")
 
     def test_list_api_keys(self, manager):
         """list_api_keys returns metadata without secrets."""
@@ -239,10 +276,10 @@ class TestApiKeyManagement:
     def test_revoked_key_cannot_authenticate(self, manager):
         """After revocation, the API key should fail authentication."""
         key_data = manager.create_api_key(agent_pattern="test/*")
-        api_key = key_data["api_key"]
+        composite_key = key_data["api_key"]
         manager.revoke_api_key(key_data["key_id"])
 
-        result = manager.validate_request(f"Bearer test-secret.{api_key}", "/agent")
+        result = manager.validate_request(f"Bearer {composite_key}", "/agent")
         assert result["valid"] is False
 
 

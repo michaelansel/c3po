@@ -102,26 +102,27 @@ pip install -r requirements.txt
 python server.py
 ```
 
-### Option 3: Remote Server (NAS)
+### Option 3: Remote Server
 
-Deploy to a Synology NAS or other server:
+Deploy to a remote server (builds Docker image on the server, sets up systemd service, generates nginx config):
 
 ```bash
-# Build and deploy
-./scripts/deploy.sh full
-
-# Individual commands
-./scripts/deploy.sh build    # Build image
-./scripts/deploy.sh push     # Copy to NAS
-./scripts/deploy.sh deploy   # Start containers
-./scripts/deploy.sh status   # Check status
-./scripts/deploy.sh logs     # View logs
-./scripts/deploy.sh stop     # Stop containers
+bash scripts/deploy.sh
 ```
 
-Configure in `scripts/deploy.sh`:
-- `NAS_HOST` - SSH address of your server
-- `DATA_DIR` - Data directory for Redis persistence
+The script:
+1. Copies coordinator source to the server and builds the Docker image
+2. Creates/migrates secrets (generates `C3PO_SERVER_SECRET`, `C3PO_ADMIN_KEY`, etc.)
+3. Writes `docker-compose.yml` with coordinator, auth-proxy, and Redis
+4. Creates a systemd user service for automatic startup
+5. Generates nginx config with server_secret Bearer prefix validation
+6. Prints sudo commands for installing the nginx config
+
+After running, follow the printed instructions to install the nginx config on the server.
+
+Configure by editing `scripts/deploy.sh`:
+- `REMOTE` - SSH target (default: `mansel@pubpop3.datadrop.biz`)
+- `REMOTE_DIR` - Remote working directory (default: `/home/mansel/c3po`)
 
 ## Headless Mode Configuration
 

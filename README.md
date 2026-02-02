@@ -9,25 +9,23 @@ C3PO enables multiple Claude Code instances to communicate with each other, enab
 ```bash
 git clone https://github.com/USER/c3po.git
 cd c3po
-./scripts/deploy.sh full
+bash scripts/deploy.sh
 ```
 
-Or for local testing:
+The deploy script SSHes into the server, builds the Docker image, configures systemd, and generates an nginx config. Follow the printed sudo commands to install nginx.
+
+For local testing:
 ```bash
-cd coordinator
-docker-compose up -d
+./scripts/test-local.sh start
 ```
 
-### 2. Enroll Any Claude Code Instance (one command!)
+### 2. Enroll Any Claude Code Instance
 
 ```bash
-./scripts/enroll.sh http://your-coordinator:8420 my-agent-name
+python3 plugin/setup.py --enroll https://mcp.qerk.be '<admin_token>'
 ```
 
-That's it! The script:
-- Verifies the coordinator is reachable
-- Configures Claude Code's MCP settings
-- Sets up the agent identity
+The admin token is printed by the deploy script. This creates an API key scoped to your machine and configures Claude Code's MCP settings.
 
 ### 3. Start Collaborating
 

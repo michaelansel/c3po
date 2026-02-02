@@ -7,7 +7,10 @@ with the c3po plugin installed. It guides the user through configuring the
 coordinator connection and enrolling with an API key.
 
 Can also be run directly with --enroll for non-interactive enrollment:
-  python3 setup.py --enroll <url> <admin_key> [--machine <name>] [--pattern <glob>]
+  python3 setup.py --enroll <url> <admin_token> [--machine <name>] [--pattern <glob>]
+
+The admin_token is a composite token: <server_secret>.<admin_key>.
+This is the single token shown during coordinator deployment.
 
 Exit codes:
 - 0: Setup completed successfully or skipped
@@ -149,18 +152,20 @@ def check_coordinator(url: str) -> dict | None:
     return None
 
 
-def enroll_api_key(url: str, admin_key: str, agent_pattern: str = "*",
+def enroll_api_key(url: str, admin_token: str, agent_pattern: str = "*",
                    description: str = "") -> dict | None:
     """Enroll by creating an API key via the admin endpoint.
 
     Args:
         url: Coordinator base URL
-        admin_key: Admin key for authentication
+        admin_token: Admin token for authentication. Can be:
+            - Composite: <server_secret>.<admin_key> (new format, preferred)
+            - Plain: <admin_key> (legacy format, for dev mode)
         agent_pattern: fnmatch pattern for allowed agent IDs
         description: Human-readable description
 
     Returns:
-        Dict with key_id, api_key, server_secret info, or None on failure
+        Dict with key_id, api_key (composite token), agent_pattern, etc., or None on failure
     """
     body = json.dumps({
         "agent_pattern": agent_pattern,
@@ -171,7 +176,7 @@ def enroll_api_key(url: str, admin_key: str, agent_pattern: str = "*",
         f"{url}/admin/api/keys",
         data=body,
         headers={
-            "Authorization": f"Bearer {admin_key}",
+            "Authorization": f"Bearer {admin_token}",
             "Content-Type": "application/json",
         },
         method="POST",
@@ -199,11 +204,11 @@ def get_default_machine_name() -> str:
     return platform.node().split('.')[0]
 
 
-def add_mcp_server(url: str, machine_name: str, server_secret: str = "",
-                   api_key: str = "") -> bool:
+def add_mcp_server(url: str, machine_name: str, api_token: str = "") -> bool:
     """Add c3po MCP server to Claude Code config.
 
-    Uses /agent/mcp endpoint with API key auth (Bearer server_secret.api_key).
+    Uses /agent/mcp endpoint with API key auth (Bearer <api_token>).
+    The api_token is a composite token (server_secret.api_key) treated as opaque.
     """
     machine_name_header = f"${{C3PO_MACHINE_NAME:-{machine_name}}}"
     project_header = "${C3PO_PROJECT_NAME:-${PWD##*/}}"
@@ -219,9 +224,9 @@ def add_mcp_server(url: str, machine_name: str, server_secret: str = "",
         "-H", f"X-Session-ID: {session_id_header}",
     ]
 
-    # Add Authorization header with API key
-    if server_secret and api_key:
-        cmd.extend(["-H", f"Authorization: Bearer {server_secret}.{api_key}"])
+    # Add Authorization header with composite token
+    if api_token:
+        cmd.extend(["-H", f"Authorization: Bearer {api_token}"])
 
     try:
         result = subprocess.run(
@@ -250,9 +255,14 @@ def remove_existing_config() -> bool:
         return False
 
 
-def run_enroll(url: str, admin_key: str, machine_name: str | None = None,
+def run_enroll(url: str, admin_token: str, machine_name: str | None = None,
                pattern: str | None = None) -> int:
-    """Non-interactive enrollment via CLI flags."""
+    """Non-interactive enrollment via CLI flags.
+
+    Args:
+        url: Coordinator URL
+        admin_token: Admin token (composite: server_secret.admin_key, or plain admin_key)
+    """
     url = validate_url(url)
     if not url:
         error("Invalid URL")
@@ -268,28 +278,20 @@ def run_enroll(url: str, admin_key: str, machine_name: str | None = None,
     log(f"  Machine: {machine_name}")
     log(f"  Pattern: {pattern}")
 
-    # Create API key
-    result = enroll_api_key(url, admin_key, agent_pattern=pattern,
+    # Create API key (admin_token is sent as-is to the coordinator)
+    result = enroll_api_key(url, admin_token, agent_pattern=pattern,
                            description=f"Auto-enrolled: {machine_name}")
     if not result:
         return 1
 
     key_id = result["key_id"]
-    api_key = result["api_key"]
+    api_token = result["api_key"]  # Coordinator returns composite token
     log(f"  Key ID: {key_id}")
 
-    # We need the server secret from the admin — prompt or env var
-    server_secret = os.environ.get("C3PO_SERVER_SECRET", "")
-    if not server_secret:
-        error("C3PO_SERVER_SECRET environment variable is required for enrollment.")
-        error("This is the server secret configured on the coordinator.")
-        return 1
-
-    # Save credentials
+    # Save credentials (single api_token, no separate server_secret)
     credentials = {
         "coordinator_url": url,
-        "server_secret": server_secret,
-        "api_key": api_key,
+        "api_token": api_token,
         "key_id": key_id,
         "agent_pattern": pattern,
     }
@@ -298,7 +300,7 @@ def run_enroll(url: str, admin_key: str, machine_name: str | None = None,
 
     # Configure MCP server
     remove_existing_config()
-    if not add_mcp_server(url, machine_name, server_secret, api_key):
+    if not add_mcp_server(url, machine_name, api_token):
         error("Failed to configure MCP server")
         return 1
 
@@ -385,47 +387,35 @@ def run_setup() -> int:
     else:
         machine_name = default_machine_name
 
-    # Enrollment: get admin key to create per-agent API key
+    # Enrollment: get admin token to create per-agent API key
     print()
     info("API key enrollment authenticates this machine with the coordinator.")
-    info("You need the admin key (displayed during coordinator deployment).")
+    info("You need the admin token (displayed during coordinator deployment).")
     print()
 
-    admin_key = prompt("Admin key (leave blank to skip enrollment)", "").strip()
-    server_secret = ""
-    api_key = ""
+    admin_token = prompt("Admin token (leave blank to skip enrollment)", "").strip()
+    api_token = ""
     key_id = ""
     agent_pattern = f"{machine_name}/*"
 
-    if admin_key:
-        # Get server secret
-        server_secret = os.environ.get("C3PO_SERVER_SECRET", "")
-        if not server_secret:
-            info("The server secret is configured on the coordinator (C3PO_SERVER_SECRET).")
-            server_secret = prompt("Server secret").strip()
-
-        if not server_secret:
-            error("Server secret is required for enrollment.")
-            return 1
-
+    if admin_token:
         # Enroll — create API key
         info(f"Creating API key with pattern: {agent_pattern}")
         enrollment = enroll_api_key(
-            coordinator_url, admin_key,
+            coordinator_url, admin_token,
             agent_pattern=agent_pattern,
             description=f"Setup: {machine_name}",
         )
 
         if enrollment:
-            api_key = enrollment["api_key"]
+            api_token = enrollment["api_key"]  # Composite token from coordinator
             key_id = enrollment["key_id"]
             log(f"API key created (ID: {key_id})")
 
-            # Save credentials
+            # Save credentials (single api_token)
             credentials = {
                 "coordinator_url": coordinator_url,
-                "server_secret": server_secret,
-                "api_key": api_key,
+                "api_token": api_token,
                 "key_id": key_id,
                 "agent_pattern": agent_pattern,
             }
@@ -433,7 +423,7 @@ def run_setup() -> int:
             log(f"Credentials saved to {CREDENTIALS_FILE}")
         else:
             error("Enrollment failed. You can retry later with:")
-            error(f"  python3 {__file__} --enroll {coordinator_url} <admin_key>")
+            error(f"  python3 {__file__} --enroll {coordinator_url} <admin_token>")
             warn("Continuing setup without API key (dev mode).")
     else:
         warn("Skipping enrollment. Hooks will use dev mode (no auth).")
@@ -442,14 +432,14 @@ def run_setup() -> int:
     print()
     log("Configuring Claude Code...")
 
-    if not add_mcp_server(coordinator_url, machine_name, server_secret, api_key):
+    if not add_mcp_server(coordinator_url, machine_name, api_token):
         error("Failed to configure MCP server.")
         error("You can try manual setup with:")
         print(f"  claude mcp add c3po {coordinator_url}/agent/mcp -t http -s user -H \"X-Machine-Name: {machine_name}\"")
         return 1
 
     # Determine auth mode label
-    if api_key:
+    if api_token:
         auth_mode = "API key"
     else:
         auth_mode = "Dev mode (no auth)"
@@ -481,7 +471,7 @@ def main() -> None:
     # Handle --enroll flag for non-interactive mode
     if len(sys.argv) >= 4 and sys.argv[1] == "--enroll":
         url = sys.argv[2]
-        admin_key = sys.argv[3]
+        admin_token = sys.argv[3]
         machine_name = None
         pattern = None
 
@@ -496,7 +486,7 @@ def main() -> None:
             else:
                 i += 1
 
-        exit_code = run_enroll(url, admin_key, machine_name, pattern)
+        exit_code = run_enroll(url, admin_token, machine_name, pattern)
         sys.exit(exit_code)
 
     # Check if running interactively

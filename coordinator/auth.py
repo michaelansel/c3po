@@ -4,7 +4,11 @@ Supports three auth mechanisms based on URL path prefix:
 
 - /agent/*  — API key: Bearer <server_secret>.<api_key>
 - /oauth/*  — Proxy token: Bearer <proxy_token> (injected by mcp-auth-proxy)
-- /admin/*  — Admin key: Bearer <admin_key>
+- /admin/*  — Admin key: Bearer <server_secret>.<admin_key>
+
+nginx validates the server_secret prefix on /agent/* and /admin/* paths.
+The coordinator validates the remainder (API key via bcrypt, admin key via
+hmac.compare_digest).
 
 When none of C3PO_SERVER_SECRET, C3PO_PROXY_BEARER_TOKEN, C3PO_ADMIN_KEY
 are set, authentication is disabled (dev mode).
@@ -23,6 +27,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import bcrypt
 import redis
 
 logger = logging.getLogger("c3po.auth")
@@ -120,7 +125,7 @@ class AuthManager:
             logger.warning("auth_failed reason=invalid_server_secret")
             return {"valid": False, "error": "Invalid server secret"}
 
-        # Look up API key in Redis
+        # Look up API key in Redis (SHA-256 for fast index lookup)
         if self.redis is None:
             return {"valid": False, "error": "Redis not available for API key validation"}
 
@@ -134,6 +139,14 @@ class AuthManager:
             raw = raw.decode()
 
         metadata = json.loads(raw)
+
+        # Verify with bcrypt if hash is present (new keys have it)
+        bcrypt_hash = metadata.get("bcrypt_hash")
+        if bcrypt_hash:
+            if not bcrypt.checkpw(api_key.encode(), bcrypt_hash.encode()):
+                logger.warning("auth_failed reason=bcrypt_mismatch key_id=%s", metadata.get("key_id"))
+                return {"valid": False, "error": "Invalid API key"}
+
         return {
             "valid": True,
             "source": "api_key",
@@ -153,15 +166,34 @@ class AuthManager:
         return {"valid": True, "source": "proxy"}
 
     def _validate_admin_key(self, token: str) -> dict:
-        """Validate admin key for /admin/* paths."""
+        """Validate admin key for /admin/* paths.
+
+        Accepts two formats:
+        - New: Bearer <server_secret>.<admin_key> (same prefix as API keys)
+        - Legacy: Bearer <admin_key> (for backwards compatibility)
+
+        The server_secret prefix allows nginx to validate all /admin/* and
+        /agent/* requests with a single prefix check.
+        """
         if not self._admin_key:
             return {"valid": False, "error": "Admin key not configured"}
 
-        if not hmac.compare_digest(token, self._admin_key):
-            logger.warning("auth_failed reason=invalid_admin_key")
-            return {"valid": False, "error": "Invalid admin key"}
+        # Try new format: server_secret.admin_key
+        dot_idx = token.find(".")
+        if dot_idx >= 0 and self._server_secret:
+            provided_secret = token[:dot_idx]
+            provided_admin_key = token[dot_idx + 1:]
+            if (hmac.compare_digest(provided_secret, self._server_secret)
+                    and provided_admin_key
+                    and hmac.compare_digest(provided_admin_key, self._admin_key)):
+                return {"valid": True, "source": "admin"}
 
-        return {"valid": True, "source": "admin"}
+        # Legacy format: just admin_key (no dot)
+        if hmac.compare_digest(token, self._admin_key):
+            return {"valid": True, "source": "admin"}
+
+        logger.warning("auth_failed reason=invalid_admin_key")
+        return {"valid": False, "error": "Invalid admin key"}
 
     # --- API Key Management (admin operations) ---
 
@@ -177,14 +209,16 @@ class AuthManager:
             description: Human-readable description of the key
 
         Returns:
-            Dict with key_id, api_key (plaintext, only returned once), agent_pattern, created_at
+            Dict with key_id, api_key (composite server_secret.random_part),
+            agent_pattern, created_at. The api_key is only returned once.
         """
         if self.redis is None:
             raise RuntimeError("Redis not available")
 
         key_id = str(uuid.uuid4())[:8]
-        api_key = secrets.token_urlsafe(32)
-        key_hash = _sha256(api_key)
+        raw_key = secrets.token_urlsafe(32)
+        key_hash = _sha256(raw_key)
+        bcrypt_hash = bcrypt.hashpw(raw_key.encode(), bcrypt.gensalt()).decode()
         now = datetime.now(timezone.utc).isoformat()
 
         metadata = {
@@ -192,9 +226,10 @@ class AuthManager:
             "agent_pattern": agent_pattern,
             "description": description,
             "created_at": now,
+            "bcrypt_hash": bcrypt_hash,
         }
 
-        # Store in Redis
+        # Store in Redis (SHA-256 as index key, bcrypt for verification)
         pipe = self.redis.pipeline()
         pipe.hset(self.API_KEYS_HASH, key_hash, json.dumps(metadata))
         pipe.hset(self.KEY_IDS_HASH, key_id, key_hash)
@@ -202,9 +237,13 @@ class AuthManager:
 
         logger.info("api_key_created key_id=%s pattern=%s", key_id, agent_pattern)
 
+        # Return composite token: server_secret.raw_key
+        # Client stores this as one opaque string
+        composite_key = f"{self._server_secret}.{raw_key}" if self._server_secret else raw_key
+
         return {
             "key_id": key_id,
-            "api_key": api_key,
+            "api_key": composite_key,
             "agent_pattern": agent_pattern,
             "description": description,
             "created_at": now,

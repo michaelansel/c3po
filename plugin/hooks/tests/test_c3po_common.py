@@ -86,8 +86,7 @@ class TestGetCoordinatorUrl:
         creds_file.parent.mkdir(parents=True)
         creds_file.write_text(json.dumps({
             "coordinator_url": "http://creds-host:8420",
-            "server_secret": "sec",
-            "api_key": "key",
+            "api_token": "sec.key",
         }))
         import c3po_common
         monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
@@ -196,8 +195,7 @@ class TestGetCredentials:
         creds_file = tmp_path / "creds.json"
         creds_data = {
             "coordinator_url": "http://example.com:8420",
-            "server_secret": "my-secret",
-            "api_key": "my-key",
+            "api_token": "my-secret.my-key",
             "key_id": "kid-123",
             "agent_pattern": "machine/*",
         }
@@ -227,8 +225,7 @@ class TestSaveCredentials:
         monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
         creds_data = {
             "coordinator_url": "http://example.com:8420",
-            "server_secret": "sec",
-            "api_key": "key",
+            "api_token": "sec.key",
         }
         save_credentials(creds_data)
         assert get_credentials() == creds_data
@@ -243,7 +240,19 @@ class TestSaveCredentials:
 
 
 class TestAuthHeaders:
-    def test_returns_bearer_token_from_credentials(self, tmp_path, monkeypatch):
+    def test_returns_bearer_token_from_api_token(self, tmp_path, monkeypatch):
+        """New format: api_token (composite) used directly."""
+        creds_file = tmp_path / "creds.json"
+        creds_file.write_text(json.dumps({
+            "api_token": "my-secret.my-key",
+        }))
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
+        headers = auth_headers()
+        assert headers == {"Authorization": "Bearer my-secret.my-key"}
+
+    def test_returns_bearer_token_legacy_format(self, tmp_path, monkeypatch):
+        """Legacy format: server_secret + api_key combined."""
         creds_file = tmp_path / "creds.json"
         creds_file.write_text(json.dumps({
             "server_secret": "my-secret",
@@ -260,7 +269,7 @@ class TestAuthHeaders:
         assert auth_headers() == {}
 
     def test_returns_empty_when_partial_credentials(self, tmp_path, monkeypatch):
-        """Should return empty if only server_secret but no api_key."""
+        """Should return empty if only server_secret but no api_key or api_token."""
         creds_file = tmp_path / "creds.json"
         creds_file.write_text(json.dumps({
             "server_secret": "my-secret",
@@ -268,3 +277,16 @@ class TestAuthHeaders:
         import c3po_common
         monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
         assert auth_headers() == {}
+
+    def test_api_token_takes_priority_over_legacy(self, tmp_path, monkeypatch):
+        """If both api_token and legacy fields exist, api_token wins."""
+        creds_file = tmp_path / "creds.json"
+        creds_file.write_text(json.dumps({
+            "api_token": "new-token",
+            "server_secret": "old-secret",
+            "api_key": "old-key",
+        }))
+        import c3po_common
+        monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
+        headers = auth_headers()
+        assert headers == {"Authorization": "Bearer new-token"}
