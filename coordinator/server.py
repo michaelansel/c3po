@@ -225,7 +225,7 @@ class AgentIdentityMiddleware(Middleware):
             # the SessionStart hook already registered with full identity.
             # Store machine_name as placeholder; _resolve_agent_id() will prefer
             # the explicit agent_id parameter injected by the PreToolUse hook.
-            logger.warning(
+            logger.info(
                 "no_project_name machine_name=%s session_id=%s",
                 machine_name, session_id,
             )

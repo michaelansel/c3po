@@ -211,8 +211,6 @@ def add_mcp_server(url: str, machine_name: str, api_token: str = "") -> bool:
     The api_token is a composite token (server_secret.api_key) treated as opaque.
     """
     machine_name_header = f"${{C3PO_MACHINE_NAME:-{machine_name}}}"
-    project_header = "${C3PO_PROJECT_NAME:-${PWD##*/}}"
-    session_id_header = "${C3PO_SESSION_ID:-$$}"
 
     cmd = [
         "claude", "mcp", "add", "c3po",
@@ -220,8 +218,6 @@ def add_mcp_server(url: str, machine_name: str, api_token: str = "") -> bool:
         "-t", "http",
         "-s", "user",
         "-H", f"X-Machine-Name: {machine_name_header}",
-        "-H", f"X-Project-Name: {project_header}",
-        "-H", f"X-Session-ID: {session_id_header}",
     ]
 
     # Add Authorization header with composite token
