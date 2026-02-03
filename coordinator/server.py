@@ -13,15 +13,18 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import Middleware, MiddlewareContext
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 logger = logging.getLogger("c3po.server")
 
 from coordinator.agents import AgentManager
 from coordinator.audit import AuditLogger
 from coordinator.auth import AuthManager
+from coordinator.blobs import BlobManager, MAX_BLOB_SIZE
 from coordinator.errors import (
     agent_not_found,
+    blob_not_found,
+    blob_too_large,
     invalid_request,
     rate_limited,
     RedisConnectionError,
@@ -73,6 +76,9 @@ rate_limiter = RateLimiter(redis_client)
 
 # Audit logger
 audit_logger = AuditLogger(redis_client)
+
+# Blob manager
+blob_manager = BlobManager(redis_client)
 
 
 def _determine_path_prefix(path: str) -> str:
@@ -539,6 +545,110 @@ async def api_unregister(request):
             {"error": str(e)},
             status_code=500,
         )
+
+
+# ============================================================
+# Blob endpoints (/agent/api/blob*) — API key auth
+# ============================================================
+
+@mcp.custom_route("/agent/api/blob", methods=["POST"])
+async def api_blob_upload(request):
+    """Upload a blob via REST API.
+
+    Accepts multipart form data (file field) or raw body.
+    Returns blob metadata including blob_id.
+    """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("error", "Authentication required")},
+            status_code=401,
+        )
+
+    client_ip = _get_client_ip(request)
+    rate_resp = _check_rest_rate_limit(request, "rest_blob_upload", client_ip)
+    if rate_resp:
+        return rate_resp
+
+    content_type = request.headers.get("content-type", "")
+
+    try:
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            upload = form.get("file")
+            if upload is None:
+                return JSONResponse(
+                    {"error": "Missing 'file' field in multipart form"},
+                    status_code=400,
+                )
+            content = await upload.read()
+            filename = form.get("filename", upload.filename or "upload")
+            mime_type = form.get("mime_type", upload.content_type or "application/octet-stream")
+        else:
+            content = await request.body()
+            filename = request.headers.get("x-filename", "upload")
+            mime_type = request.headers.get("x-mime-type", content_type or "application/octet-stream")
+
+        if not content:
+            return JSONResponse({"error": "Empty content"}, status_code=400)
+
+        uploader = request.headers.get("x-machine-name", "rest-upload")
+        project = request.headers.get("x-project-name")
+        if project:
+            uploader = f"{uploader}/{project}"
+
+        meta = blob_manager.store_blob(content, filename, mime_type, uploader)
+        audit_logger.blob_upload(meta["blob_id"], filename, len(content), uploader, source="rest")
+        return SecureJSONResponse(meta, status_code=201)
+
+    except ValueError as e:
+        err = blob_too_large(0, MAX_BLOB_SIZE)
+        return JSONResponse(err.to_dict(), status_code=413)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/agent/api/blob/{blob_id}", methods=["GET"])
+async def api_blob_download(request):
+    """Download a blob via REST API.
+
+    Returns raw content with Content-Type and Content-Disposition headers.
+    """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("error", "Authentication required")},
+            status_code=401,
+        )
+
+    client_ip = _get_client_ip(request)
+    rate_resp = _check_rest_rate_limit(request, "rest_blob_download", client_ip)
+    if rate_resp:
+        return rate_resp
+
+    blob_id = request.path_params.get("blob_id", "")
+    if not blob_id:
+        return JSONResponse({"error": "Missing blob_id"}, status_code=400)
+
+    result = blob_manager.get_blob(blob_id)
+    if result is None:
+        err = blob_not_found(blob_id)
+        return JSONResponse(err.to_dict(), status_code=404)
+
+    content, metadata = result
+    audit_logger.blob_download(blob_id, client_ip, source="rest")
+
+    resp = Response(
+        content=content,
+        media_type=metadata.get("mime_type", "application/octet-stream"),
+    )
+    filename = metadata.get("filename", "download")
+    resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    for k, v in SECURITY_HEADERS.items():
+        if k != "Cache-Control":
+            resp.headers[k] = v
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 # ============================================================
@@ -1129,6 +1239,63 @@ def _ack_messages_impl(
     return msg_manager.ack_messages(agent_id, message_ids)
 
 
+INLINE_BLOB_THRESHOLD = 100 * 1024  # 100KB: blobs under this are returned inline
+
+
+def _upload_blob_impl(
+    blob_mgr: BlobManager,
+    content: bytes,
+    filename: str,
+    mime_type: str = "application/octet-stream",
+    uploader: str = "",
+) -> dict:
+    """Store a blob and return metadata."""
+    if len(content) > MAX_BLOB_SIZE:
+        err = blob_too_large(len(content), MAX_BLOB_SIZE)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    return blob_mgr.store_blob(content, filename, mime_type, uploader)
+
+
+def _fetch_blob_impl(
+    blob_mgr: BlobManager,
+    blob_id: str,
+    coordinator_url: str = "",
+) -> dict:
+    """Fetch a blob by ID. Returns inline content for small blobs, metadata for large."""
+    result = blob_mgr.get_blob(blob_id)
+    if result is None:
+        err = blob_not_found(blob_id)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    content, metadata = result
+    size = len(content)
+
+    if size <= INLINE_BLOB_THRESHOLD:
+        # Small blob: return inline
+        try:
+            text = content.decode("utf-8")
+            return {**metadata, "content": text, "encoding": "utf-8"}
+        except UnicodeDecodeError:
+            import base64
+            b64 = base64.b64encode(content).decode("ascii")
+            return {**metadata, "content": b64, "encoding": "base64"}
+    else:
+        # Large blob: metadata only with download URL
+        download_url = f"{coordinator_url}/agent/api/blob/{blob_id}" if coordinator_url else f"/agent/api/blob/{blob_id}"
+        return {
+            **metadata,
+            "download_url": download_url,
+            "note": (
+                "Blob is too large to return inline via MCP. "
+                "If you have shell access, use `scripts/c3po-download` or curl to fetch it. "
+                "If you cannot access the REST API (e.g. Claude.ai or Claude Desktop without shell), "
+                "ask the sender to split the content into smaller pieces under 100KB, "
+                "or to send a summary/excerpt instead."
+            ),
+        }
+
+
 @mcp.tool()
 def ack_messages(
     ctx: Context,
@@ -1159,6 +1326,90 @@ def ack_messages(
         raise ToolError(f"{err.message} {err.suggestion}")
 
     return _ack_messages_impl(message_manager, effective_id, message_ids)
+
+
+@mcp.tool()
+def upload_blob(
+    ctx: Context,
+    content: str,
+    filename: str,
+    mime_type: str = "application/octet-stream",
+    encoding: str = "utf-8",
+    agent_id: Optional[str] = None,
+) -> dict:
+    """Upload a blob for storage and sharing with other agents.
+
+    Args:
+        ctx: MCP context (injected automatically)
+        content: The content to store (text or base64-encoded binary)
+        filename: Filename for the blob
+        mime_type: MIME type (default: application/octet-stream)
+        encoding: Content encoding - "utf-8" for text, "base64" for binary (default: utf-8)
+        agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
+
+    Returns:
+        Blob metadata including blob_id, filename, size, expires_in
+    """
+    effective_id = _resolve_agent_id(ctx, agent_id)
+    _enforce_agent_pattern(ctx, effective_id)
+
+    # Rate limit
+    allowed, _ = rate_limiter.check_and_record("upload_blob", effective_id)
+    if not allowed:
+        err = rate_limited(effective_id, 10, 60)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    # Decode content
+    if encoding == "base64":
+        import base64
+        try:
+            raw_content = base64.b64decode(content)
+        except Exception:
+            err = invalid_request("content", "invalid base64 encoding")
+            raise ToolError(f"{err.message} {err.suggestion}")
+    else:
+        raw_content = content.encode("utf-8")
+
+    meta = _upload_blob_impl(blob_manager, raw_content, filename, mime_type, effective_id)
+    audit_logger.blob_upload(meta["blob_id"], filename, len(raw_content), effective_id, source="mcp")
+    return meta
+
+
+@mcp.tool()
+def fetch_blob(
+    ctx: Context,
+    blob_id: str,
+    agent_id: Optional[str] = None,
+) -> dict:
+    """Fetch a blob by its ID.
+
+    For small blobs (<=100KB), returns the content inline.
+    For large blobs (>100KB), returns metadata and a download_url
+    to fetch via scripts/c3po-download or curl.
+
+    Args:
+        ctx: MCP context (injected automatically)
+        blob_id: The blob ID to fetch
+        agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
+
+    Returns:
+        Blob metadata with content (small blobs) or download_url (large blobs)
+    """
+    effective_id = _resolve_agent_id(ctx, agent_id)
+    _enforce_agent_pattern(ctx, effective_id)
+
+    # Rate limit
+    allowed, _ = rate_limiter.check_and_record("fetch_blob", effective_id)
+    if not allowed:
+        err = rate_limited(effective_id, 30, 60)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    # Determine coordinator URL for download_url
+    coordinator_url = os.environ.get("C3PO_COORDINATOR_URL", "")
+
+    result = _fetch_blob_impl(blob_manager, blob_id, coordinator_url)
+    audit_logger.blob_download(blob_id, effective_id, source="mcp")
+    return result
 
 
 def main():

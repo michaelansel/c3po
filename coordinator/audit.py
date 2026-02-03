@@ -94,6 +94,14 @@ class AuditLogger:
         """Log API key revocation."""
         return self._log("admin_key_revoke", key_id=key_id, admin_key_id=admin_key_id)
 
+    def blob_upload(self, blob_id: str, filename: str, size: int, uploader: str, source: str = "mcp") -> dict:
+        """Log blob upload."""
+        return self._log("blob_upload", blob_id=blob_id, filename=filename, size=size, uploader=uploader, source=source)
+
+    def blob_download(self, blob_id: str, agent_id: str, source: str = "mcp") -> dict:
+        """Log blob download."""
+        return self._log("blob_download", blob_id=blob_id, agent_id=agent_id, source=source)
+
     def authorization_denied(self, agent_id: str, key_id: str, pattern: str) -> dict:
         """Log authorization denial."""
         return self._log("authorization_denied", agent_id=agent_id, key_id=key_id, pattern=pattern)

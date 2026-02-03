@@ -23,6 +23,10 @@ RATE_LIMITS = {
     "rest_register": (5, 60),
     "rest_pending": (30, 60),
     "rest_unregister": (5, 60),
+    "upload_blob": (10, 60),
+    "fetch_blob": (30, 60),
+    "rest_blob_upload": (10, 60),
+    "rest_blob_download": (30, 60),
 }
 
 

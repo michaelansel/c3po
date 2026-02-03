@@ -32,6 +32,8 @@ class ErrorCodes:
     REDIS_UNAVAILABLE = "REDIS_UNAVAILABLE"
     UNAUTHORIZED = "UNAUTHORIZED"
     FORBIDDEN = "FORBIDDEN"
+    BLOB_NOT_FOUND = "BLOB_NOT_FOUND"
+    BLOB_TOO_LARGE = "BLOB_TOO_LARGE"
 
 
 def agent_not_found(target: str, available: list[str]) -> C3POError:
@@ -108,6 +110,26 @@ def redis_unavailable(redis_url: str, original_error: str = "") -> C3POError:
         code=ErrorCodes.REDIS_UNAVAILABLE,
         message=message,
         suggestion="Ensure Redis is running and accessible. Check REDIS_URL environment variable.",
+    )
+
+
+def blob_not_found(blob_id: str) -> C3POError:
+    """Create error for blob not found."""
+    return C3POError(
+        code=ErrorCodes.BLOB_NOT_FOUND,
+        message=f"Blob '{blob_id}' not found or has expired.",
+        suggestion="Blobs expire after 24 hours. Check the blob_id and try again.",
+    )
+
+
+def blob_too_large(size: int, max_size: int) -> C3POError:
+    """Create error for blob exceeding size limit."""
+    size_mb = size / (1024 * 1024)
+    max_mb = max_size / (1024 * 1024)
+    return C3POError(
+        code=ErrorCodes.BLOB_TOO_LARGE,
+        message=f"Blob size ({size_mb:.1f}MB) exceeds maximum ({max_mb:.1f}MB).",
+        suggestion="Reduce the file size or split it into smaller parts.",
     )
 
 

@@ -15,6 +15,7 @@ COPY errors.py .
 COPY auth.py .
 COPY audit.py .
 COPY rate_limit.py .
+COPY blobs.py .
 
 # Create the coordinator package structure
 RUN mkdir -p coordinator && \
@@ -24,7 +25,8 @@ RUN mkdir -p coordinator && \
     cp errors.py coordinator/ && \
     cp auth.py coordinator/ && \
     cp audit.py coordinator/ && \
-    cp rate_limit.py coordinator/
+    cp rate_limit.py coordinator/ && \
+    cp blobs.py coordinator/
 
 # Set Python path to find the coordinator module
 ENV PYTHONPATH=/app

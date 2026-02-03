@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from coordinator.agents import AgentManager
 from coordinator.audit import AuditLogger
 from coordinator.auth import AuthManager
+from coordinator.blobs import BlobManager
 from coordinator.messaging import MessageManager
 from coordinator.rate_limit import RateLimiter
 
@@ -47,6 +48,7 @@ def mcp_app(redis_client, agent_manager, message_manager, monkeypatch):
     monkeypatch.setattr(server_module, "auth_manager", AuthManager(redis_client))
     monkeypatch.setattr(server_module, "rate_limiter", RateLimiter(redis_client))
     monkeypatch.setattr(server_module, "audit_logger", AuditLogger(redis_client))
+    monkeypatch.setattr(server_module, "blob_manager", BlobManager(redis_client))
 
     return server_module.mcp.http_app()
 
@@ -405,3 +407,103 @@ class TestInputValidation:
         )
 
         assert response.status_code == 200
+
+
+class TestBlobUploadEndpoint:
+    """Tests for /agent/api/blob POST endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_upload_raw_body(self, client):
+        """Should accept raw body upload with headers."""
+        response = await client.post(
+            "/agent/api/blob",
+            content=b"hello world",
+            headers={
+                "Content-Type": "text/plain",
+                "X-Filename": "test.txt",
+                "X-Machine-Name": "test/proj",
+            },
+        )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["blob_id"].startswith("blob-")
+        assert data["filename"] == "test.txt"
+        assert data["size"] == 11
+        assert "expires_in" in data
+
+    @pytest.mark.asyncio
+    async def test_upload_empty_body(self, client):
+        """Should reject empty upload."""
+        response = await client.post(
+            "/agent/api/blob",
+            content=b"",
+            headers={"X-Filename": "empty.txt"},
+        )
+
+        assert response.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_upload_too_large(self, client):
+        """Should reject upload over 5MB."""
+        response = await client.post(
+            "/agent/api/blob",
+            content=b"x" * (5 * 1024 * 1024 + 1),
+            headers={"X-Filename": "big.bin"},
+        )
+
+        assert response.status_code == 413
+
+
+class TestBlobDownloadEndpoint:
+    """Tests for /agent/api/blob/{blob_id} GET endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_download_existing_blob(self, client):
+        """Should return blob content with correct headers."""
+        # Upload first
+        upload_resp = await client.post(
+            "/agent/api/blob",
+            content=b"test content",
+            headers={
+                "Content-Type": "text/plain",
+                "X-Filename": "test.txt",
+                "X-Machine-Name": "test/proj",
+            },
+        )
+        blob_id = upload_resp.json()["blob_id"]
+
+        # Download
+        response = await client.get(f"/agent/api/blob/{blob_id}")
+
+        assert response.status_code == 200
+        assert response.content == b"test content"
+        assert "text/plain" in response.headers["content-type"]
+        assert "test.txt" in response.headers["content-disposition"]
+
+    @pytest.mark.asyncio
+    async def test_download_not_found(self, client):
+        """Should return 404 for non-existent blob."""
+        response = await client.get("/agent/api/blob/blob-doesnotexist")
+
+        assert response.status_code == 404
+        data = response.json()
+        assert data["code"] == "BLOB_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_download_binary_blob(self, client):
+        """Should handle binary content correctly."""
+        binary_data = bytes(range(256))
+        upload_resp = await client.post(
+            "/agent/api/blob",
+            content=binary_data,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "X-Filename": "data.bin",
+            },
+        )
+        blob_id = upload_resp.json()["blob_id"]
+
+        response = await client.get(f"/agent/api/blob/{blob_id}")
+        assert response.status_code == 200
+        assert response.content == binary_data

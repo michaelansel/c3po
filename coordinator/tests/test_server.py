@@ -4,8 +4,9 @@ import pytest
 
 import fakeredis
 
-from coordinator.server import _ping_impl, _list_agents_impl, _register_agent_impl, _set_description_impl, _get_messages_impl, _wait_for_message_impl
+from coordinator.server import _ping_impl, _list_agents_impl, _register_agent_impl, _set_description_impl, _get_messages_impl, _wait_for_message_impl, _upload_blob_impl, _fetch_blob_impl, INLINE_BLOB_THRESHOLD
 from coordinator.agents import AgentManager
+from coordinator.blobs import BlobManager
 from coordinator.messaging import MessageManager
 from fastmcp.exceptions import ToolError
 
@@ -177,3 +178,67 @@ class TestWaitForMessageImpl:
 
         result = _wait_for_message_impl(message_manager, "agent-a", timeout=-5)
         assert result["status"] == "timeout"
+
+
+@pytest.fixture
+def blob_manager(redis_client):
+    """Create BlobManager with fakeredis."""
+    return BlobManager(redis_client)
+
+
+class TestUploadBlobImpl:
+    """Tests for _upload_blob_impl server function."""
+
+    def test_upload_returns_metadata(self, blob_manager):
+        """Should store blob and return metadata."""
+        result = _upload_blob_impl(blob_manager, b"hello", "test.txt", "text/plain", "agent/a")
+        assert result["blob_id"].startswith("blob-")
+        assert result["filename"] == "test.txt"
+        assert result["size"] == 5
+
+    def test_upload_too_large_raises(self, blob_manager):
+        """Should raise ToolError for oversized blob."""
+        with pytest.raises(ToolError, match="exceeds maximum"):
+            _upload_blob_impl(blob_manager, b"x" * (5 * 1024 * 1024 + 1), "big.bin")
+
+
+class TestFetchBlobImpl:
+    """Tests for _fetch_blob_impl server function."""
+
+    def test_fetch_small_text_blob_inline(self, blob_manager):
+        """Small text blobs should return content inline with utf-8 encoding."""
+        meta = blob_manager.store_blob(b"hello world", "test.txt", "text/plain")
+        result = _fetch_blob_impl(blob_manager, meta["blob_id"])
+        assert result["content"] == "hello world"
+        assert result["encoding"] == "utf-8"
+
+    def test_fetch_small_binary_blob_inline(self, blob_manager):
+        """Small binary blobs should return base64-encoded content inline."""
+        import base64
+        data = bytes(range(256))
+        meta = blob_manager.store_blob(data, "data.bin")
+        result = _fetch_blob_impl(blob_manager, meta["blob_id"])
+        assert result["encoding"] == "base64"
+        assert base64.b64decode(result["content"]) == data
+
+    def test_fetch_large_blob_metadata_only(self, blob_manager):
+        """Large blobs should return metadata and download_url, not content."""
+        data = b"x" * (INLINE_BLOB_THRESHOLD + 1)
+        meta = blob_manager.store_blob(data, "large.bin")
+        result = _fetch_blob_impl(blob_manager, meta["blob_id"], coordinator_url="https://example.com")
+        assert "content" not in result
+        assert "download_url" in result
+        assert result["download_url"].startswith("https://example.com/agent/api/blob/")
+        assert "note" in result
+
+    def test_fetch_not_found_raises(self, blob_manager):
+        """Should raise ToolError for non-existent blob."""
+        with pytest.raises(ToolError, match="not found"):
+            _fetch_blob_impl(blob_manager, "blob-doesnotexist")
+
+    def test_large_blob_note_mentions_alternatives(self, blob_manager):
+        """Large blob note should mention alternatives for clients without shell access."""
+        data = b"x" * (INLINE_BLOB_THRESHOLD + 1)
+        meta = blob_manager.store_blob(data, "large.bin")
+        result = _fetch_blob_impl(blob_manager, meta["blob_id"])
+        assert "smaller pieces" in result["note"] or "split" in result["note"]

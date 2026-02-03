@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Upload a file to C3PO blob storage.
+# Reads credentials from ~/.claude/c3po-credentials.json.
+# Usage: c3po-upload /path/to/file [filename] [mime_type]
+# Prints blob_id to stdout on success.
+
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+    echo "Usage: c3po-upload /path/to/file [filename] [mime_type]" >&2
+    exit 1
+fi
+
+FILE_PATH="$1"
+FILENAME="${2:-$(basename "$FILE_PATH")}"
+MIME_TYPE="${3:-application/octet-stream}"
+
+if [ ! -f "$FILE_PATH" ]; then
+    echo "Error: File not found: $FILE_PATH" >&2
+    exit 1
+fi
+
+# Read credentials
+CREDS_FILE="$HOME/.claude/c3po-credentials.json"
+if [ ! -f "$CREDS_FILE" ]; then
+    echo "Error: Credentials file not found: $CREDS_FILE" >&2
+    echo "Run setup.py --enroll to configure credentials." >&2
+    exit 1
+fi
+
+# Parse coordinator URL and API token from credentials JSON
+COORDINATOR_URL=$(python3 -c "import json; print(json.load(open('$CREDS_FILE')).get('coordinator_url', 'http://localhost:8420'))")
+API_TOKEN=$(python3 -c "
+import json
+c = json.load(open('$CREDS_FILE'))
+t = c.get('api_token', '')
+if not t:
+    ss = c.get('server_secret', '')
+    ak = c.get('api_key', '')
+    if ss and ak:
+        t = ss + '.' + ak
+print(t)
+")
+
+# Build auth header
+AUTH_ARGS=()
+if [ -n "$API_TOKEN" ]; then
+    AUTH_ARGS=(-H "Authorization: Bearer $API_TOKEN")
+fi
+
+# Handle custom CA cert
+CA_ARGS=()
+if [ -n "${C3PO_CA_CERT:-}" ]; then
+    CA_ARGS=(--cacert "$C3PO_CA_CERT")
+fi
+
+# Upload
+RESPONSE=$(curl -s -w "\n%{http_code}" \
+    "${AUTH_ARGS[@]}" \
+    "${CA_ARGS[@]}" \
+    -H "Content-Type: application/octet-stream" \
+    -H "X-Filename: $FILENAME" \
+    -H "X-Mime-Type: $MIME_TYPE" \
+    --data-binary "@$FILE_PATH" \
+    "$COORDINATOR_URL/agent/api/blob" 2>&1)
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | head -n -1)
+
+if [ "$HTTP_CODE" = "201" ]; then
+    BLOB_ID=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['blob_id'])")
+    echo "$BLOB_ID"
+else
+    echo "Error: Upload failed (HTTP $HTTP_CODE)" >&2
+    echo "$BODY" >&2
+    exit 1
+fi

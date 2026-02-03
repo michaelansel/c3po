@@ -25,7 +25,17 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "mcp__c3po__ping|mcp__c3po__list_agents|mcp__c3po__register_agent|mcp__c3po__set_description|mcp__c3po__send_message|mcp__c3po__get_messages|mcp__c3po__reply|mcp__c3po__wait_for_message|mcp__c3po__ack_messages",
+        "matcher": "mcp__c3po__send_message",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/upload_blob.py\"",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__c3po__ping|mcp__c3po__list_agents|mcp__c3po__register_agent|mcp__c3po__set_description|mcp__c3po__send_message|mcp__c3po__get_messages|mcp__c3po__reply|mcp__c3po__wait_for_message|mcp__c3po__ack_messages|mcp__c3po__upload_blob|mcp__c3po__fetch_blob",
         "hooks": [
           {
             "type": "command",

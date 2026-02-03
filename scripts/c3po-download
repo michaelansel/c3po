@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Download a blob from C3PO blob storage.
+# Reads credentials from ~/.claude/c3po-credentials.json.
+# Usage: c3po-download <blob_id> [output_path]
+# If output_path is omitted, saves to ./{filename} from Content-Disposition header.
+# Prints saved file path to stdout.
+
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+    echo "Usage: c3po-download <blob_id> [output_path]" >&2
+    exit 1
+fi
+
+BLOB_ID="$1"
+OUTPUT_PATH="${2:-}"
+
+# Read credentials
+CREDS_FILE="$HOME/.claude/c3po-credentials.json"
+if [ ! -f "$CREDS_FILE" ]; then
+    echo "Error: Credentials file not found: $CREDS_FILE" >&2
+    echo "Run setup.py --enroll to configure credentials." >&2
+    exit 1
+fi
+
+# Parse coordinator URL and API token from credentials JSON
+COORDINATOR_URL=$(python3 -c "import json; print(json.load(open('$CREDS_FILE')).get('coordinator_url', 'http://localhost:8420'))")
+API_TOKEN=$(python3 -c "
+import json
+c = json.load(open('$CREDS_FILE'))
+t = c.get('api_token', '')
+if not t:
+    ss = c.get('server_secret', '')
+    ak = c.get('api_key', '')
+    if ss and ak:
+        t = ss + '.' + ak
+print(t)
+")
+
+# Build auth header
+AUTH_ARGS=()
+if [ -n "$API_TOKEN" ]; then
+    AUTH_ARGS=(-H "Authorization: Bearer $API_TOKEN")
+fi
+
+# Handle custom CA cert
+CA_ARGS=()
+if [ -n "${C3PO_CA_CERT:-}" ]; then
+    CA_ARGS=(--cacert "$C3PO_CA_CERT")
+fi
+
+# Create a temp file for headers
+HEADER_FILE=$(mktemp)
+trap "rm -f '$HEADER_FILE'" EXIT
+
+# Download
+if [ -n "$OUTPUT_PATH" ]; then
+    HTTP_CODE=$(curl -s -o "$OUTPUT_PATH" -w "%{http_code}" \
+        -D "$HEADER_FILE" \
+        "${AUTH_ARGS[@]}" \
+        "${CA_ARGS[@]}" \
+        "$COORDINATOR_URL/agent/api/blob/$BLOB_ID")
+
+    if [ "$HTTP_CODE" = "200" ]; then
+        echo "$OUTPUT_PATH"
+    else
+        echo "Error: Download failed (HTTP $HTTP_CODE)" >&2
+        cat "$OUTPUT_PATH" >&2
+        rm -f "$OUTPUT_PATH"
+        exit 1
+    fi
+else
+    # Download to temp file first, then rename based on Content-Disposition
+    TEMP_FILE=$(mktemp)
+    HTTP_CODE=$(curl -s -o "$TEMP_FILE" -w "%{http_code}" \
+        -D "$HEADER_FILE" \
+        "${AUTH_ARGS[@]}" \
+        "${CA_ARGS[@]}" \
+        "$COORDINATOR_URL/agent/api/blob/$BLOB_ID")
+
+    if [ "$HTTP_CODE" = "200" ]; then
+        # Extract filename from Content-Disposition header
+        FILENAME=$(grep -i "content-disposition" "$HEADER_FILE" | sed -n 's/.*filename="\([^"]*\)".*/\1/p' | tr -d '\r')
+        if [ -z "$FILENAME" ]; then
+            FILENAME="$BLOB_ID"
+        fi
+
+        mv "$TEMP_FILE" "./$FILENAME"
+        echo "./$FILENAME"
+    else
+        echo "Error: Download failed (HTTP $HTTP_CODE)" >&2
+        cat "$TEMP_FILE" >&2
+        rm -f "$TEMP_FILE"
+        exit 1
+    fi
+fi
