@@ -1210,7 +1210,7 @@ def main():
     except redis.RedisError as e:
         raise RedisConnectionError(REDIS_URL, e) from e
 
-    mcp.run(transport="http", host=host, port=port)
+    mcp.run(transport="http", host=host, port=port, stateless_http=True)
 
 
 if __name__ == "__main__":
