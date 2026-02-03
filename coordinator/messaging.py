@@ -17,6 +17,7 @@ class MessageManager:
     INBOX_PREFIX = "c3po:inbox:"
     NOTIFY_PREFIX = "c3po:notify:"
     RATE_LIMIT_PREFIX = "c3po:rate:"
+    ACKED_PREFIX = "c3po:acked:"
 
     # Configuration
     RATE_LIMIT_REQUESTS = 10  # Max requests per window
@@ -244,6 +245,29 @@ class MessageManager:
 
     RESPONSES_PREFIX = "c3po:responses:"
 
+    def peek_pending_replies(self, agent_id: str) -> list[dict]:
+        """Peek at pending replies without consuming them.
+
+        Args:
+            agent_id: The agent whose response queue to check
+
+        Returns:
+            List of reply dicts, oldest first (FIFO), excluding expired
+        """
+        response_key = f"{self.RESPONSES_PREFIX}{agent_id}"
+        raw_items = self.redis.lrange(response_key, 0, -1)
+        replies = []
+
+        for data in raw_items:
+            if isinstance(data, bytes):
+                data = data.decode()
+            reply = json.loads(data)
+            if not self._is_message_expired(reply):
+                replies.append(reply)
+
+        logger.debug("replies_peeked agent=%s count=%d", agent_id, len(replies))
+        return replies
+
     def _parse_message_id(self, message_id: str) -> tuple[str, str]:
         """Parse a message ID to extract the original sender and receiver.
 
@@ -297,9 +321,11 @@ class MessageManager:
             )
 
         now = datetime.now(timezone.utc).isoformat()
+        reply_id = f"reply::{message_id}::{uuid.uuid4().hex[:8]}"
 
         reply_data = {
             "message_id": message_id,
+            "reply_id": reply_id,
             "from_agent": from_agent,
             "to_agent": original_sender,
             "response": response,
@@ -452,15 +478,45 @@ class MessageManager:
     # Backwards compat alias
     _get_pending_responses = _get_pending_replies
 
-    def get_messages(
+    def _get_acked_ids(self, agent_id: str) -> set[str]:
+        """Get the set of acked message/reply IDs for an agent.
+
+        Args:
+            agent_id: The agent whose acked set to check
+
+        Returns:
+            Set of acked ID strings
+        """
+        acked_key = f"{self.ACKED_PREFIX}{agent_id}"
+        raw = self.redis.smembers(acked_key)
+        return {(v.decode() if isinstance(v, bytes) else v) for v in raw}
+
+    def _get_message_id(self, msg: dict) -> Optional[str]:
+        """Extract the unique ID from a message or reply dict.
+
+        For messages (type="message"), the ID is in the "id" field.
+        For replies (type="reply"), the ID is in the "reply_id" field,
+        falling back to "message_id" for old replies without reply_id.
+
+        Args:
+            msg: Message or reply dict
+
+        Returns:
+            The unique ID string, or None if not found
+        """
+        if msg.get("type") == "reply":
+            return msg.get("reply_id") or msg.get("message_id")
+        return msg.get("id")
+
+    def peek_messages(
         self,
         agent_id: str,
         message_type: Optional[str] = None,
     ) -> list[dict]:
-        """Get all pending messages (incoming and replies) for an agent.
+        """Non-destructive read of all pending messages and/or replies.
 
-        Consumes messages from the matching queues. Each message gets a "type"
-        field ("message" or "reply") so the caller can distinguish them.
+        Filters out acked IDs and expired messages. Messages stay in Redis
+        until explicitly acked via ack_messages().
 
         Args:
             agent_id: The agent whose messages to retrieve
@@ -477,20 +533,148 @@ class MessageManager:
         elif message_type == "response":
             normalized_type = "reply"
 
+        acked_ids = self._get_acked_ids(agent_id)
+
         messages = []
 
         if normalized_type is None or normalized_type == "message":
-            for msg in self.get_pending_messages(agent_id):
+            for msg in self.peek_pending_messages(agent_id):
                 msg["type"] = "message"
+                msg_id = self._get_message_id(msg)
+                if msg_id and msg_id in acked_ids:
+                    continue
                 messages.append(msg)
 
         if normalized_type is None or normalized_type == "reply":
-            for msg in self._get_pending_replies(agent_id):
+            for msg in self.peek_pending_replies(agent_id):
                 msg["type"] = "reply"
+                msg_id = self._get_message_id(msg)
+                # Old replies without reply_id can't be acked, always visible
+                if msg_id and msg_id in acked_ids:
+                    continue
                 messages.append(msg)
 
-        logger.info("get_messages agent=%s type=%s count=%d", agent_id, message_type, len(messages))
+        logger.info("peek_messages agent=%s type=%s count=%d acked=%d",
+                     agent_id, message_type, len(messages), len(acked_ids))
         return messages
+
+    # Compaction threshold: when acked set exceeds this, compact the lists
+    COMPACT_THRESHOLD = 20
+
+    def ack_messages(self, agent_id: str, message_ids: list[str]) -> dict:
+        """Acknowledge messages so they no longer appear in peek results.
+
+        Adds IDs to the acked set. When the set grows large, triggers
+        compaction to remove acked entries from the underlying Redis lists.
+
+        Args:
+            agent_id: The agent acknowledging messages
+            message_ids: List of message/reply IDs to acknowledge
+
+        Returns:
+            Dict with acked count and compaction status
+        """
+        if not message_ids:
+            return {"acked": 0, "compacted": False}
+
+        acked_key = f"{self.ACKED_PREFIX}{agent_id}"
+        self.redis.sadd(acked_key, *message_ids)
+        self.redis.expire(acked_key, self.MESSAGE_TTL_SECONDS)
+
+        logger.info("ack_messages agent=%s ids=%s", agent_id, message_ids)
+
+        # Check if compaction is needed
+        acked_count = self.redis.scard(acked_key)
+        compacted = False
+        if acked_count > self.COMPACT_THRESHOLD:
+            self._compact_queues(agent_id)
+            compacted = True
+
+        return {"acked": len(message_ids), "compacted": compacted}
+
+    def _compact_queues(self, agent_id: str) -> None:
+        """Remove acked entries from inbox and response lists.
+
+        Reads acked IDs, filters them from both queues, then clears
+        the acked set.
+
+        Args:
+            agent_id: The agent whose queues to compact
+        """
+        acked_ids = self._get_acked_ids(agent_id)
+        if not acked_ids:
+            return
+
+        inbox_key = f"{self.INBOX_PREFIX}{agent_id}"
+        response_key = f"{self.RESPONSES_PREFIX}{agent_id}"
+
+        self._compact_list(inbox_key, acked_ids, "id")
+        self._compact_list(response_key, acked_ids, "reply_id", fallback_field="message_id")
+
+        # Clear the acked set after compaction
+        acked_key = f"{self.ACKED_PREFIX}{agent_id}"
+        self.redis.delete(acked_key)
+
+        logger.info("compacted agent=%s removed=%d", agent_id, len(acked_ids))
+
+    def _compact_list(
+        self,
+        key: str,
+        acked_ids: set[str],
+        id_field: str,
+        fallback_field: Optional[str] = None,
+    ) -> None:
+        """Remove acked entries from a single Redis list.
+
+        Uses pipeline: delete the list, then rpush back non-acked entries.
+
+        Args:
+            key: Redis list key
+            acked_ids: Set of IDs to remove
+            id_field: Primary field name to check for ID
+            fallback_field: Optional fallback field for ID lookup
+        """
+        raw_items = self.redis.lrange(key, 0, -1)
+        if not raw_items:
+            return
+
+        kept = []
+        for data in raw_items:
+            if isinstance(data, bytes):
+                data = data.decode()
+            msg = json.loads(data)
+            msg_id = msg.get(id_field) or (msg.get(fallback_field) if fallback_field else None)
+            if msg_id and msg_id in acked_ids:
+                continue
+            kept.append(data)
+
+        pipe = self.redis.pipeline()
+        pipe.delete(key)
+        if kept:
+            pipe.rpush(key, *kept)
+            pipe.expire(key, self.MESSAGE_TTL_SECONDS)
+        pipe.execute()
+
+    def get_messages(
+        self,
+        agent_id: str,
+        message_type: Optional[str] = None,
+    ) -> list[dict]:
+        """Get all pending messages (incoming and replies) for an agent.
+
+        Non-destructive: messages remain in Redis until acked via ack_messages().
+        Repeated calls may return the same messages. Each message gets a "type"
+        field ("message" or "reply") so the caller can distinguish them.
+
+        Args:
+            agent_id: The agent whose messages to retrieve
+            message_type: Optional filter - "message", "reply", or None (both).
+                          Also accepts legacy values "request" and "response".
+
+        Returns:
+            List of message dicts with added "type" field, oldest first
+        """
+        return self.peek_messages(agent_id, message_type)
 
     def wait_for_message(
         self,
@@ -501,9 +685,12 @@ class MessageManager:
     ) -> Optional[list[dict]]:
         """Wait for any message (incoming or reply) to arrive, then return all pending.
 
+        Non-destructive: messages remain in Redis until acked via ack_messages().
+        Repeated calls may return the same messages.
+
         First checks for existing messages (non-blocking). If none, blocks on the
-        notification channel until a signal arrives or timeout. Then drains via
-        get_messages. Returns None on timeout.
+        notification channel until a signal arrives or timeout. Checks inbox on
+        every loop iteration (not just on notification) to handle lost notifications.
 
         Args:
             agent_id: The agent waiting for messages
@@ -515,7 +702,7 @@ class MessageManager:
             List of message dicts if any arrived, or None if timeout
         """
         # First check for existing messages without blocking
-        existing = self.get_messages(agent_id, message_type)
+        existing = self.peek_messages(agent_id, message_type)
         if existing:
             logger.info("wait_for_message immediate agent=%s count=%d", agent_id, len(existing))
             return existing
@@ -540,10 +727,11 @@ class MessageManager:
                 except Exception:
                     pass  # Don't let heartbeat failures break message waiting
 
-            if result is not None:
-                # Got a notification — drain messages
-                messages = self.get_messages(agent_id, message_type)
-                if messages:
-                    logger.info("wait_for_message_received agent=%s count=%d", agent_id, len(messages))
-                    return messages
-                # Stale notification (already consumed), continue blocking
+            # Check inbox on every iteration (notification or timeout)
+            # This fixes the 10s polling bug: messages with lost notifications
+            # are found within one BLPOP cycle instead of waiting forever.
+            messages = self.peek_messages(agent_id, message_type)
+            if messages:
+                logger.info("wait_for_message_received agent=%s count=%d notified=%s",
+                           agent_id, len(messages), result is not None)
+                return messages

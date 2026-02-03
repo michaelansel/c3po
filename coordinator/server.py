@@ -815,7 +815,11 @@ def _get_messages_impl(
     agent_id: str,
     message_type: Optional[str] = None,
 ) -> list[dict]:
-    """Get all pending messages (incoming and/or replies) for an agent."""
+    """Get all pending messages (incoming and/or replies) for an agent.
+
+    Non-destructive: messages remain until acked. Repeated calls may
+    return the same messages.
+    """
     valid_types = ("message", "reply", "request", "response")  # accept legacy values
     if message_type is not None and message_type not in valid_types:
         err = invalid_request("type", "must be 'message', 'reply', or omitted for both")
@@ -1034,9 +1038,8 @@ def get_messages(
 ) -> list[dict]:
     """Get all pending messages (incoming messages and replies) for this agent.
 
-    This consumes the messages - they will not be returned again.
-    Returns both incoming messages (from other agents) and replies
-    (to your previously sent messages) in a single unified list.
+    Messages are NOT consumed. Call ack_messages with the message IDs to
+    remove them. Repeated calls may return the same messages until acked.
     Each message has a "type" field: "message" or "reply".
 
     Args:
@@ -1093,6 +1096,9 @@ async def wait_for_message(
     or the timeout is reached. Returns the messages directly.
     Use this instead of polling get_messages in a loop.
 
+    Messages are NOT consumed. Call ack_messages with the message IDs to
+    remove them. Repeated calls may return the same messages until acked.
+
     Args:
         ctx: MCP context (injected automatically)
         timeout: Maximum seconds to wait (default 60, max 3600)
@@ -1109,6 +1115,50 @@ async def wait_for_message(
         _wait_for_message_impl, message_manager, effective_id, timeout, type,
         heartbeat_fn=lambda: agent_manager.touch_heartbeat(effective_id),
     )
+
+
+def _ack_messages_impl(
+    msg_manager: MessageManager,
+    agent_id: str,
+    message_ids: list[str],
+) -> dict:
+    """Acknowledge messages so they no longer appear in get_messages/wait_for_message."""
+    if not message_ids:
+        err = invalid_request("message_ids", "cannot be empty")
+        raise ToolError(f"{err.message} {err.suggestion}")
+    return msg_manager.ack_messages(agent_id, message_ids)
+
+
+@mcp.tool()
+def ack_messages(
+    ctx: Context,
+    message_ids: list[str],
+    agent_id: Optional[str] = None,
+) -> dict:
+    """Acknowledge messages so they no longer appear in get_messages/wait_for_message.
+
+    After calling get_messages or wait_for_message, call this with the message IDs
+    (the "id" field for messages, "reply_id" field for replies) to mark them as
+    processed. Unacked messages will reappear on subsequent get_messages calls.
+
+    Args:
+        ctx: MCP context (injected automatically)
+        message_ids: List of message/reply IDs to acknowledge
+        agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
+
+    Returns:
+        Dict with acked count and whether compaction was triggered
+    """
+    effective_id = _resolve_agent_id(ctx, agent_id)
+    _enforce_agent_pattern(ctx, effective_id)
+
+    # Rate limit
+    allowed, _ = rate_limiter.check_and_record("ack_messages", effective_id)
+    if not allowed:
+        err = rate_limited(effective_id, 30, 60)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    return _ack_messages_impl(message_manager, effective_id, message_ids)
 
 
 def main():

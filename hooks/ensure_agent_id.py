@@ -28,6 +28,7 @@ TOOLS_NEEDING_AGENT_ID = {
     "mcp__c3po__get_messages",
     "mcp__c3po__reply",
     "mcp__c3po__wait_for_message",
+    "mcp__c3po__ack_messages",
 }
 
 

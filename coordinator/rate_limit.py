@@ -18,6 +18,7 @@ RATE_LIMITS = {
     "reply": (10, 60),
     "get_messages": (30, 60),
     "wait_for_message": (30, 60),
+    "ack_messages": (30, 60),
     "list_agents": (30, 60),
     "rest_register": (5, 60),
     "rest_pending": (30, 60),

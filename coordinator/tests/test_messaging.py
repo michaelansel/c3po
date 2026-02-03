@@ -12,6 +12,7 @@ from coordinator.server import (
     _get_messages_impl,
     _reply_impl,
     _wait_for_message_impl,
+    _ack_messages_impl,
 )
 from fastmcp.exceptions import ToolError
 
@@ -181,17 +182,18 @@ class TestGetPendingMessagesTool:
         assert result[1]["message"] == "message 2"
         assert all(m["type"] == "message" for m in result)
 
-    def test_get_messages_consumes_messages(self, message_manager):
-        """get_messages should consume messages."""
-        message_manager.send_message("a", "b", "only once")
+    def test_get_messages_is_non_destructive(self, message_manager):
+        """get_messages should NOT consume messages (peek semantics)."""
+        message_manager.send_message("a", "b", "still here")
 
         # First call gets the message
         result = _get_messages_impl(message_manager, "b")
         assert len(result) == 1
 
-        # Second call should be empty
+        # Second call should return same message (not consumed)
         result = _get_messages_impl(message_manager, "b")
-        assert len(result) == 0
+        assert len(result) == 1
+        assert result[0]["message"] == "still here"
 
 
 class TestReplyHandling:
@@ -266,7 +268,7 @@ class TestReplyHandling:
         assert elapsed >= 1  # Should have waited at least 1 second
 
     def test_full_message_reply_cycle(self, message_manager, agent_manager):
-        """Integration test: full send -> receive -> reply -> wait cycle."""
+        """Integration test: full send -> receive -> ack -> reply -> wait cycle."""
         # Register both agents
         agent_manager.register_agent("agent-a")
         agent_manager.register_agent("agent-b")
@@ -286,6 +288,9 @@ class TestReplyHandling:
         assert len(pending) == 1
         assert pending[0]["message"] == "What is 2+2?"
         assert pending[0]["id"] == message_id
+
+        # Agent B acks the message
+        _ack_messages_impl(message_manager, "agent-b", [message_id])
 
         # Agent B replies
         response = _reply_impl(
@@ -719,13 +724,18 @@ class TestGetMessages:
         assert len(msgs_a) == 1
         assert msgs_a[0]["type"] == "reply"
 
-    def test_consumes_messages(self, message_manager):
-        """get_messages should consume messages from both queues."""
+    def test_non_destructive_without_ack(self, message_manager):
+        """get_messages should return same messages until acked."""
         message_manager.send_message("agent-a", "agent-b", "Q")
         msgs = message_manager.get_messages("agent-b")
         assert len(msgs) == 1
 
-        # Second call should return empty
+        # Second call should return same message (peek semantics)
+        msgs = message_manager.get_messages("agent-b")
+        assert len(msgs) == 1
+
+        # After ack, should be empty
+        message_manager.ack_messages("agent-b", [msgs[0]["id"]])
         msgs = message_manager.get_messages("agent-b")
         assert len(msgs) == 0
 
@@ -836,3 +846,189 @@ class TestWaitForMessage:
         assert result["status"] == "received"
         assert "messages" in result
         assert len(result["messages"]) >= 1
+
+
+class TestAckMessages:
+    """Tests for the ack_messages functionality."""
+
+    def test_ack_removes_from_peek(self, message_manager):
+        """Acked messages should not appear in peek_messages."""
+        msg1 = message_manager.send_message("a", "b", "msg1")
+        msg2 = message_manager.send_message("c", "b", "msg2")
+
+        # Both visible before ack
+        msgs = message_manager.get_messages("b")
+        assert len(msgs) == 2
+
+        # Ack first message
+        message_manager.ack_messages("b", [msg1["id"]])
+
+        # Only second message visible
+        msgs = message_manager.get_messages("b")
+        assert len(msgs) == 1
+        assert msgs[0]["message"] == "msg2"
+
+    def test_ack_reply(self, message_manager):
+        """Acked replies should not appear in peek_messages."""
+        msg = message_manager.send_message("a", "b", "Q")
+        reply = message_manager.reply(msg["id"], "b", "A")
+
+        # Reply visible
+        msgs = message_manager.get_messages("a", message_type="reply")
+        assert len(msgs) == 1
+        reply_id = msgs[0]["reply_id"]
+
+        # Ack reply
+        message_manager.ack_messages("a", [reply_id])
+
+        # Reply gone
+        msgs = message_manager.get_messages("a", message_type="reply")
+        assert len(msgs) == 0
+
+    def test_partial_ack(self, message_manager):
+        """Acking some messages should leave others visible."""
+        msg1 = message_manager.send_message("a", "b", "first")
+        msg2 = message_manager.send_message("c", "b", "second")
+        msg3 = message_manager.send_message("d", "b", "third")
+
+        message_manager.ack_messages("b", [msg1["id"], msg3["id"]])
+
+        msgs = message_manager.get_messages("b")
+        assert len(msgs) == 1
+        assert msgs[0]["message"] == "second"
+
+    def test_ack_unknown_ids_safe(self, message_manager):
+        """Acking unknown IDs should not cause errors."""
+        result = message_manager.ack_messages("b", ["nonexistent-id-1", "fake-id-2"])
+        assert result["acked"] == 2
+
+        # Nothing to peek
+        msgs = message_manager.get_messages("b")
+        assert len(msgs) == 0
+
+    def test_ack_empty_list(self, message_manager):
+        """Acking empty list should be a no-op."""
+        result = message_manager.ack_messages("b", [])
+        assert result["acked"] == 0
+        assert result["compacted"] is False
+
+    def test_compaction_triggers(self, message_manager):
+        """Compaction should trigger when acked set exceeds threshold."""
+        # Send enough messages to trigger compaction
+        msg_ids = []
+        for i in range(25):
+            msg = message_manager.send_message("a", "b", f"msg{i}")
+            msg_ids.append(msg["id"])
+
+        # Ack all 25 - should trigger compaction (threshold is 20)
+        result = message_manager.ack_messages("b", msg_ids)
+        assert result["compacted"] is True
+
+        # After compaction, inbox list should be empty
+        msgs = message_manager.get_messages("b")
+        assert len(msgs) == 0
+
+        # Acked set should also be cleared by compaction
+        acked = message_manager._get_acked_ids("b")
+        assert len(acked) == 0
+
+    def test_compaction_preserves_unacked(self, message_manager):
+        """Compaction should keep unacked messages in the list."""
+        msg_ids = []
+        for i in range(22):
+            msg = message_manager.send_message("a", "b", f"msg{i}")
+            msg_ids.append(msg["id"])
+
+        # Ack 21, leaving one unacked
+        kept_id = msg_ids[10]
+        to_ack = [mid for mid in msg_ids if mid != kept_id]
+        result = message_manager.ack_messages("b", to_ack)
+        assert result["compacted"] is True
+
+        # Only the unacked message should remain
+        msgs = message_manager.get_messages("b")
+        assert len(msgs) == 1
+        assert msgs[0]["id"] == kept_id
+
+    def test_ack_messages_impl_rejects_empty(self, message_manager):
+        """_ack_messages_impl should reject empty message_ids."""
+        with pytest.raises(ToolError):
+            _ack_messages_impl(message_manager, "b", [])
+
+
+class TestPeekPendingReplies:
+    """Tests for peek_pending_replies method."""
+
+    def test_non_destructive(self, message_manager):
+        """peek_pending_replies should not consume replies."""
+        msg = message_manager.send_message("a", "b", "Q")
+        message_manager.reply(msg["id"], "b", "A")
+
+        # Peek twice
+        replies = message_manager.peek_pending_replies("a")
+        assert len(replies) == 1
+
+        replies = message_manager.peek_pending_replies("a")
+        assert len(replies) == 1
+
+    def test_empty_returns_empty_list(self, message_manager):
+        """Empty response queue should return empty list."""
+        replies = message_manager.peek_pending_replies("nonexistent")
+        assert replies == []
+
+
+class TestReplyId:
+    """Tests for reply_id field on replies."""
+
+    def test_reply_has_reply_id(self, message_manager):
+        """reply() should include a unique reply_id field."""
+        msg = message_manager.send_message("a", "b", "Q")
+        result = message_manager.reply(msg["id"], "b", "A")
+
+        assert "reply_id" in result
+        assert result["reply_id"].startswith("reply::")
+
+    def test_reply_ids_are_unique(self, message_manager):
+        """Different replies should have different reply_ids."""
+        msg1 = message_manager.send_message("a", "b", "Q1")
+        msg2 = message_manager.send_message("a", "b", "Q2")
+
+        reply1 = message_manager.reply(msg1["id"], "b", "A1")
+        reply2 = message_manager.reply(msg2["id"], "b", "A2")
+
+        assert reply1["reply_id"] != reply2["reply_id"]
+
+    def test_reply_id_in_get_messages(self, message_manager):
+        """reply_id should appear in get_messages results."""
+        msg = message_manager.send_message("a", "b", "Q")
+        message_manager.reply(msg["id"], "b", "A")
+
+        msgs = message_manager.get_messages("a", message_type="reply")
+        assert len(msgs) == 1
+        assert "reply_id" in msgs[0]
+        assert msgs[0]["reply_id"].startswith("reply::")
+
+
+class TestWaitForMessage10sLoopFix:
+    """Tests that wait_for_message finds messages even without notifications."""
+
+    def test_finds_messages_without_notification(self, message_manager, redis_client):
+        """wait_for_message should find messages even if notification is lost."""
+        # Send a message
+        message_manager.send_message("agent-a", "agent-b", "important")
+
+        # Delete the notification signal (simulating lost notification)
+        notify_key = f"{message_manager.NOTIFY_PREFIX}agent-b"
+        redis_client.delete(notify_key)
+
+        # wait_for_message should still find it within one BLPOP cycle (~10s max)
+        # Using a 15s timeout to give it room
+        start = time.time()
+        result = message_manager.wait_for_message("agent-b", timeout=15)
+        elapsed = time.time() - start
+
+        assert result is not None
+        assert len(result) >= 1
+        assert result[0]["message"] == "important"
+        # Should find within ~10s (one BLPOP cycle), not at the 15s timeout
+        assert elapsed < 12

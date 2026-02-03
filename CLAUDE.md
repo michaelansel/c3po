@@ -102,13 +102,15 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 
 **Credentials**: Plugin hooks read `~/.claude/c3po-credentials.json` (0o600 perms) for auth. Contains `coordinator_url`, `api_token` (composite `server_secret.api_key`), `key_id`, `agent_pattern`. Legacy format with separate `server_secret` and `api_key` fields is also supported. Created by `setup.py --enroll`.
 
-**MCP tools**: `send_message` (send to another agent), `reply` (respond to a message), `get_messages` (consume pending messages/replies), `wait_for_message` (block until message arrives), `ping`, `list_agents`, `register_agent`, `set_description`.
+**MCP tools**: `send_message` (send to another agent), `reply` (respond to a message), `get_messages` (peek at pending messages/replies, non-destructive), `wait_for_message` (block until message arrives, non-destructive), `ack_messages` (acknowledge messages so they no longer appear), `ping`, `list_agents`, `register_agent`, `set_description`.
 
 **Adding MCP tools**: When adding a new tool to `coordinator/server.py`, also update `hooks/hooks.json` (PreToolUse matcher list) and, if the tool uses `agent_id`, `hooks/ensure_agent_id.py` (TOOLS_NEEDING_AGENT_ID). The matcher must explicitly list all tool names because prefix patterns don't work in plugin hooks. New modules also need to be added to the `Dockerfile` COPY commands.
 
 **Version bumping**: When committing a version bump, update `.claude-plugin/plugin.json` in this repo. The marketplace (`michaelansel/c3po`) does not need separate updates.
 
-**Message flow**: Messages go to `c3po:inbox:{agent}` Redis lists. Notifications (separate from messages) go to `c3po:notify:{agent}` to wake blocked `wait_for_message` calls without consuming messages. This separation prevents message loss. Messages have type `"message"`, replies have type `"reply"`. Each message gets a `message_id` used for replies.
+**Message flow**: Messages go to `c3po:inbox:{agent}` Redis lists. Notifications (separate from messages) go to `c3po:notify:{agent}` to wake blocked `wait_for_message` calls without consuming messages. This separation prevents message loss. Messages have type `"message"`, replies have type `"reply"`. Each message gets a `message_id` used for replies. Replies also get a unique `reply_id` for individual acknowledgment.
+
+**Peek+Ack semantics**: `get_messages` and `wait_for_message` are non-destructive (peek). Messages stay in Redis lists until explicitly acknowledged via `ack_messages`. Acked IDs are stored in `c3po:acked:{agent}` (Redis SET, 24h TTL). When the acked set exceeds 20 entries, compaction removes acked entries from the underlying lists and clears the set. This prevents message loss when MCP tool calls are interrupted client-side.
 
 **Rate limiting**: Per-operation sliding window rate limits using Redis sorted sets. Different limits for different operations (e.g., `send_message`: 10/60s, `list_agents`: 30/60s, `rest_register`: 5/60s). Per-agent for MCP tools, per-IP for REST endpoints.
 
@@ -122,6 +124,7 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 - `c3po:replies:{agent_id}` — Reply queue
 - `c3po:rate:{operation}:{identity}` — Rate limit tracking (sorted set)
 - `c3po:audit` — List of recent audit entries (JSON, newest first)
+- `c3po:acked:{agent_id}` — SET of acked message/reply IDs (24h TTL, cleared on compaction)
 - `c3po:api_keys` — Hash: `sha256(api_key)` → JSON key metadata (includes `bcrypt_hash` for verification)
 - `c3po:key_ids` — Hash: `key_id` → `sha256(api_key)` (reverse lookup)
 
