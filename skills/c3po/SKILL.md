@@ -98,15 +98,15 @@ Enter auto-listen mode: a tight loop that waits for incoming messages with minim
 
 1. Call `set_description` with a brief description of what this agent/project does (infer from the project context — e.g., repo name, README, or working directory)
 2. Print: `Auto-listen mode active. Waiting for messages... (Ctrl+C to exit)`
-3. Call `wait_for_message` with `timeout=3600`
-4. If messages received: process each message fully:
+3. Call `get_messages` to check for already-queued messages. If messages are returned, skip to step 5.
+4. Call `wait_for_message` with `timeout=3600`. If timeout (no messages): print ONLY `Still listening...` and go back to step 3.
+5. Process each message fully:
    - For incoming messages (type="message"): read the message, use any tools needed to research an answer, then call `reply` with your response
    - For replies (type="reply"): display the reply content to the user
    - After processing all messages, go back to step 3
-5. If timeout (no messages): print ONLY `Still listening...` and go back to step 3
 
 **Critical rules for auto-listen mode:**
-- ALWAYS loop back to step 3. Never exit the loop unless the user interrupts with Ctrl+C.
+- ALWAYS loop back to step 3 (get_messages check). Never exit the loop unless the user interrupts with Ctrl+C.
 - On timeout, print ONLY "Still listening..." — no extra commentary, no suggestions, no questions.
 - Do NOT ask the user for input during the loop. Process everything autonomously.
 - When processing messages, use your full tool access to research thorough answers before responding.
