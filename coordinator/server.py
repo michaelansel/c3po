@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import re
+import signal
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -85,6 +87,9 @@ blob_manager = BlobManager(redis_client)
 # Default asyncio thread pool is min(32, cpu_count+4) = only 5 on 1-CPU containers.
 # wait_for_message blocks threads for up to 3600s, so it needs a dedicated larger pool.
 _wait_pool = concurrent.futures.ThreadPoolExecutor(max_workers=50)
+
+# Shutdown event: set on SIGTERM to gracefully drain wait_for_message calls.
+_shutdown_event = threading.Event()
 
 
 def _determine_path_prefix(path: str) -> str:
@@ -981,6 +986,7 @@ def _wait_for_message_impl(
     timeout: int = 60,
     message_type: Optional[str] = None,
     heartbeat_fn: Optional[callable] = None,
+    shutdown_event: Optional[threading.Event] = None,
 ) -> dict:
     """Wait for any message (incoming or reply) to arrive.
 
@@ -997,7 +1003,17 @@ def _wait_for_message_impl(
         err = invalid_request("type", "must be 'message', 'reply', or omitted for both")
         raise ToolError(f"{err.message} {err.suggestion}")
     logger.info("wait_for_message agent=%s timeout=%d type=%s", agent_id, timeout, message_type)
-    result = msg_manager.wait_for_message(agent_id, timeout, message_type, heartbeat_fn=heartbeat_fn)
+    result = msg_manager.wait_for_message(
+        agent_id, timeout, message_type,
+        heartbeat_fn=heartbeat_fn,
+        shutdown_event=shutdown_event,
+    )
+    if result == "shutdown":
+        return {
+            "status": "retry",
+            "message": "Server is restarting. Please call wait_for_message again in 15 seconds.",
+            "retry_after": 15,
+        }
     if result is None:
         return {
             "status": "timeout",
@@ -1232,6 +1248,7 @@ async def wait_for_message(
         functools.partial(
             _wait_for_message_impl, message_manager, effective_id, timeout, type,
             heartbeat_fn=lambda: agent_manager.touch_heartbeat(effective_id),
+            shutdown_event=_shutdown_event,
         ),
     )
 
@@ -1469,6 +1486,12 @@ def main():
         raise RedisConnectionError(REDIS_URL, e) from e
     except redis.RedisError as e:
         raise RedisConnectionError(REDIS_URL, e) from e
+
+    def _handle_sigterm(signum, frame):
+        logger.info("SIGTERM received, shutting down gracefully")
+        _shutdown_event.set()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     mcp.run(transport="http", host=host, port=port, stateless_http=True)
 

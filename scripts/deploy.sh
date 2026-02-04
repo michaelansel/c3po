@@ -121,6 +121,7 @@ services:
       redis:
         condition: service_started
     restart: unless-stopped
+    stop_grace_period: 15s
     read_only: true
     tmpfs:
       - /tmp:size=10M

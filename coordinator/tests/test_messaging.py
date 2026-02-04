@@ -847,6 +847,29 @@ class TestWaitForMessage:
         assert "messages" in result
         assert len(result["messages"]) >= 1
 
+    def test_shutdown_returns_sentinel(self, message_manager):
+        """wait_for_message should return 'shutdown' when shutdown_event is set."""
+        import threading
+        shutdown = threading.Event()
+        shutdown.set()
+        result = message_manager.wait_for_message(
+            "agent-b", timeout=60, shutdown_event=shutdown,
+        )
+        assert result == "shutdown"
+
+    def test_shutdown_not_set_returns_normally(self, message_manager):
+        """wait_for_message with unset shutdown_event should behave normally."""
+        import threading
+        shutdown = threading.Event()
+
+        message_manager.send_message("agent-a", "agent-b", "Hello!")
+        result = message_manager.wait_for_message(
+            "agent-b", timeout=5, shutdown_event=shutdown,
+        )
+        assert result is not None
+        assert len(result) >= 1
+        assert result[0]["message"] == "Hello!"
+
 
 class TestAckMessages:
     """Tests for the ack_messages functionality."""

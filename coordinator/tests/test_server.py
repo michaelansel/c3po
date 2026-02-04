@@ -179,6 +179,29 @@ class TestWaitForMessageImpl:
         result = _wait_for_message_impl(message_manager, "agent-a", timeout=-5)
         assert result["status"] == "timeout"
 
+    def test_shutdown_event_returns_retry(self, message_manager):
+        """Should return retry dict when shutdown_event is set."""
+        import threading
+        shutdown = threading.Event()
+        shutdown.set()
+        result = _wait_for_message_impl(
+            message_manager, "agent-a", timeout=60,
+            shutdown_event=shutdown,
+        )
+        assert result["status"] == "retry"
+        assert result["retry_after"] == 15
+        assert "restarting" in result["message"].lower()
+
+    def test_shutdown_event_not_set_times_out(self, message_manager):
+        """Should time out normally when shutdown_event exists but is not set."""
+        import threading
+        shutdown = threading.Event()
+        result = _wait_for_message_impl(
+            message_manager, "agent-a", timeout=1,
+            shutdown_event=shutdown,
+        )
+        assert result["status"] == "timeout"
+
 
 @pytest.fixture
 def blob_manager(redis_client):

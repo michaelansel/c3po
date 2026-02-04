@@ -682,7 +682,8 @@ class MessageManager:
         timeout: int = 60,
         message_type: Optional[str] = None,
         heartbeat_fn: Optional[callable] = None,
-    ) -> Optional[list[dict]]:
+        shutdown_event=None,
+    ):
         """Wait for any message (incoming or reply) to arrive, then return all pending.
 
         Non-destructive: messages remain in Redis until acked via ack_messages().
@@ -697,9 +698,11 @@ class MessageManager:
             timeout: Timeout in seconds (default 60)
             message_type: Optional filter - "message", "reply", or None (both).
                           Also accepts legacy "request" and "response".
+            shutdown_event: Optional threading.Event; if set, return "shutdown" sentinel.
 
         Returns:
-            List of message dicts if any arrived, or None if timeout
+            List of message dicts if any arrived, None if timeout,
+            or the string "shutdown" if shutdown_event is set.
         """
         # First check for existing messages without blocking
         existing = self.peek_messages(agent_id, message_type)
@@ -719,6 +722,11 @@ class MessageManager:
 
             blpop_timeout = max(1, int(min(remaining, 10)))
             result = self.redis.blpop(notify_key, timeout=blpop_timeout)
+
+            # Check for graceful shutdown
+            if shutdown_event and shutdown_event.is_set():
+                logger.info("wait_for_message_shutdown agent=%s", agent_id)
+                return "shutdown"
 
             # Refresh heartbeat so long-polling agents stay "online"
             if heartbeat_fn:
