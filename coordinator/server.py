@@ -471,7 +471,7 @@ async def api_pending(request):
         )
 
     try:
-        messages = message_manager.peek_pending_messages(agent_id)
+        messages = message_manager.get_messages(agent_id)
         logger.info("rest_pending agent_id=%s count=%d", agent_id, len(messages))
         return JSONResponse({
             "count": len(messages),

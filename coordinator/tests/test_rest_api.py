@@ -183,6 +183,32 @@ class TestPendingEndpoint:
         assert data["messages"][2]["message"] == "Message 3"
 
 
+    @pytest.mark.asyncio
+    async def test_pending_filters_acked_messages(
+        self, client, message_manager, agent_manager
+    ):
+        """Pending endpoint should not return messages that have been acked."""
+        agent_manager.register_agent("sender/proj")
+        agent_manager.register_agent("receiver/proj")
+
+        # Send two messages
+        msg1 = message_manager.send_message("sender/proj", "receiver/proj", "Message 1")
+        message_manager.send_message("sender/proj", "receiver/proj", "Message 2")
+
+        # Ack the first message
+        msg1_id = msg1["id"]
+        message_manager.ack_messages("receiver/proj", [msg1_id])
+
+        # Pending should only show the un-acked message
+        response = await client.get(
+            "/agent/api/pending", headers={"X-Machine-Name": "receiver/proj"}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 1
+        assert data["messages"][0]["message"] == "Message 2"
+
+
 class TestUnregisterEndpoint:
     """Tests for /agent/api/unregister endpoint."""
 
