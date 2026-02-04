@@ -57,8 +57,8 @@ trap "rm -f '$HEADER_FILE'" EXIT
 if [ -n "$OUTPUT_PATH" ]; then
     HTTP_CODE=$(curl -s -o "$OUTPUT_PATH" -w "%{http_code}" \
         -D "$HEADER_FILE" \
-        "${AUTH_ARGS[@]}" \
-        "${CA_ARGS[@]}" \
+        ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
+        ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
         "$COORDINATOR_URL/agent/api/blob/$BLOB_ID")
 
     if [ "$HTTP_CODE" = "200" ]; then
@@ -74,8 +74,8 @@ else
     TEMP_FILE=$(mktemp)
     HTTP_CODE=$(curl -s -o "$TEMP_FILE" -w "%{http_code}" \
         -D "$HEADER_FILE" \
-        "${AUTH_ARGS[@]}" \
-        "${CA_ARGS[@]}" \
+        ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
+        ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
         "$COORDINATOR_URL/agent/api/blob/$BLOB_ID")
 
     if [ "$HTTP_CODE" = "200" ]; then
