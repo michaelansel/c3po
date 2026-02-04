@@ -1,6 +1,8 @@
 """C3PO Coordinator - FastMCP server for multi-agent coordination."""
 
 import asyncio
+import concurrent.futures
+import functools
 import json
 import logging
 import os
@@ -79,6 +81,10 @@ audit_logger = AuditLogger(redis_client)
 
 # Blob manager
 blob_manager = BlobManager(redis_client)
+
+# Default asyncio thread pool is min(32, cpu_count+4) = only 5 on 1-CPU containers.
+# wait_for_message blocks threads for up to 3600s, so it needs a dedicated larger pool.
+_wait_pool = concurrent.futures.ThreadPoolExecutor(max_workers=50)
 
 
 def _determine_path_prefix(path: str) -> str:
@@ -1221,9 +1227,12 @@ async def wait_for_message(
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
     _enforce_agent_pattern(ctx, effective_id)
-    return await asyncio.to_thread(
-        _wait_for_message_impl, message_manager, effective_id, timeout, type,
-        heartbeat_fn=lambda: agent_manager.touch_heartbeat(effective_id),
+    return await asyncio.get_running_loop().run_in_executor(
+        _wait_pool,
+        functools.partial(
+            _wait_for_message_impl, message_manager, effective_id, timeout, type,
+            heartbeat_fn=lambda: agent_manager.touch_heartbeat(effective_id),
+        ),
     )
 
 
