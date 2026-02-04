@@ -30,7 +30,7 @@ COORDINATOR_URL = get_coordinator_url()
 MACHINE_NAME = get_machine_name()
 
 # Project context (for display, not part of agent ID)
-PROJECT_NAME = os.path.basename(os.getcwd())
+PROJECT_NAME = os.environ.get("CLAUDE_PROJECT_NAME") or os.path.basename(os.getcwd())
 
 
 def register_with_coordinator(session_id: str) -> dict | None:

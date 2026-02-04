@@ -126,7 +126,7 @@ The coordinator URL and agent ID components are configured via environment varia
 
 - `C3PO_COORDINATOR_URL` - Coordinator URL (default: `http://localhost:8420`)
 - `C3PO_MACHINE_NAME` - Machine identifier, base of agent ID (default: hostname)
-- `C3PO_PROJECT_NAME` - Project name override (default: current directory name)
+- `CLAUDE_PROJECT_NAME` - Project name override (default: current directory name; useful in containers where cwd is always `/workspace`)
 - `C3PO_SESSION_ID` - Session identifier for same-session detection
 
 The full agent ID is constructed as `{machine}/{project}` (e.g., `macbook/myproject`).

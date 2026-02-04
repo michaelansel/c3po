@@ -138,7 +138,8 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 - `C3PO_PROXY_BEARER_TOKEN` — Shared token for OAuth proxy (`/oauth/*` paths)
 - `C3PO_BEHIND_PROXY` — Set to `true` to trust X-Forwarded-For/X-Real-IP headers
 - `C3PO_CA_CERT` — Path to custom CA certificate for HTTPS (hooks)
-- `C3PO_MACHINE_NAME` / `C3PO_PROJECT_NAME` / `C3PO_SESSION_ID` — Plugin overrides
+- `C3PO_MACHINE_NAME` / `C3PO_SESSION_ID` — Plugin overrides
+- `CLAUDE_PROJECT_NAME` — Project name override (useful in containers where cwd is always `/workspace`)
 
 ## Testing
 
