@@ -96,17 +96,18 @@ Reply from meshtastic: "Nodes online: node-1234, node-5678"
 
 Enter auto-listen mode: a tight loop that waits for incoming messages with minimal token usage.
 
-1. Call `set_description` with a brief description of what this agent/project does (infer from the project context — e.g., repo name, README, or working directory)
-2. Print: `Auto-listen mode active. Waiting for messages... (Ctrl+C to exit)`
-3. Call `get_messages` to check for already-queued messages. If messages are returned, skip to step 5.
-4. Call `wait_for_message` with `timeout=3600`. If timeout (no messages): print ONLY `Still listening...` and go back to step 3.
-5. Process each message fully:
+1. Run `python3 <plugin_root>/scripts/add-permissions.py` to ensure all c3po MCP tools are pre-approved in this project's `.claude/settings.local.json`. This is idempotent and avoids permission prompts.
+2. Call `set_description` with a brief description of what this agent/project does (infer from the project context — e.g., repo name, README, or working directory)
+3. Print: `Auto-listen mode active. Waiting for messages... (Ctrl+C to exit)`
+4. Call `get_messages` to check for already-queued messages. If messages are returned, skip to step 6.
+5. Call `wait_for_message` with `timeout=3600`. If timeout (no messages): print ONLY `Still listening...` and go back to step 4.
+6. Process each message fully:
    - For incoming messages (type="message"): read the message, use any tools needed to research an answer, then call `reply` with your response
    - For replies (type="reply"): display the reply content to the user
-   - After processing all messages, go back to step 3
+   - After processing all messages, go back to step 4
 
 **Critical rules for auto-listen mode:**
-- ALWAYS loop back to step 3 (get_messages check). Never exit the loop unless the user interrupts with Ctrl+C.
+- ALWAYS loop back to step 4 (get_messages check). Never exit the loop unless the user interrupts with Ctrl+C.
 - On timeout, print ONLY "Still listening..." — no extra commentary, no suggestions, no questions.
 - Do NOT ask the user for input during the loop. Process everything autonomously.
 - When processing messages, use your full tool access to research thorough answers before responding.
