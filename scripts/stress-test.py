@@ -120,7 +120,7 @@ async def enroll_stress_key(url: str, admin_token: str) -> str:
     Returns the composite API token to use for stress test sessions.
     """
     endpoint = f"{url.rstrip('/')}/admin/api/keys"
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             endpoint,
             headers={"Authorization": f"Bearer {admin_token}"},
