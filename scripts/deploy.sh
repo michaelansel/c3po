@@ -1,11 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-# C3PO Deployment to pubpop3.datadrop.biz
+# C3PO Deployment to a10.lambda.qerk.be
 # This script runs locally and SSHes into the server for remote operations.
 #
 # Prerequisites (user must do manually):
-#   sudo loginctl enable-linger mansel
+#   sudo loginctl enable-linger ubuntu
 #   Create GitHub OAuth App (Settings > Developer settings > OAuth Apps)
 #     - Callback: https://mcp.qerk.be/.auth/github/callback
 #   # (after this script): sudo commands for nginx + certbot
@@ -16,8 +16,8 @@ set -euo pipefail
 SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock}"
 export SSH_AUTH_SOCK
 
-REMOTE="mansel@pubpop3.datadrop.biz"
-REMOTE_DIR="/home/mansel/c3po"
+REMOTE="ubuntu@a10.lambda.qerk.be"
+REMOTE_DIR="/home/ubuntu/c3po"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
@@ -35,11 +35,11 @@ ssh_run() { ssh "$REMOTE" "$@"; }
 # Step 1: Verify linger is enabled
 # -------------------------------------------------------------------
 log "Checking systemd linger..."
-if ssh_run "loginctl show-user mansel 2>/dev/null | grep -q 'Linger=yes'"; then
+if ssh_run "loginctl show-user ubuntu 2>/dev/null | grep -q 'Linger=yes'"; then
     log "Linger is enabled"
 else
     err "Linger is NOT enabled. Run on the server:"
-    err "  sudo loginctl enable-linger mansel"
+    err "  sudo loginctl enable-linger ubuntu"
     exit 1
 fi
 
@@ -227,10 +227,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/mansel/c3po
-ExecStartPre=/usr/bin/docker-compose pull redis
-ExecStart=/usr/bin/docker-compose up --remove-orphans
-ExecStop=/usr/bin/docker-compose down
+WorkingDirectory=/home/ubuntu/c3po
+ExecStartPre=/usr/bin/docker compose pull redis
+ExecStart=/usr/bin/docker compose up --remove-orphans
+ExecStop=/usr/bin/docker compose down
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=120
@@ -465,7 +465,7 @@ if ssh_run "curl -sf http://127.0.0.1:8420/api/health 2>/dev/null"; then
     log "Coordinator is UP and healthy!"
 else
     warn "Coordinator not responding yet (may still be starting)"
-    warn "Check logs with: ssh ${REMOTE} 'docker-compose -f ~/c3po/docker-compose.yml logs'"
+    warn "Check logs with: ssh ${REMOTE} 'docker compose -f ~/c3po/docker-compose.yml logs'"
 fi
 
 # -------------------------------------------------------------------
