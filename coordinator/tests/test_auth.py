@@ -324,3 +324,129 @@ class TestPublicPathAuth:
         result = manager.validate_request("", "/api")
         assert result["valid"] is True
         assert result["source"] == "public"
+
+
+class TestApiKeyValidationCache:
+    """Tests for bcrypt result caching in _validate_api_key."""
+
+    @pytest.fixture(autouse=True)
+    def setup_api_key(self, monkeypatch):
+        monkeypatch.setenv("C3PO_SERVER_SECRET", "test-server-secret")
+        monkeypatch.delenv("C3PO_PROXY_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("C3PO_ADMIN_KEY", raising=False)
+
+    @pytest.fixture
+    def redis_client(self):
+        return fakeredis.FakeRedis()
+
+    def test_api_key_validation_caches_bcrypt_result(self, redis_client, monkeypatch):
+        """Second validation should hit cache and not call bcrypt.checkpw again."""
+        import bcrypt as bcrypt_module
+        manager = AuthManager(redis_client)
+        key_data = manager.create_api_key(agent_pattern="test/*")
+        composite_key = key_data["api_key"]
+
+        # Track bcrypt.checkpw calls
+        original_checkpw = bcrypt_module.checkpw
+        call_count = 0
+
+        def counting_checkpw(password, hashed):
+            nonlocal call_count
+            call_count += 1
+            return original_checkpw(password, hashed)
+
+        monkeypatch.setattr(bcrypt_module, "checkpw", counting_checkpw)
+
+        # First call - should use bcrypt
+        result1 = manager.validate_request(f"Bearer {composite_key}", "/agent")
+        assert result1["valid"] is True
+        assert call_count == 1
+
+        # Second call - should hit cache, not call bcrypt
+        result2 = manager.validate_request(f"Bearer {composite_key}", "/agent")
+        assert result2["valid"] is True
+        assert call_count == 1  # Still 1, not 2
+
+    def test_api_key_cache_expires(self, redis_client, monkeypatch):
+        """After TTL expires, bcrypt should be called again."""
+        import bcrypt as bcrypt_module
+        import time as time_module
+        manager = AuthManager(redis_client)
+        key_data = manager.create_api_key(agent_pattern="test/*")
+        composite_key = key_data["api_key"]
+
+        # Track bcrypt.checkpw calls
+        original_checkpw = bcrypt_module.checkpw
+        call_count = 0
+
+        def counting_checkpw(password, hashed):
+            nonlocal call_count
+            call_count += 1
+            return original_checkpw(password, hashed)
+
+        monkeypatch.setattr(bcrypt_module, "checkpw", counting_checkpw)
+
+        # First call
+        result1 = manager.validate_request(f"Bearer {composite_key}", "/agent")
+        assert result1["valid"] is True
+        assert call_count == 1
+
+        # Simulate time passing beyond TTL by manipulating the cache entry
+        for key_hash in manager._auth_cache:
+            _, auth_result = manager._auth_cache[key_hash]
+            # Set expiry to the past
+            manager._auth_cache[key_hash] = (time_module.time() - 1, auth_result)
+
+        # Third call - cache expired, should call bcrypt again
+        result3 = manager.validate_request(f"Bearer {composite_key}", "/agent")
+        assert result3["valid"] is True
+        assert call_count == 2
+
+    def test_api_key_cache_invalidated_on_revoke(self, redis_client):
+        """Revoking a key should invalidate its cache entry."""
+        manager = AuthManager(redis_client)
+        key_data = manager.create_api_key(agent_pattern="test/*")
+        composite_key = key_data["api_key"]
+
+        # Validate to populate cache
+        result1 = manager.validate_request(f"Bearer {composite_key}", "/agent")
+        assert result1["valid"] is True
+
+        # Revoke the key
+        manager.revoke_api_key(key_data["key_id"])
+
+        # Validate again - should fail (key gone from Redis, cache should be invalidated)
+        result2 = manager.validate_request(f"Bearer {composite_key}", "/agent")
+        assert result2["valid"] is False
+
+    def test_failed_bcrypt_not_cached(self, redis_client, monkeypatch):
+        """Failed bcrypt validation should not be cached."""
+        import bcrypt as bcrypt_module
+        manager = AuthManager(redis_client)
+
+        # Create a key and store it with a known hash
+        key_data = manager.create_api_key(agent_pattern="test/*")
+        correct_key = key_data["api_key"]
+
+        # Track bcrypt.checkpw calls
+        original_checkpw = bcrypt_module.checkpw
+        call_count = 0
+
+        def counting_checkpw(password, hashed):
+            nonlocal call_count
+            call_count += 1
+            return original_checkpw(password, hashed)
+
+        monkeypatch.setattr(bcrypt_module, "checkpw", counting_checkpw)
+
+        # Try with wrong key - should not be cached
+        wrong_key = "test-server-secret.wrong-key-that-doesnt-exist"
+        result1 = manager.validate_request(f"Bearer {wrong_key}", "/agent")
+        assert result1["valid"] is False
+        # bcrypt not called because key not found in Redis
+        assert call_count == 0
+
+        # Try with correct key - should call bcrypt
+        result2 = manager.validate_request(f"Bearer {correct_key}", "/agent")
+        assert result2["valid"] is True
+        assert call_count == 1

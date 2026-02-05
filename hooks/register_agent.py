@@ -58,7 +58,7 @@ def register_with_coordinator(session_id: str) -> dict | None:
     )
 
     try:
-        with urlopen_with_ssl(req, timeout=5) as resp:
+        with urlopen_with_ssl(req, timeout=15) as resp:
             return json.loads(resp.read())
     except urllib.error.URLError as e:
         if os.environ.get("C3PO_DEBUG"):

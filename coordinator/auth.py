@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import secrets
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -53,11 +54,17 @@ class AuthManager:
     API_KEYS_HASH = "c3po:api_keys"      # sha256(api_key) → JSON metadata
     KEY_IDS_HASH = "c3po:key_ids"         # key_id → sha256(api_key)
 
+    # Cache TTL for successful bcrypt verifications (5 minutes)
+    AUTH_CACHE_TTL = 300
+
     def __init__(self, redis_client: Optional[redis.Redis] = None):
         self._server_secret = os.environ.get("C3PO_SERVER_SECRET", "")
         self._proxy_token = os.environ.get("C3PO_PROXY_BEARER_TOKEN", "")
         self._admin_key = os.environ.get("C3PO_ADMIN_KEY", "")
         self.redis = redis_client
+        # In-memory cache: sha256(api_key) → (expiry_timestamp, auth_result)
+        # This avoids expensive bcrypt.checkpw calls on every request
+        self._auth_cache: dict[str, tuple[float, dict]] = {}
 
     @property
     def auth_enabled(self) -> bool:
@@ -105,7 +112,12 @@ class AuthManager:
             return self._validate_proxy_token(token)
 
     def _validate_api_key(self, token: str) -> dict:
-        """Validate a server_secret.api_key token for /agent/* paths."""
+        """Validate a server_secret.api_key token for /agent/* paths.
+
+        Uses an in-memory cache to avoid expensive bcrypt.checkpw calls on
+        every request. After successful bcrypt verification, the result is
+        cached for AUTH_CACHE_TTL seconds (5 minutes by default).
+        """
         if not self._server_secret:
             return {"valid": False, "error": "Server secret not configured"}
 
@@ -130,6 +142,16 @@ class AuthManager:
             return {"valid": False, "error": "Redis not available for API key validation"}
 
         key_hash = _sha256(api_key)
+
+        # Check cache first (avoids bcrypt on every request)
+        cached = self._auth_cache.get(key_hash)
+        if cached is not None:
+            expiry, auth_result = cached
+            if time.time() < expiry:
+                return auth_result
+            # Cache expired, remove it
+            del self._auth_cache[key_hash]
+
         raw = self.redis.hget(self.API_KEYS_HASH, key_hash)
         if raw is None:
             logger.warning("auth_failed reason=unknown_api_key")
@@ -145,14 +167,20 @@ class AuthManager:
         if bcrypt_hash:
             if not bcrypt.checkpw(api_key.encode(), bcrypt_hash.encode()):
                 logger.warning("auth_failed reason=bcrypt_mismatch key_id=%s", metadata.get("key_id"))
+                # Do NOT cache failed bcrypt attempts
                 return {"valid": False, "error": "Invalid API key"}
 
-        return {
+        auth_result = {
             "valid": True,
             "source": "api_key",
             "key_id": metadata.get("key_id", ""),
             "agent_pattern": metadata.get("agent_pattern", "*"),
         }
+
+        # Cache successful validation
+        self._auth_cache[key_hash] = (time.time() + self.AUTH_CACHE_TTL, auth_result)
+
+        return auth_result
 
     def _validate_proxy_token(self, token: str) -> dict:
         """Validate proxy bearer token for /oauth/* paths."""
@@ -262,6 +290,9 @@ class AuthManager:
 
         if isinstance(key_hash, bytes):
             key_hash = key_hash.decode()
+
+        # Invalidate cache entry (if present)
+        self._auth_cache.pop(key_hash, None)
 
         # Remove from both hashes
         pipe = self.redis.pipeline()

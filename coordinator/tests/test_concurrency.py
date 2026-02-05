@@ -12,6 +12,7 @@ import fakeredis
 import pytest
 
 from coordinator.agents import AgentManager
+from coordinator.auth import AuthManager
 from coordinator.messaging import MessageManager
 from coordinator.rate_limit import RateLimiter
 from coordinator.server import _wait_for_message_impl
@@ -646,3 +647,135 @@ class TestMessageDeliveryLatency:
             # Ack the message before the next round
             msg_ids = [msg["id"] for msg in receive_time["result"]["messages"]]
             message_manager.ack_messages(agent, msg_ids)
+
+
+# ===========================================================================
+# 9. Auth validation latency under concurrent load
+# ===========================================================================
+
+class TestAuthConcurrency:
+    """Target: AuthManager._validate_api_key with caching under load"""
+
+    @pytest.fixture
+    def redis_client(self):
+        return fakeredis.FakeRedis()
+
+    @pytest.fixture
+    def auth_manager(self, redis_client, monkeypatch):
+        monkeypatch.setenv("C3PO_SERVER_SECRET", "test-secret")
+        monkeypatch.delenv("C3PO_PROXY_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("C3PO_ADMIN_KEY", raising=False)
+        return AuthManager(redis_client)
+
+    def test_concurrent_auth_does_not_starve_event_loop(self, auth_manager):
+        """Multiple concurrent auth validations should not block new requests.
+
+        With bcrypt caching, concurrent validations should complete quickly
+        because only the first call actually runs bcrypt.
+        """
+        # Create multiple API keys
+        keys = []
+        for i in range(8):
+            key_data = auth_manager.create_api_key(
+                agent_pattern=f"agent-{i}/*",
+                description=f"Test key {i}",
+            )
+            keys.append(key_data["api_key"])
+
+        # Pre-warm the cache by validating each key once
+        for key in keys:
+            result = auth_manager.validate_request(f"Bearer {key}", "/agent")
+            assert result["valid"] is True
+
+        # Now run concurrent validations from multiple threads
+        latencies = []
+        errors = []
+        lock = threading.Lock()
+
+        def validate(key_idx):
+            try:
+                key = keys[key_idx % len(keys)]
+                t0 = time.time()
+                result = auth_manager.validate_request(f"Bearer {key}", "/agent")
+                elapsed = time.time() - t0
+                with lock:
+                    latencies.append(elapsed)
+                assert result["valid"] is True
+            except Exception as e:
+                with lock:
+                    errors.append(f"Thread {key_idx}: {e}")
+
+        # Launch 20 concurrent validation requests
+        threads = [threading.Thread(target=validate, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert errors == [], f"Thread errors: {errors}"
+
+        # With caching, all validations should complete quickly (< 0.5s each)
+        # Without caching and real bcrypt, this would be ~1s each serially = 20s total
+        max_latency = max(latencies)
+        avg_latency = sum(latencies) / len(latencies)
+
+        assert max_latency < 2.0, f"Max latency {max_latency:.3f}s exceeds 2s threshold"
+        assert avg_latency < 0.5, f"Avg latency {avg_latency:.3f}s exceeds 0.5s threshold"
+
+    def test_new_request_during_concurrent_validations(self, auth_manager):
+        """A new request should not be blocked by ongoing validations."""
+        # Create keys
+        keys = []
+        for i in range(4):
+            key_data = auth_manager.create_api_key(agent_pattern=f"agent-{i}/*")
+            keys.append(key_data["api_key"])
+
+        barrier = threading.Barrier(5)  # 4 concurrent + 1 new request
+        latencies = {}
+        errors = []
+        lock = threading.Lock()
+
+        def concurrent_validator(idx):
+            try:
+                barrier.wait()
+                key = keys[idx]
+                t0 = time.time()
+                result = auth_manager.validate_request(f"Bearer {key}", "/agent")
+                elapsed = time.time() - t0
+                with lock:
+                    latencies[f"concurrent_{idx}"] = elapsed
+                assert result["valid"] is True
+            except Exception as e:
+                with lock:
+                    errors.append(f"Concurrent {idx}: {e}")
+
+        def new_request():
+            try:
+                barrier.wait()
+                time.sleep(0.1)  # Slight delay to ensure others started
+                # Use first key (should hit cache if pre-warmed, or run bcrypt once)
+                t0 = time.time()
+                result = auth_manager.validate_request(f"Bearer {keys[0]}", "/agent")
+                elapsed = time.time() - t0
+                with lock:
+                    latencies["new_request"] = elapsed
+                assert result["valid"] is True
+            except Exception as e:
+                with lock:
+                    errors.append(f"New request: {e}")
+
+        threads = [threading.Thread(target=concurrent_validator, args=(i,)) for i in range(4)]
+        threads.append(threading.Thread(target=new_request))
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert errors == [], f"Thread errors: {errors}"
+
+        # New request should complete within reasonable time (< 2s)
+        # With blocking bcrypt, it would need to wait for all 4 to complete
+        assert latencies["new_request"] < 2.0, (
+            f"New request took {latencies['new_request']:.3f}s - event loop was blocked"
+        )
