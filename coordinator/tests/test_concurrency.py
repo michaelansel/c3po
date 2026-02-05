@@ -504,10 +504,6 @@ class TestCompactionUnderLoad:
     def test_compaction_during_continuous_send(self, message_manager):
         """Send 25 (phase 1). Thread A acks 21 (compaction). Thread B sends 10.
         After both: all 4 un-acked phase-1 + all 10 phase-2 = 14 total.
-
-        Note: _compact_list (LRANGE then DELETE+RPUSH) is non-atomic, so
-        messages sent between LRANGE and DELETE may be lost. This test
-        documents that race condition — it will fail when the race triggers.
         """
         agent = "test/compactor"
         phase1 = []

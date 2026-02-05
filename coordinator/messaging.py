@@ -24,6 +24,54 @@ class MessageManager:
     RATE_LIMIT_WINDOW_SECONDS = 60  # Window size in seconds
     MESSAGE_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 
+    # Lua script for atomic list compaction.
+    # Removes acked entries from a Redis list without a race window.
+    # KEYS[1] = list key
+    # ARGV[1] = JSON array of acked IDs
+    # ARGV[2] = id_field name (e.g. "id")
+    # ARGV[3] = fallback_field name (or "" if none)
+    # ARGV[4] = TTL in seconds
+    _COMPACT_SCRIPT = """\
+local acked = cjson.decode(ARGV[1])
+local id_field = ARGV[2]
+local fallback = ARGV[3]
+local ttl = tonumber(ARGV[4])
+
+local acked_set = {}
+for _, id in ipairs(acked) do
+    acked_set[id] = true
+end
+
+local items = redis.call('LRANGE', KEYS[1], 0, -1)
+if #items == 0 then return 0 end
+
+redis.call('DEL', KEYS[1])
+
+local kept = 0
+for _, raw in ipairs(items) do
+    local ok, msg = pcall(cjson.decode, raw)
+    if ok then
+        local msg_id = msg[id_field]
+        if (not msg_id or msg_id == cjson.null) and fallback ~= '' then
+            msg_id = msg[fallback]
+        end
+        if not msg_id or msg_id == cjson.null or not acked_set[msg_id] then
+            redis.call('RPUSH', KEYS[1], raw)
+            kept = kept + 1
+        end
+    else
+        redis.call('RPUSH', KEYS[1], raw)
+        kept = kept + 1
+    end
+end
+
+if kept > 0 then
+    redis.call('EXPIRE', KEYS[1], ttl)
+end
+
+return kept
+"""
+
     def __init__(self, redis_client: redis.Redis):
         """Initialize with Redis client.
 
@@ -626,7 +674,8 @@ class MessageManager:
     ) -> None:
         """Remove acked entries from a single Redis list.
 
-        Uses pipeline: delete the list, then rpush back non-acked entries.
+        Uses a Lua script for atomicity — no messages can be lost between
+        reading the list and rewriting it.
 
         Args:
             key: Redis list key
@@ -634,26 +683,15 @@ class MessageManager:
             id_field: Primary field name to check for ID
             fallback_field: Optional fallback field for ID lookup
         """
-        raw_items = self.redis.lrange(key, 0, -1)
-        if not raw_items:
-            return
-
-        kept = []
-        for data in raw_items:
-            if isinstance(data, bytes):
-                data = data.decode()
-            msg = json.loads(data)
-            msg_id = msg.get(id_field) or (msg.get(fallback_field) if fallback_field else None)
-            if msg_id and msg_id in acked_ids:
-                continue
-            kept.append(data)
-
-        pipe = self.redis.pipeline()
-        pipe.delete(key)
-        if kept:
-            pipe.rpush(key, *kept)
-            pipe.expire(key, self.MESSAGE_TTL_SECONDS)
-        pipe.execute()
+        self.redis.eval(
+            self._COMPACT_SCRIPT,
+            1,
+            key,
+            json.dumps(list(acked_ids)),
+            id_field,
+            fallback_field or "",
+            str(self.MESSAGE_TTL_SECONDS),
+        )
 
     def get_messages(
         self,
