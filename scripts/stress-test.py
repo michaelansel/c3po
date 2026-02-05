@@ -19,10 +19,10 @@ Usage:
     python3 scripts/stress-test.py --senders 2 --msgs-per-sender 5 --quick
 
     # With auth — auto-enroll using admin token (creates stress/* API key)
-    python3 scripts/stress-test.py --url https://mcp.qerk.be/agent --admin-token '<admin_token>'
+    python3 scripts/stress-test.py --url https://mcp.qerk.be --admin-token '<admin_token>'
 
     # With auth — pre-existing API key
-    python3 scripts/stress-test.py --url https://mcp.qerk.be/agent --token '<api_token>'
+    python3 scripts/stress-test.py --url https://mcp.qerk.be --token '<api_token>'
 
 Phases:
     1. Warmup      — single ping to verify connectivity
@@ -72,7 +72,7 @@ async def mcp_session(url: str, agent_id: str, token: str | None = None):
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    mcp_url = f"{url.rstrip('/')}/mcp"
+    mcp_url = f"{url.rstrip('/')}/agent/mcp" if token else f"{url.rstrip('/')}/mcp"
     async with streamablehttp_client(mcp_url, headers=headers) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -119,17 +119,7 @@ async def enroll_stress_key(url: str, admin_token: str) -> str:
 
     Returns the composite API token to use for stress test sessions.
     """
-    # The admin endpoint is at /admin/api/keys relative to the base URL.
-    # If --url includes a path prefix (e.g. https://host/agent), strip it
-    # to find the base, then hit /admin/api/keys.
-    base_url = url.rstrip("/")
-    # Strip known prefixes to get the actual host
-    for suffix in ("/agent", "/oauth", "/admin"):
-        if base_url.endswith(suffix):
-            base_url = base_url[: -len(suffix)]
-            break
-
-    endpoint = f"{base_url}/admin/api/keys"
+    endpoint = f"{url.rstrip('/')}/admin/api/keys"
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             endpoint,
