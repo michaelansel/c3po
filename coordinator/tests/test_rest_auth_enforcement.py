@@ -256,6 +256,34 @@ class TestAdminEndpointsRequireAdminKey:
         assert "keys" in response.json()
 
 
+class TestAdminListAgentsRejectsUnauthenticated:
+    """GET /admin/api/agents requires admin key."""
+
+    @pytest.mark.asyncio
+    async def test_no_auth_header(self, client):
+        response = await client.get("/admin/api/agents")
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_wrong_key(self, client):
+        response = await client.get(
+            "/admin/api/agents",
+            headers={"Authorization": "Bearer wrong-admin-key"},
+        )
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_valid_admin_key(self, client):
+        response = await client.get(
+            "/admin/api/agents",
+            headers={"Authorization": _admin_auth()},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "agents" in data
+        assert "count" in data
+
+
 class TestValidateRejectsUnauthenticated:
     """GET /agent/api/validate requires valid API key."""
 

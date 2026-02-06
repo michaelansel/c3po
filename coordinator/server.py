@@ -825,12 +825,58 @@ async def api_admin_audit(request):
     return JSONResponse({"entries": entries, "count": len(entries)})
 
 
-@mcp.custom_route("/admin/api/agents", methods=["DELETE"])
-async def admin_bulk_remove_agents(request):
-    """Bulk-remove agents matching an fnmatch glob pattern.
+@mcp.custom_route("/admin/api/agents", methods=["GET"])
+async def admin_list_agents(request):
+    """List all agents with optional filtering by status and pattern.
 
     Requires admin key authentication.
-    Query param: pattern (e.g. ?pattern=stress/*)
+    Query params:
+        status: "online" or "offline" (optional)
+        pattern: fnmatch glob pattern (optional, e.g. "stress/*")
+    Returns: {"agents": [...], "count": N}
+    """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("error", "Authentication required")},
+            status_code=401,
+        )
+
+    # Rate limit by client IP
+    client_ip = _get_client_ip(request)
+    rate_resp = _check_rest_rate_limit(request, "admin_list_agents", client_ip)
+    if rate_resp:
+        return rate_resp
+
+    agents = agent_manager.list_agents()
+
+    # Filter by status
+    status_filter = request.query_params.get("status", "").strip().lower()
+    if status_filter:
+        if status_filter not in ("online", "offline"):
+            return JSONResponse(
+                {"error": "Invalid status filter. Must be 'online' or 'offline'."},
+                status_code=400,
+            )
+        agents = [a for a in agents if a.get("status") == status_filter]
+
+    # Filter by pattern
+    import fnmatch
+    pattern = request.query_params.get("pattern", "").strip()
+    if pattern:
+        agents = [a for a in agents if fnmatch.fnmatch(a["id"], pattern)]
+
+    return SecureJSONResponse({"agents": agents, "count": len(agents)})
+
+
+@mcp.custom_route("/admin/api/agents", methods=["DELETE"])
+async def admin_bulk_remove_agents(request):
+    """Bulk-remove agents matching an fnmatch glob pattern and/or status filter.
+
+    Requires admin key authentication.
+    Query params:
+        pattern: fnmatch glob (e.g. ?pattern=stress/*) — required unless status is set
+        status: "offline" — when set, only removes agents with this status
     Returns: {"status": "ok", "pattern": "...", "removed": N, "agent_ids": [...]}
     """
     auth_result = _authenticate_rest_request(request)
@@ -847,6 +893,43 @@ async def admin_bulk_remove_agents(request):
         return rate_resp
 
     pattern = request.query_params.get("pattern", "").strip()
+    status_filter = request.query_params.get("status", "").strip().lower()
+
+    if status_filter and status_filter not in ("online", "offline"):
+        return JSONResponse(
+            {"error": "Invalid status filter. Must be 'online' or 'offline'."},
+            status_code=400,
+        )
+
+    if not pattern and not status_filter:
+        return JSONResponse(
+            {"error": "Missing required query parameter: pattern (or status)"},
+            status_code=400,
+        )
+
+    # When status filter is provided, use list_agents + filter approach
+    if status_filter:
+        import fnmatch as fnmatch_mod
+        agents = agent_manager.list_agents()
+        # Filter by status
+        agents = [a for a in agents if a.get("status") == status_filter]
+        # Filter by pattern (default to * if not provided)
+        effective_pattern = pattern or "*"
+        agents = [a for a in agents if fnmatch_mod.fnmatch(a["id"], effective_pattern)]
+
+        ids_to_remove = [a["id"] for a in agents]
+        removed_ids = agent_manager.remove_agents_by_ids(ids_to_remove) if ids_to_remove else []
+        audit_logger.admin_bulk_remove(effective_pattern, len(removed_ids), removed_ids)
+
+        return SecureJSONResponse({
+            "status": "ok",
+            "pattern": effective_pattern,
+            "status_filter": status_filter,
+            "removed": len(removed_ids),
+            "agent_ids": removed_ids,
+        })
+
+    # Without status filter: existing pattern-only behavior
     if not pattern:
         return JSONResponse(
             {"error": "Missing required query parameter: pattern"},
@@ -855,7 +938,7 @@ async def admin_bulk_remove_agents(request):
 
     if pattern == "*":
         return JSONResponse(
-            {"error": "Refusing to remove all agents. Use a more specific pattern."},
+            {"error": "Refusing to remove all agents. Use a more specific pattern, or add status=offline."},
             status_code=400,
         )
 

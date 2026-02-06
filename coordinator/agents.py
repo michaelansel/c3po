@@ -307,6 +307,48 @@ class AgentManager:
         logger.info("agents_bulk_removed pattern=%s count=%d", pattern, len(removed))
         return removed
 
+    def remove_agents_by_ids(self, agent_ids: list[str], cleanup_keys: bool = True) -> list[str]:
+        """Remove specific agents by their IDs.
+
+        Args:
+            agent_ids: List of agent IDs to remove
+            cleanup_keys: If True, also delete associated Redis keys
+                (inbox, notify, responses, acked) for each removed agent
+
+        Returns:
+            List of actually removed agent IDs (excludes non-existent ones)
+        """
+        if not agent_ids:
+            return []
+
+        # Filter to only IDs that actually exist
+        existing = []
+        for agent_id in agent_ids:
+            if self._get_agent_raw(agent_id) is not None:
+                existing.append(agent_id)
+
+        if not existing:
+            return []
+
+        # Remove from agents hash
+        self.redis.hdel(self.AGENTS_KEY, *existing)
+
+        # Clean up associated Redis keys
+        if cleanup_keys:
+            keys_to_delete = []
+            for agent_id in existing:
+                keys_to_delete.extend([
+                    f"c3po:inbox:{agent_id}",
+                    f"c3po:notify:{agent_id}",
+                    f"c3po:responses:{agent_id}",
+                    f"c3po:acked:{agent_id}",
+                ])
+            if keys_to_delete:
+                self.redis.delete(*keys_to_delete)
+
+        logger.info("agents_removed_by_ids count=%d", len(existing))
+        return existing
+
     def count_online_agents(self) -> int:
         """Count the number of currently online agents.
 

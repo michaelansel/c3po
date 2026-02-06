@@ -97,6 +97,7 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 | `/agent/api/unregister` | API key bearer token | Hooks (SessionEnd) |
 | `/agent/api/validate` | API key bearer token | Entrypoints (pre-launch check) |
 | `/admin/api/keys` | Admin key | Enrollment (setup.py) |
+| `/admin/api/agents` | Admin key | Cleanup tool (list/remove agents) |
 | `/admin/api/audit` | Admin key | Admin tools |
 | `/api/health` | None (public) | Health checks |
 

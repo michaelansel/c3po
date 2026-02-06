@@ -353,6 +353,74 @@ class TestSetDescription:
         assert agents[0]["description"] == "My description"
 
 
+class TestRemoveByIds:
+    """Tests for remove_agents_by_ids."""
+
+    def test_removes_specific_agents(self, agent_manager):
+        """Should remove only the specified agent IDs."""
+        agent_manager.register_agent("agent/one")
+        agent_manager.register_agent("agent/two")
+        agent_manager.register_agent("agent/three")
+
+        removed = agent_manager.remove_agents_by_ids(["agent/one", "agent/three"])
+
+        assert sorted(removed) == ["agent/one", "agent/three"]
+        assert agent_manager.get_agent("agent/one") is None
+        assert agent_manager.get_agent("agent/two") is not None
+        assert agent_manager.get_agent("agent/three") is None
+
+    def test_ignores_nonexistent_ids(self, agent_manager):
+        """Should silently skip IDs that don't exist."""
+        agent_manager.register_agent("agent/real")
+
+        removed = agent_manager.remove_agents_by_ids(["agent/real", "agent/fake"])
+
+        assert removed == ["agent/real"]
+        assert agent_manager.get_agent("agent/real") is None
+
+    def test_empty_list_returns_empty(self, agent_manager):
+        """Should return empty list for empty input."""
+        agent_manager.register_agent("agent/exists")
+
+        removed = agent_manager.remove_agents_by_ids([])
+
+        assert removed == []
+        assert agent_manager.get_agent("agent/exists") is not None
+
+    def test_cleans_up_redis_keys(self, agent_manager, redis_client):
+        """Should delete associated Redis keys when cleanup_keys=True."""
+        agent_manager.register_agent("cleanup/test")
+
+        # Simulate Redis keys
+        redis_client.rpush("c3po:inbox:cleanup/test", "msg1")
+        redis_client.rpush("c3po:notify:cleanup/test", "notify1")
+        redis_client.rpush("c3po:responses:cleanup/test", "resp1")
+        redis_client.sadd("c3po:acked:cleanup/test", "acked1")
+
+        agent_manager.remove_agents_by_ids(["cleanup/test"])
+
+        assert redis_client.llen("c3po:inbox:cleanup/test") == 0
+        assert redis_client.llen("c3po:notify:cleanup/test") == 0
+        assert redis_client.llen("c3po:responses:cleanup/test") == 0
+        assert redis_client.scard("c3po:acked:cleanup/test") == 0
+
+    def test_preserves_redis_keys_when_cleanup_disabled(self, agent_manager, redis_client):
+        """Should preserve Redis keys when cleanup_keys=False."""
+        agent_manager.register_agent("cleanup/test")
+        redis_client.rpush("c3po:inbox:cleanup/test", "msg1")
+
+        agent_manager.remove_agents_by_ids(["cleanup/test"], cleanup_keys=False)
+
+        assert agent_manager.get_agent("cleanup/test") is None
+        assert redis_client.llen("c3po:inbox:cleanup/test") == 1
+
+    def test_all_nonexistent_returns_empty(self, agent_manager):
+        """Should return empty list when all IDs are nonexistent."""
+        removed = agent_manager.remove_agents_by_ids(["fake/one", "fake/two"])
+
+        assert removed == []
+
+
 class TestAnonymousSessions:
     """Tests for anonymous session handling (Claude.ai/Desktop)."""
 

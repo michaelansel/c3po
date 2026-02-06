@@ -535,6 +535,134 @@ class TestBlobDownloadEndpoint:
         assert response.content == binary_data
 
 
+class TestAdminListAgentsEndpoint:
+    """Tests for GET /admin/api/agents endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_list_returns_empty_when_no_agents(self, client):
+        """Should return empty list when no agents registered."""
+        response = await client.get("/admin/api/agents")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["agents"] == []
+        assert data["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_list_returns_agents_with_status(self, client, agent_manager):
+        """Should return agents with their status."""
+        agent_manager.register_agent("machine/proj1")
+        agent_manager.register_agent("machine/proj2")
+
+        response = await client.get("/admin/api/agents")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 2
+        agent_ids = {a["id"] for a in data["agents"]}
+        assert agent_ids == {"machine/proj1", "machine/proj2"}
+        # All freshly registered agents should be online
+        for agent in data["agents"]:
+            assert agent["status"] == "online"
+
+    @pytest.mark.asyncio
+    async def test_filter_by_status_online(self, client, agent_manager, redis_client):
+        """Should filter to only online agents."""
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        agent_manager.register_agent("machine/online-agent")
+        agent_manager.register_agent("machine/offline-agent")
+
+        # Make one agent offline
+        old_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + 10)
+        ).isoformat()
+        data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, "machine/offline-agent"))
+        data["last_seen"] = old_time
+        redis_client.hset(agent_manager.AGENTS_KEY, "machine/offline-agent", json.dumps(data))
+
+        response = await client.get("/admin/api/agents?status=online")
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["count"] == 1
+        assert result["agents"][0]["id"] == "machine/online-agent"
+
+    @pytest.mark.asyncio
+    async def test_filter_by_status_offline(self, client, agent_manager, redis_client):
+        """Should filter to only offline agents."""
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        agent_manager.register_agent("machine/online-agent")
+        agent_manager.register_agent("machine/offline-agent")
+
+        # Make one agent offline
+        old_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + 10)
+        ).isoformat()
+        data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, "machine/offline-agent"))
+        data["last_seen"] = old_time
+        redis_client.hset(agent_manager.AGENTS_KEY, "machine/offline-agent", json.dumps(data))
+
+        response = await client.get("/admin/api/agents?status=offline")
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["count"] == 1
+        assert result["agents"][0]["id"] == "machine/offline-agent"
+
+    @pytest.mark.asyncio
+    async def test_filter_by_pattern(self, client, agent_manager):
+        """Should filter agents by fnmatch pattern."""
+        agent_manager.register_agent("stress/sender-0")
+        agent_manager.register_agent("stress/sender-1")
+        agent_manager.register_agent("other/agent")
+
+        response = await client.get("/admin/api/agents?pattern=stress/*")
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["count"] == 2
+        agent_ids = {a["id"] for a in result["agents"]}
+        assert agent_ids == {"stress/sender-0", "stress/sender-1"}
+
+    @pytest.mark.asyncio
+    async def test_filter_by_status_and_pattern(self, client, agent_manager, redis_client):
+        """Should combine status and pattern filters."""
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        agent_manager.register_agent("stress/online")
+        agent_manager.register_agent("stress/offline")
+        agent_manager.register_agent("other/offline")
+
+        # Make some agents offline
+        old_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + 10)
+        ).isoformat()
+        for aid in ["stress/offline", "other/offline"]:
+            data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, aid))
+            data["last_seen"] = old_time
+            redis_client.hset(agent_manager.AGENTS_KEY, aid, json.dumps(data))
+
+        response = await client.get("/admin/api/agents?status=offline&pattern=stress/*")
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["count"] == 1
+        assert result["agents"][0]["id"] == "stress/offline"
+
+    @pytest.mark.asyncio
+    async def test_invalid_status_returns_400(self, client):
+        """Should reject invalid status values."""
+        response = await client.get("/admin/api/agents?status=invalid")
+
+        assert response.status_code == 400
+        assert "Invalid status" in response.json()["error"]
+
+
 class TestAdminBulkRemoveEndpoint:
     """Tests for DELETE /admin/api/agents endpoint."""
 
@@ -593,6 +721,96 @@ class TestAdminBulkRemoveEndpoint:
 
         assert response.status_code == 400
         assert "pattern" in response.json()["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_delete_with_status_offline_only_removes_offline(
+        self, client, agent_manager, redis_client
+    ):
+        """DELETE with status=offline should only remove offline agents."""
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        agent_manager.register_agent("test/online-agent")
+        agent_manager.register_agent("test/offline-agent")
+
+        # Make one agent offline
+        old_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + 10)
+        ).isoformat()
+        data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, "test/offline-agent"))
+        data["last_seen"] = old_time
+        redis_client.hset(agent_manager.AGENTS_KEY, "test/offline-agent", json.dumps(data))
+
+        response = await client.delete("/admin/api/agents?pattern=test/*&status=offline")
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["removed"] == 1
+        assert result["agent_ids"] == ["test/offline-agent"]
+
+        # Online agent should still exist
+        assert agent_manager.get_agent("test/online-agent") is not None
+        assert agent_manager.get_agent("test/offline-agent") is None
+
+    @pytest.mark.asyncio
+    async def test_delete_wildcard_with_status_is_allowed(
+        self, client, agent_manager, redis_client
+    ):
+        """DELETE with pattern=*&status=offline should be allowed (bypass * guard)."""
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        agent_manager.register_agent("a/online")
+        agent_manager.register_agent("b/offline")
+
+        # Make one agent offline
+        old_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + 10)
+        ).isoformat()
+        data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, "b/offline"))
+        data["last_seen"] = old_time
+        redis_client.hset(agent_manager.AGENTS_KEY, "b/offline", json.dumps(data))
+
+        response = await client.delete("/admin/api/agents?pattern=*&status=offline")
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["removed"] == 1
+        assert result["agent_ids"] == ["b/offline"]
+        assert agent_manager.get_agent("a/online") is not None
+
+    @pytest.mark.asyncio
+    async def test_delete_wildcard_without_status_still_rejected(self, client):
+        """DELETE with pattern=* without status should still be rejected."""
+        response = await client.delete("/admin/api/agents?pattern=*")
+
+        assert response.status_code == 400
+        assert "Refusing" in response.json()["error"]
+
+    @pytest.mark.asyncio
+    async def test_delete_with_status_only_no_pattern(
+        self, client, agent_manager, redis_client
+    ):
+        """DELETE with status=offline but no pattern should remove all offline."""
+        import json
+        from datetime import datetime, timedelta, timezone
+
+        agent_manager.register_agent("a/online")
+        agent_manager.register_agent("b/offline")
+
+        old_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + 10)
+        ).isoformat()
+        data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, "b/offline"))
+        data["last_seen"] = old_time
+        redis_client.hset(agent_manager.AGENTS_KEY, "b/offline", json.dumps(data))
+
+        response = await client.delete("/admin/api/agents?status=offline")
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["removed"] == 1
+        assert result["agent_ids"] == ["b/offline"]
 
 
 class TestValidateEndpoint:
