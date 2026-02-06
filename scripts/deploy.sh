@@ -296,6 +296,9 @@ limit_req_zone \$binary_remote_addr zone=c3po_admin:1m rate=5r/m;
 server {
     server_name mcp.qerk.be;
 
+    # Return 429 (not 503) when rate limit is exceeded
+    limit_req_status 429;
+
     # Security headers
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
@@ -323,7 +326,10 @@ server {
         if (\$agent_auth_valid = 0) {
             return 401 '{"error": "Unauthorized"}';
         }
-        limit_req zone=c3po_api burst=10 nodelay;
+        # Higher burst for MCP: each session does ~2 rapid requests on setup
+        # (initialize + register), so 10 concurrent sessions need burst>=20.
+        # 60 provides headroom for legitimate concurrent tool calls.
+        limit_req zone=c3po_api burst=60 nodelay;
         proxy_set_header X-C3PO-Auth-Path "/agent";
         rewrite ^/agent(/mcp)\$ \$1 break;
         proxy_pass http://c3po_coordinator;

@@ -43,6 +43,9 @@ server {
     listen 443 ssl http2;
     server_name c3po.example.com;  # TODO: Your domain
 
+    # Return 429 (not 503) when rate limit is exceeded
+    limit_req_status 429;
+
     # TLS configuration
     ssl_certificate /path/to/cert.pem;      # TODO: Your certificate
     ssl_certificate_key /path/to/key.pem;   # TODO: Your private key
@@ -81,7 +84,10 @@ server {
             return 401 '{"error": "Unauthorized"}';
         }
 
-        limit_req zone=c3po_api burst=10 nodelay;
+        # Higher burst for MCP: each session does ~2 rapid requests on setup
+        # (initialize + register), so 10 concurrent sessions need burst>=20.
+        # 60 provides headroom for legitimate concurrent tool calls.
+        limit_req zone=c3po_api burst=60 nodelay;
 
         proxy_pass http://c3po_coordinator;
         proxy_set_header Host $host;
