@@ -9,6 +9,7 @@ import os
 import re
 import signal
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -91,6 +92,10 @@ _wait_pool = concurrent.futures.ThreadPoolExecutor(max_workers=50)
 
 # Shutdown event: set on SIGTERM to gracefully drain wait_for_message calls.
 _shutdown_event = threading.Event()
+
+# Track active wait_for_message callers so the SIGTERM handler can wake them.
+_active_waiters: set[str] = set()
+_active_waiters_lock = threading.Lock()
 
 
 def _determine_path_prefix(path: str) -> str:
@@ -1039,11 +1044,17 @@ def _wait_for_message_impl(
         err = invalid_request("type", "must be 'message', 'reply', or omitted for both")
         raise ToolError(f"{err.message} {err.suggestion}")
     logger.info("wait_for_message agent=%s timeout=%d type=%s", agent_id, timeout, message_type)
-    result = msg_manager.wait_for_message(
-        agent_id, timeout, message_type,
-        heartbeat_fn=heartbeat_fn,
-        shutdown_event=shutdown_event,
-    )
+    with _active_waiters_lock:
+        _active_waiters.add(agent_id)
+    try:
+        result = msg_manager.wait_for_message(
+            agent_id, timeout, message_type,
+            heartbeat_fn=heartbeat_fn,
+            shutdown_event=shutdown_event,
+        )
+    finally:
+        with _active_waiters_lock:
+            _active_waiters.discard(agent_id)
     if result == "shutdown":
         return {
             "status": "retry",
@@ -1563,13 +1574,35 @@ def main():
     _real_signal_fn = signal.signal
 
     def _wrap_sigterm_handler(signum, handler):
-        if signum == signal.SIGTERM:
+        if signum == signal.SIGTERM and callable(handler):
             wrapped_handler = handler
 
             def _combined(sig, frame):
                 logger.info("SIGTERM received, shutting down gracefully")
+                # Set shutdown event — BLPOP threads check this between iterations.
                 _shutdown_event.set()
-                wrapped_handler(sig, frame)
+                # Do NOT do Redis or lock operations in the signal handler.
+                # Spawn a thread that wakes BLPOP threads via Redis, then after
+                # a grace period triggers uvicorn's shutdown. This gives FastMCP
+                # time to send HTTP responses before its session manager cancels
+                # in-flight tasks.
+                def _drain_and_shutdown():
+                    # Wake all BLPOP threads immediately by pushing to their notify
+                    # channels. This makes them detect _shutdown_event within ms
+                    # instead of waiting up to 10s for the BLPOP timeout.
+                    with _active_waiters_lock:
+                        waiters = list(_active_waiters)
+                    logger.info("Waking %d active wait_for_message callers", len(waiters))
+                    for agent_id in waiters:
+                        try:
+                            redis_client.rpush(f"c3po:notify:{agent_id}", "shutdown")
+                        except Exception:
+                            pass  # Best-effort; thread will detect on next BLPOP cycle
+                    # Give the event loop time to process BLPOP future resolutions
+                    # and send HTTP responses before shutdown begins.
+                    time.sleep(2)
+                    wrapped_handler(sig, frame)
+                threading.Thread(target=_drain_and_shutdown, daemon=True).start()
 
             return _real_signal_fn(signum, _combined)
         return _real_signal_fn(signum, handler)
