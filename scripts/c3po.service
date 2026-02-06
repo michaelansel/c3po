@@ -1,0 +1,26 @@
+# C3PO systemd user service
+# Install: cp scripts/c3po.service ~/.config/systemd/user/c3po.service
+# Logs:    journalctl --user -u c3po -f
+
+[Unit]
+Description=C3PO Multi-Agent Coordinator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/c3po
+EnvironmentFile=/home/ubuntu/c3po/.env
+ExecStartPre=/usr/bin/docker compose pull redis
+ExecStart=/usr/bin/docker compose up --remove-orphans
+ExecStop=/usr/bin/docker compose down
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=120
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=c3po
+
+[Install]
+WantedBy=default.target

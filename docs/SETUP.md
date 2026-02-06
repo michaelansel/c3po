@@ -277,6 +277,14 @@ export C3PO_COORDINATOR_URL=http://nas.local:8420
 
 ### Coordinator
 
+**Production (systemd):**
+```bash
+# On the server (or via: bash scripts/deploy.sh)
+systemctl --user restart c3po
+journalctl --user -u c3po -f   # watch logs
+```
+
+**Local development:**
 ```bash
 cd coordinator
 docker-compose pull
@@ -300,6 +308,12 @@ rm -rf ~/.claude/plugins/c3po
 
 ### Stop Coordinator
 
+**Production (systemd):**
+```bash
+systemctl --user stop c3po
+```
+
+**Local development:**
 ```bash
 cd coordinator
 docker-compose down -v  # -v removes data volumes

@@ -50,6 +50,11 @@ bash tests/acceptance/run-acceptance.sh
 ```bash
 bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints nginx sudo commands)
 # Enroll via: python3 setup.py --enroll https://mcp.qerk.be '<admin_token>'
+
+# Service management on the server:
+#   systemctl --user status c3po     # Check service status
+#   journalctl --user -u c3po -f     # Tail logs
+#   systemctl --user restart c3po    # Restart
 ```
 
 ## Architecture

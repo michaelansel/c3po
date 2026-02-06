@@ -217,28 +217,9 @@ chmod 600 ${REMOTE_DIR}/.env"
 # -------------------------------------------------------------------
 # Step 5: Create user-level systemd service
 # -------------------------------------------------------------------
-log "Creating systemd user service..."
+log "Installing systemd user service..."
 ssh_run "mkdir -p ~/.config/systemd/user"
-ssh_run "cat > ~/.config/systemd/user/c3po.service" << 'SERVICE_EOF'
-[Unit]
-Description=C3PO Multi-Agent Coordinator
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/home/ubuntu/c3po
-ExecStartPre=/usr/bin/docker compose pull redis
-ExecStart=/usr/bin/docker compose up --remove-orphans
-ExecStop=/usr/bin/docker compose down
-Restart=on-failure
-RestartSec=10
-TimeoutStartSec=120
-TimeoutStopSec=30
-
-[Install]
-WantedBy=default.target
-SERVICE_EOF
+scp "$PROJECT_DIR/scripts/c3po.service" "${REMOTE}:~/.config/systemd/user/c3po.service"
 
 log "Enabling and starting c3po service..."
 ssh_run "systemctl --user daemon-reload"
@@ -479,7 +460,7 @@ if ssh_run "curl -sf http://127.0.0.1:8420/api/health 2>/dev/null"; then
     log "Coordinator is UP and healthy!"
 else
     warn "Coordinator not responding yet (may still be starting)"
-    warn "Check logs with: ssh ${REMOTE} 'docker compose -f ~/c3po/docker-compose.yml logs'"
+    warn "Check logs with: ssh ${REMOTE} 'journalctl --user -u c3po --no-pager -n 50'"
 fi
 
 # -------------------------------------------------------------------

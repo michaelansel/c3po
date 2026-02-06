@@ -185,6 +185,9 @@ Use wait_for_request to listen for messages.
 
 Check coordinator logs for errors:
 ```bash
+# Production (systemd):
+journalctl --user -u c3po --no-pager -n 50
+# Local development:
 docker-compose logs coordinator
 ```
 
@@ -345,6 +348,9 @@ curl -s http://localhost:8420/api/health
 
 2. Coordinator logs:
 ```bash
+# Production (systemd):
+journalctl --user -u c3po --no-pager -n 50
+# Local development:
 docker-compose logs coordinator --tail=50
 ```
 

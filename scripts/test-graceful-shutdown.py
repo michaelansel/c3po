@@ -219,6 +219,7 @@ def run_remote_test(coordinator_url: str | None = None):
 
     print(f"Connecting to {coordinator_url}...")
     print(">>> Restart the coordinator now (within 30s) <<<")
+    print(">>> e.g.: ssh <server> 'systemctl --user restart c3po' <<<")
 
     try:
         result = asyncio.run(run_mcp_test(coordinator_url, headers))
