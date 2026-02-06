@@ -13,13 +13,15 @@ logger = logging.getLogger("c3po.rate_limit")
 
 
 # Rate limit configurations: (max_requests, window_seconds)
+# Per-agent MCP limits sized so ~10 concurrent agents can reach
+# 80% of measured server max (~230 req/s → 184 req/s target).
 RATE_LIMITS = {
-    "send_message": (100, 60),
-    "reply": (100, 60),
-    "get_messages": (30, 60),
-    "wait_for_message": (30, 60),
-    "ack_messages": (30, 60),
-    "list_agents": (30, 60),
+    "send_message": (200, 60),
+    "reply": (200, 60),
+    "get_messages": (100, 60),
+    "wait_for_message": (60, 60),
+    "ack_messages": (100, 60),
+    "list_agents": (60, 60),
     "rest_register": (5, 60),
     "rest_pending": (30, 60),
     "rest_unregister": (5, 60),

@@ -289,10 +289,15 @@ map \$http_authorization \$agent_auth_valid {
     default 0;
 }
 
-# Rate limit zones
-limit_req_zone \$binary_remote_addr zone=c3po_api:10m rate=30r/s;
-limit_req_zone \$binary_remote_addr zone=c3po_mcp:10m rate=100r/s;
-limit_req_zone \$binary_remote_addr zone=c3po_admin:1m rate=5r/m;
+# Rate limit zones — global limits protect the server overall,
+# per-IP limits (25% of global) prevent a single IP from monopolizing.
+# Global zones use \$server_name as key (constant per vhost = one shared bucket).
+limit_req_zone \$server_name zone=c3po_api_global:1m rate=30r/s;
+limit_req_zone \$server_name zone=c3po_mcp_global:1m rate=180r/s;
+limit_req_zone \$server_name zone=c3po_admin_global:1m rate=5r/m;
+limit_req_zone \$binary_remote_addr zone=c3po_api_ip:10m rate=8r/s;
+limit_req_zone \$binary_remote_addr zone=c3po_mcp_ip:10m rate=45r/s;
+limit_req_zone \$binary_remote_addr zone=c3po_admin_ip:1m rate=2r/m;
 
 server {
     server_name mcp.qerk.be;
@@ -310,7 +315,8 @@ server {
 
     # Health endpoint — exact match, no auth required
     location = /api/health {
-        limit_req zone=c3po_api burst=10 nodelay;
+        limit_req zone=c3po_api_global burst=10 nodelay;
+        limit_req zone=c3po_api_ip burst=3 nodelay;
         limit_except GET { deny all; }
         proxy_pass_request_headers off;
         proxy_pass_request_body off;
@@ -327,10 +333,8 @@ server {
         if (\$agent_auth_valid = 0) {
             return 401 '{"error": "Unauthorized"}';
         }
-        # Separate MCP zone: each session does ~2 rapid requests on setup
-        # (initialize + register) plus frequent tool calls. 10 concurrent
-        # sessions at ~3 calls/s each = ~30 sustained, with startup bursts.
-        limit_req zone=c3po_mcp burst=60 nodelay;
+        limit_req zone=c3po_mcp_global burst=100 nodelay;
+        limit_req zone=c3po_mcp_ip burst=25 nodelay;
         proxy_set_header X-C3PO-Auth-Path "/agent";
         rewrite ^/agent(/mcp)\$ \$1 break;
         proxy_pass http://c3po_coordinator;
@@ -351,7 +355,8 @@ server {
         if (\$agent_auth_valid = 0) {
             return 401 '{"error": "Unauthorized"}';
         }
-        limit_req zone=c3po_api burst=10 nodelay;
+        limit_req zone=c3po_api_global burst=10 nodelay;
+        limit_req zone=c3po_api_ip burst=3 nodelay;
         proxy_set_header X-C3PO-Auth-Path "/agent";
         proxy_pass http://c3po_coordinator;
         proxy_set_header Host \$host;
@@ -371,7 +376,8 @@ server {
         if (\$agent_auth_valid = 0) {
             return 401 '{"error": "Unauthorized"}';
         }
-        limit_req zone=c3po_admin burst=3 nodelay;
+        limit_req zone=c3po_admin_global burst=3 nodelay;
+        limit_req zone=c3po_admin_ip burst=1 nodelay;
         proxy_pass http://c3po_coordinator;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -410,7 +416,8 @@ server {
     # Strip /oauth prefix so auth-proxy receives /mcp (not /oauth/mcp),
     # which it then forwards to the coordinator at /mcp.
     location /oauth/ {
-        limit_req zone=c3po_api burst=20 nodelay;
+        limit_req zone=c3po_mcp_global burst=100 nodelay;
+        limit_req zone=c3po_mcp_ip burst=25 nodelay;
         rewrite ^/oauth(/.*)$ \$1 break;
         proxy_pass http://c3po_proxy;
         proxy_set_header Host \$host;
