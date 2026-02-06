@@ -481,20 +481,205 @@ async def phase_full_pipeline(
     }
 
 
-async def phase_cleanup(url: str, token: str | None):
-    """Phase 5: Clean up stress test artifacts."""
+async def phase_high_client_count(
+    url: str, token: str | None,
+    num_clients: int = 50,
+    msgs_per_client: int = 2,
+    setup_batch: int = 3,
+    send_interval: float = 0.15,
+):
+    """High client count test with staggered startup and messaging.
+
+    All clients are both senders and receivers. Sessions are established in
+    small batches to respect per-IP rate limits. Once all clients are ready,
+    messages are sent one-at-a-time with controlled pacing. Idle clients sit
+    in wait_for_message (single long-poll = ~0 rate limit cost).
+
+    Args:
+        num_clients: Total MCP sessions
+        msgs_per_client: Messages each client sends
+        setup_batch: Sessions to start per batch (with 1s pause between)
+        send_interval: Seconds between consecutive sends (across all clients)
+    """
+    total_msgs = num_clients * msgs_per_client
+    print(f"\n--- High Client Count ({num_clients} clients × "
+          f"{msgs_per_client} msgs each = {total_msgs} messages) ---")
+    print(f"  Setup: {setup_batch} sessions/batch, "
+          f"send interval: {send_interval:.2f}s")
+
+    # Shared coordination
+    all_ready = asyncio.Event()
+    ready_count = 0
+    ready_lock = asyncio.Lock()
+
+    # Send queue: client tasks pull from this to stagger sends globally
+    send_queue = asyncio.Queue()
+
+    # Results
+    errors = []
+    send_latencies = []
+    receive_latencies = []
+    delivered_count = 0
+    delivered_lock = asyncio.Lock()
+
+    async def client_work(idx: int):
+        nonlocal ready_count, delivered_count
+        agent_id = f"stress/client-{idx}"
+
+        try:
+            async with mcp_session(url, agent_id, token) as s:
+                await s.call_tool("register_agent", {"name": agent_id})
+
+                # Signal ready
+                async with ready_lock:
+                    ready_count += 1
+                    if ready_count >= num_clients:
+                        all_ready.set()
+
+                # Wait for all clients
+                await all_ready.wait()
+
+                # === SEND PHASE ===
+                # Wait for our turn(s) from the send queue
+                sends_remaining = msgs_per_client
+                while sends_remaining > 0:
+                    send_token = await send_queue.get()
+                    if send_token is None:
+                        break  # Poison pill
+                    target_idx = (idx + sends_remaining) % num_clients
+                    if target_idx == idx:
+                        target_idx = (idx + 1) % num_clients
+                    target = f"stress/client-{target_idx}"
+                    t0 = time.perf_counter()
+                    await s.call_tool("send_message", {
+                        "to": target,
+                        "message": f"from-{idx}-to-{target_idx}",
+                    })
+                    send_latencies.append((time.perf_counter() - t0) * 1000)
+                    sends_remaining -= 1
+
+                # === RECEIVE PHASE ===
+                # Each client expects to receive msgs_per_client messages
+                received = 0
+                deadline = time.perf_counter() + 60
+                while received < msgs_per_client and time.perf_counter() < deadline:
+                    t0 = time.perf_counter()
+                    result = await s.call_tool("wait_for_message", {"timeout": 10})
+                    parsed = parse_result(result)
+
+                    if isinstance(parsed, dict) and parsed.get("status") == "timeout":
+                        continue
+
+                    # Get and ack
+                    result = await s.call_tool("get_messages", {})
+                    parsed = parse_result(result)
+                    if isinstance(parsed, list) and parsed:
+                        msg_ids = []
+                        for m in parsed:
+                            mid = m.get("id") or m.get("reply_id")
+                            if mid:
+                                msg_ids.append(mid)
+                        if msg_ids:
+                            await s.call_tool("ack_messages", {"message_ids": msg_ids})
+                            cycle_ms = (time.perf_counter() - t0) * 1000
+                            received += len(msg_ids)
+                            for _ in msg_ids:
+                                receive_latencies.append(cycle_ms / len(msg_ids))
+                            async with delivered_lock:
+                                delivered_count += len(msg_ids)
+
+        except BaseException as e:
+            detail = f"{type(e).__name__}: {e}"
+            if isinstance(e, BaseExceptionGroup):
+                for sub in e.exceptions:
+                    detail += f"\n    sub: {type(sub).__name__}: {sub}"
+            errors.append(f"client-{idx}: {detail}")
+
+    # Launch clients in staggered batches
+    wall_start = time.perf_counter()
+    tasks = []
+    for batch_start in range(0, num_clients, setup_batch):
+        batch_end = min(batch_start + setup_batch, num_clients)
+        for idx in range(batch_start, batch_end):
+            tasks.append(asyncio.create_task(client_work(idx)))
+        setup_pct = batch_end * 100 // num_clients
+        print(f"  Setup: {batch_end}/{num_clients} sessions ({setup_pct}%)...",
+              end="\r", flush=True)
+        if batch_end < num_clients:
+            await asyncio.sleep(1.0)
+
+    # Wait for all to register
+    print(f"  Setup: {num_clients}/{num_clients} sessions (100%)    ")
+    try:
+        await asyncio.wait_for(all_ready.wait(), timeout=120)
+    except asyncio.TimeoutError:
+        print(f"  TIMEOUT waiting for all clients to register "
+              f"({ready_count}/{num_clients} ready)")
+        return {"errors": 1}
+    setup_ms = (time.perf_counter() - wall_start) * 1000
+    print(f"  All {num_clients} clients registered in {setup_ms:.0f}ms")
+
+    # Feed the send queue: round-robin through clients, one send at a time
+    # Each client gets msgs_per_client turns
+    send_start = time.perf_counter()
+    for round_num in range(msgs_per_client):
+        for client_idx in range(num_clients):
+            await send_queue.put(True)  # Signal one client to send
+            await asyncio.sleep(send_interval)
+    send_phase_ms = (time.perf_counter() - send_start) * 1000
+    print(f"  Send phase complete: {total_msgs} messages in {send_phase_ms:.0f}ms "
+          f"({total_msgs / (send_phase_ms / 1000):.1f} msgs/s)")
+
+    # Wait for all clients to finish receiving
+    await asyncio.gather(*tasks, return_exceptions=True)
+    wall_ms = (time.perf_counter() - wall_start) * 1000
+
+    # Results
+    if errors:
+        print(f"  ERRORS ({len(errors)}):")
+        for e in errors[:10]:
+            print(f"    {e}")
+
+    loss = total_msgs - delivered_count
+    throughput = delivered_count / (wall_ms / 1000) if wall_ms > 0 else 0
+
+    print(f"  clients:        {num_clients}")
+    print(f"  sent:           {total_msgs} messages")
+    print(f"  delivered:      {delivered_count} messages ({loss} lost)")
+    print(f"  send latency:   {fmt_stats(send_latencies)}")
+    print(f"  receive cycle:  {fmt_stats(receive_latencies)}")
+    print(f"  wall time:      {wall_ms:.0f}ms")
+    print(f"  throughput:     {throughput:.1f} delivered msgs/s")
+    print(f"  errors:         {len(errors)}")
+
+    return {
+        "clients": num_clients,
+        "sent": total_msgs,
+        "delivered": delivered_count,
+        "loss": loss,
+        "send_latencies": send_latencies,
+        "receive_latencies": receive_latencies,
+        "wall_ms": wall_ms,
+        "throughput": throughput,
+        "errors": len(errors),
+    }
+
+
+async def phase_cleanup(url: str, token: str | None, num_clients: int = 0):
+    """Clean up stress test artifacts."""
     print("\n--- Cleanup ---")
     agents_to_clean = [
         "stress/baseline", "stress/sink", "stress/throughput-target",
         "stress/waiter", "stress/peek-target", "stress/filler",
         "stress/warmup",
     ]
-    # Also clean sender/listener agents
-    for i in range(20):
+    # Also clean sender/listener/client agents
+    for i in range(max(20, num_clients)):
         agents_to_clean.append(f"stress/sender-{i}")
         agents_to_clean.append(f"stress/pinger-{i}")
         agents_to_clean.append(f"stress/listener-{i}")
         agents_to_clean.append(f"stress/pipeline-sender-{i}")
+        agents_to_clean.append(f"stress/client-{i}")
 
     cleaned = 0
     for agent in agents_to_clean:
@@ -525,7 +710,6 @@ async def phase_cleanup(url: str, token: str | None):
 async def run(args):
     print(f"C3PO Stress Test")
     print(f"Target: {args.url}")
-    print(f"Config: {args.senders} senders × {args.msgs_per_sender} msgs/sender")
 
     # Auto-enroll if admin token provided
     if args.admin_token:
@@ -542,6 +726,38 @@ async def run(args):
     if not await phase_warmup(args.url, args.token):
         print("\nAborted: coordinator not reachable.")
         return 1
+
+    # High client count mode: skip standard phases
+    if args.high_clients > 0:
+        print(f"Mode: high client count ({args.high_clients} clients)")
+        result = await phase_high_client_count(
+            args.url, args.token,
+            num_clients=args.high_clients,
+            msgs_per_client=args.msgs_per_client,
+            send_interval=args.send_interval,
+        )
+        await phase_cleanup(args.url, args.token, num_clients=args.high_clients)
+
+        print("\n" + "=" * 60)
+        print("SUMMARY")
+        print("=" * 60)
+        print(f"  Clients:        {result['clients']}")
+        print(f"  Sent:           {result['sent']}")
+        print(f"  Delivered:      {result['delivered']}/{result['sent']} "
+              f"({result['loss']} lost)")
+        print(f"  Send latency:   {fmt_stats(result['send_latencies'])}")
+        print(f"  Receive cycle:  {fmt_stats(result['receive_latencies'])}")
+        print(f"  Wall time:      {result['wall_ms']:.0f}ms")
+        print(f"  Throughput:     {result['throughput']:.1f} delivered msgs/s")
+
+        if result["errors"]:
+            print(f"\n  Total errors: {result['errors']}")
+            return 1
+        print("\nAll phases completed successfully.")
+        return 0
+
+    # Standard mode
+    print(f"Config: {args.senders} senders × {args.msgs_per_sender} msgs/sender")
 
     results = {}
     results["baseline"] = await phase_baseline(args.url, args.token)
@@ -652,6 +868,19 @@ def main():
     parser.add_argument(
         "--quick", action="store_true",
         help="Quick mode: only run baseline (skip throughput/wait/peek)",
+    )
+    parser.add_argument(
+        "--high-clients", type=int, default=0, metavar="N",
+        help="Run high client count test with N clients (e.g., 50). "
+             "Skips standard phases; runs staggered setup + messaging test.",
+    )
+    parser.add_argument(
+        "--msgs-per-client", type=int, default=2,
+        help="Messages per client in --high-clients mode (default: 2)",
+    )
+    parser.add_argument(
+        "--send-interval", type=float, default=0.15,
+        help="Seconds between sends in --high-clients mode (default: 0.15)",
     )
 
     args = parser.parse_args()
