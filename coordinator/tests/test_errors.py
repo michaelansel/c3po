@@ -14,6 +14,7 @@ from coordinator.server import (
 )
 from coordinator.agents import AgentManager
 from coordinator.messaging import MessageManager
+from coordinator.rate_limit import RateLimiter, RATE_LIMITS
 from coordinator.errors import (
     ErrorCodes,
     agent_not_found,
@@ -167,25 +168,36 @@ class TestRateLimiting:
         assert is_allowed
 
     def test_send_message_rate_limited(
-        self, message_manager, agent_manager
+        self, redis_client, message_manager, agent_manager
     ):
         """send_message rejects when rate limited."""
+        import coordinator.server as server_module
+
         agent_manager.register_agent("sender")
         agent_manager.register_agent("target")
 
-        # Max out the rate limit
-        for _ in range(message_manager.RATE_LIMIT_REQUESTS):
-            message_manager.record_request("sender")
+        # Use a RateLimiter backed by the same fakeredis
+        test_rate_limiter = RateLimiter(redis_client)
+        original = server_module.rate_limiter
+        server_module.rate_limiter = test_rate_limiter
 
-        with pytest.raises(ToolError) as exc_info:
-            _send_message_impl(
-                message_manager,
-                agent_manager,
-                "sender",
-                "target",
-                "Hello"
-            )
-        assert "Rate limit exceeded" in str(exc_info.value)
+        try:
+            # Max out the central rate limit for send_message
+            limit = RATE_LIMITS["send_message"][0]
+            for _ in range(limit):
+                test_rate_limiter.check_and_record("send_message", "sender")
+
+            with pytest.raises(ToolError) as exc_info:
+                _send_message_impl(
+                    message_manager,
+                    agent_manager,
+                    "sender",
+                    "target",
+                    "Hello"
+                )
+            assert "Rate limit exceeded" in str(exc_info.value)
+        finally:
+            server_module.rate_limiter = original
 
 
 class TestMessageExpiration:

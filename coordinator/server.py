@@ -904,14 +904,12 @@ def _send_message_impl(
         )
         raise ToolError(f"{err.message} {err.suggestion}")
 
-    # Check rate limit
-    is_allowed, current_count = msg_manager.check_rate_limit(from_agent)
-    if not is_allowed:
-        err = rate_limited(
-            from_agent,
-            msg_manager.RATE_LIMIT_REQUESTS,
-            msg_manager.RATE_LIMIT_WINDOW_SECONDS
-        )
+    # Check rate limit (uses central rate_limiter, not legacy msg_manager limits)
+    allowed, count = rate_limiter.check_and_record("send_message", from_agent)
+    if not allowed:
+        from coordinator.rate_limit import RATE_LIMITS
+        limit_config = RATE_LIMITS.get("send_message", (200, 60))
+        err = rate_limited(from_agent, limit_config[0], limit_config[1])
         logger.warning("send_rejected from=%s to=%s reason=rate_limited", from_agent, to)
         raise ToolError(f"{err.message} {err.suggestion}")
 
@@ -924,9 +922,6 @@ def _send_message_impl(
         err = agent_not_found(to, agent_ids)
         logger.warning("send_rejected from=%s to=%s reason=agent_not_found", from_agent, to)
         raise ToolError(f"{err.message} {err.suggestion}")
-
-    # Record request for rate limiting
-    msg_manager.record_request(from_agent)
 
     return msg_manager.send_message(from_agent, to, message, context)
 
