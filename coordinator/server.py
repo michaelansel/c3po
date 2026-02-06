@@ -559,6 +559,56 @@ async def api_unregister(request):
         )
 
 
+@mcp.custom_route("/agent/api/validate", methods=["GET"])
+async def api_validate(request):
+    """Validate an API token and optionally check agent_pattern compatibility.
+
+    Used by entrypoints (e.g. claude-code-docker) to verify credentials
+    before launching a session. Returns proper HTTP status codes unlike
+    the MCP endpoint which always returns 200 at the transport level.
+
+    Optional query param: machine_name — if provided, probes
+    "{machine_name}/probe" against the token's agent_pattern.
+
+    Returns:
+        200: {"valid": true, "key_id": "...", "agent_pattern": "..."}
+        401: invalid/missing token
+        403: token valid but pattern doesn't match machine_name
+        429: rate limited
+    """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("error", "Authentication required")},
+            status_code=401,
+        )
+
+    # Rate limit by client IP
+    client_ip = _get_client_ip(request)
+    rate_resp = _check_rest_rate_limit(request, "rest_validate", client_ip)
+    if rate_resp:
+        return rate_resp
+
+    key_id = auth_result.get("key_id", "")
+    agent_pattern = auth_result.get("agent_pattern", "*")
+
+    # Optional: check if machine_name matches agent_pattern
+    machine_name = request.query_params.get("machine_name", "").strip()
+    if machine_name:
+        probe_id = f"{machine_name}/probe"
+        if agent_pattern != "*" and not AuthManager.validate_agent_pattern(probe_id, agent_pattern):
+            return JSONResponse(
+                {"error": f"Token pattern '{agent_pattern}' does not authorize '{machine_name}' agents"},
+                status_code=403,
+            )
+
+    return SecureJSONResponse({
+        "valid": True,
+        "key_id": key_id,
+        "agent_pattern": agent_pattern,
+    })
+
+
 # ============================================================
 # Blob endpoints (/agent/api/blob*) — API key auth
 # ============================================================

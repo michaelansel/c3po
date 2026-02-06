@@ -593,3 +593,27 @@ class TestAdminBulkRemoveEndpoint:
 
         assert response.status_code == 400
         assert "pattern" in response.json()["error"].lower()
+
+
+class TestValidateEndpoint:
+    """Tests for GET /agent/api/validate endpoint (dev mode, no auth)."""
+
+    @pytest.mark.asyncio
+    async def test_validate_returns_200(self, client):
+        """Validate endpoint should return 200 with valid/key_id/agent_pattern."""
+        response = await client.get("/agent/api/validate")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["valid"] is True
+        assert "key_id" in data
+        assert "agent_pattern" in data
+
+    @pytest.mark.asyncio
+    async def test_validate_with_machine_name(self, client):
+        """Validate with machine_name should pass (wildcard pattern in dev mode)."""
+        response = await client.get("/agent/api/validate?machine_name=docker")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["valid"] is True

@@ -30,6 +30,7 @@ RATE_LIMITS = {
     "rest_blob_upload": (10, 60),
     "rest_blob_download": (30, 60),
     "admin_bulk_remove": (5, 60),
+    "rest_validate": (10, 60),
 }
 
 

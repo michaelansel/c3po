@@ -254,3 +254,96 @@ class TestAdminEndpointsRequireAdminKey:
         )
         assert response.status_code == 200
         assert "keys" in response.json()
+
+
+class TestValidateRejectsUnauthenticated:
+    """GET /agent/api/validate requires valid API key."""
+
+    @pytest.mark.asyncio
+    async def test_no_auth_header(self, client):
+        response = await client.get("/agent/api/validate")
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_invalid_bearer_token(self, client):
+        response = await client.get(
+            "/agent/api/validate",
+            headers={"Authorization": "Bearer wrong-secret.wrong-key"},
+        )
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_valid_api_key_succeeds(self, client):
+        import coordinator.server as server_module
+        api_token = server_module._test_api_key
+
+        response = await client.get(
+            "/agent/api/validate",
+            headers={"Authorization": f"Bearer {api_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["valid"] is True
+        assert "key_id" in data
+        assert "agent_pattern" in data
+
+
+class TestValidatePatternCheck:
+    """GET /agent/api/validate with machine_name checks agent_pattern."""
+
+    @pytest.fixture
+    def scoped_auth_app(self, redis_client, monkeypatch):
+        """Create MCP app with a docker/* scoped API key."""
+        monkeypatch.setenv("C3PO_SERVER_SECRET", SERVER_SECRET)
+        monkeypatch.setenv("C3PO_ADMIN_KEY", ADMIN_KEY)
+        monkeypatch.setenv("C3PO_PROXY_BEARER_TOKEN", PROXY_TOKEN)
+
+        import coordinator.server as server_module
+
+        auth_mgr = AuthManager(redis_client)
+        # Create an API key scoped to docker/*
+        key_data = auth_mgr.create_api_key(agent_pattern="docker/*", description="docker-only")
+
+        monkeypatch.setattr(server_module, "redis_client", redis_client)
+        monkeypatch.setattr(server_module, "agent_manager", AgentManager(redis_client))
+        monkeypatch.setattr(server_module, "message_manager", MessageManager(redis_client))
+        monkeypatch.setattr(server_module, "auth_manager", auth_mgr)
+        monkeypatch.setattr(server_module, "rate_limiter", RateLimiter(redis_client))
+        monkeypatch.setattr(server_module, "audit_logger", AuditLogger(redis_client))
+
+        server_module._test_scoped_api_key = key_data["api_key"]
+        return server_module.mcp.http_app()
+
+    @pytest_asyncio.fixture
+    async def scoped_client(self, scoped_auth_app):
+        transport = ASGITransport(app=scoped_auth_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+
+    @pytest.mark.asyncio
+    async def test_matching_machine_name_returns_200(self, scoped_client):
+        """machine_name=docker should match docker/* pattern."""
+        import coordinator.server as server_module
+        api_token = server_module._test_scoped_api_key
+
+        response = await scoped_client.get(
+            "/agent/api/validate?machine_name=docker",
+            headers={"Authorization": f"Bearer {api_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["valid"] is True
+        assert data["agent_pattern"] == "docker/*"
+
+    @pytest.mark.asyncio
+    async def test_non_matching_machine_name_returns_403(self, scoped_client):
+        """machine_name=laptop should NOT match docker/* pattern."""
+        import coordinator.server as server_module
+        api_token = server_module._test_scoped_api_key
+
+        response = await scoped_client.get(
+            "/agent/api/validate?machine_name=laptop",
+            headers={"Authorization": f"Bearer {api_token}"},
+        )
+        assert response.status_code == 403
+        assert "does not authorize" in response.json()["error"]
