@@ -1,5 +1,7 @@
 """Tests for C3PO coordinator server."""
 
+import asyncio
+
 import pytest
 
 import fakeredis
@@ -201,6 +203,39 @@ class TestWaitForMessageImpl:
             shutdown_event=shutdown,
         )
         assert result["status"] == "timeout"
+
+
+class TestWaitForMessageCancelledError:
+    """Tests for CancelledError handling in the async wait_for_message wrapper."""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_returns_retry(self):
+        """When uvicorn cancels the executor future, wait_for_message should return retry dict."""
+        from unittest.mock import MagicMock, patch
+
+        # Import the async tool function (decorated with @mcp.tool())
+        from coordinator.server import wait_for_message
+
+        # Access the underlying coroutine function from the FunctionTool wrapper
+        fn = wait_for_message.fn
+
+        # Mock context with agent identity
+        mock_ctx = MagicMock()
+        mock_ctx.session.state = {"agent_id": "test/agent"}
+
+        # Patch _resolve_agent_id and _enforce_agent_pattern to skip auth checks,
+        # then patch run_in_executor to raise CancelledError
+        with patch("coordinator.server._resolve_agent_id", return_value="test/agent"), \
+             patch("coordinator.server._enforce_agent_pattern"):
+            # Create a future that raises CancelledError
+            fut = asyncio.get_running_loop().create_future()
+            fut.cancel()
+            with patch.object(asyncio.get_running_loop(), "run_in_executor", return_value=fut):
+                result = await fn(mock_ctx, timeout=60)
+
+        assert result["status"] == "retry"
+        assert result["retry_after"] == 15
+        assert "restarting" in result["message"].lower()
 
 
 @pytest.fixture

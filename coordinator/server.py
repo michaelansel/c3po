@@ -1305,14 +1305,21 @@ async def wait_for_message(
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
     _enforce_agent_pattern(ctx, effective_id)
-    return await asyncio.get_running_loop().run_in_executor(
-        _wait_pool,
-        functools.partial(
-            _wait_for_message_impl, message_manager, effective_id, timeout, type,
-            heartbeat_fn=lambda: agent_manager.touch_heartbeat(effective_id),
-            shutdown_event=_shutdown_event,
-        ),
-    )
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            _wait_pool,
+            functools.partial(
+                _wait_for_message_impl, message_manager, effective_id, timeout, type,
+                heartbeat_fn=lambda: agent_manager.touch_heartbeat(effective_id),
+                shutdown_event=_shutdown_event,
+            ),
+        )
+    except asyncio.CancelledError:
+        return {
+            "status": "retry",
+            "message": "Server is restarting. Please call wait_for_message again in 15 seconds.",
+            "retry_after": 15,
+        }
 
 
 def _ack_messages_impl(
@@ -1549,13 +1556,32 @@ def main():
     except redis.RedisError as e:
         raise RedisConnectionError(REDIS_URL, e) from e
 
-    def _handle_sigterm(signum, frame):
-        logger.info("SIGTERM received, shutting down gracefully")
-        _shutdown_event.set()
+    # Intercept signal.signal so that when uvicorn installs its SIGTERM handler
+    # (overriding ours), we wrap it to also set _shutdown_event.  This lets
+    # BLPOP threads detect shutdown within one polling cycle (~10s) instead of
+    # waiting for the full graceful-shutdown timeout.
+    _real_signal_fn = signal.signal
 
-    signal.signal(signal.SIGTERM, _handle_sigterm)
+    def _wrap_sigterm_handler(signum, handler):
+        if signum == signal.SIGTERM:
+            wrapped_handler = handler
 
-    mcp.run(transport="http", host=host, port=port, stateless_http=True)
+            def _combined(sig, frame):
+                logger.info("SIGTERM received, shutting down gracefully")
+                _shutdown_event.set()
+                wrapped_handler(sig, frame)
+
+            return _real_signal_fn(signum, _combined)
+        return _real_signal_fn(signum, handler)
+
+    signal.signal = _wrap_sigterm_handler  # type: ignore[assignment]
+    try:
+        mcp.run(
+            transport="http", host=host, port=port, stateless_http=True,
+            uvicorn_config={"timeout_graceful_shutdown": 12},
+        )
+    finally:
+        signal.signal = _real_signal_fn  # type: ignore[assignment]
 
 
 if __name__ == "__main__":
