@@ -665,15 +665,51 @@ async def phase_high_client_count(
     }
 
 
-async def phase_cleanup(url: str, token: str | None, num_clients: int = 0):
+async def cleanup_agents_rest(url: str, admin_token: str | None) -> int | None:
+    """Bulk-remove all stress/* agents via the admin REST endpoint.
+
+    Returns the number of agents removed on success, or None if unavailable.
+    """
+    if not admin_token:
+        return None
+    endpoint = f"{url.rstrip('/')}/admin/api/agents"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.request(
+                "DELETE", endpoint,
+                params={"pattern": "stress/*"},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("removed", 0)
+            else:
+                print(f"  Warning: bulk remove returned {resp.status_code}: {resp.text[:200]}")
+                return None
+    except Exception as e:
+        print(f"  Warning: bulk remove failed: {e}")
+        return None
+
+
+async def phase_cleanup(
+    url: str, token: str | None, num_clients: int = 0,
+    admin_token: str | None = None,
+):
     """Clean up stress test artifacts."""
     print("\n--- Cleanup ---")
+
+    # Try bulk removal first (fast, removes agents + Redis keys in one call)
+    removed = await cleanup_agents_rest(url, admin_token)
+    if removed is not None:
+        print(f"  Bulk-removed {removed} stress/* agents via admin endpoint.")
+        return
+
+    # Fallback: per-agent MCP cleanup (when no admin token available)
     agents_to_clean = [
         "stress/baseline", "stress/sink", "stress/throughput-target",
         "stress/waiter", "stress/peek-target", "stress/filler",
         "stress/warmup",
     ]
-    # Also clean sender/listener/client agents
     for i in range(max(20, num_clients)):
         agents_to_clean.append(f"stress/sender-{i}")
         agents_to_clean.append(f"stress/pinger-{i}")
@@ -683,22 +719,32 @@ async def phase_cleanup(url: str, token: str | None, num_clients: int = 0):
 
     cleaned = 0
     for agent in agents_to_clean:
-        try:
-            async with mcp_session(url, agent, token) as s:
-                await s.call_tool("register_agent", {"name": agent})
-                result = await s.call_tool("get_messages", {})
-                parsed = parse_result(result)
-                if isinstance(parsed, list) and parsed:
-                    msg_ids = []
-                    for m in parsed:
-                        mid = m.get("id") or m.get("reply_id")
-                        if mid:
-                            msg_ids.append(mid)
-                    if msg_ids:
-                        await s.call_tool("ack_messages", {"message_ids": msg_ids})
-                        cleaned += len(msg_ids)
-        except Exception:
-            pass
+        retries = 0
+        while retries < 3:
+            try:
+                async with mcp_session(url, agent, token) as s:
+                    await s.call_tool("register_agent", {"name": agent})
+                    result = await s.call_tool("get_messages", {})
+                    parsed = parse_result(result)
+                    if isinstance(parsed, list) and parsed:
+                        msg_ids = []
+                        for m in parsed:
+                            mid = m.get("id") or m.get("reply_id")
+                            if mid:
+                                msg_ids.append(mid)
+                        if msg_ids:
+                            await s.call_tool("ack_messages", {"message_ids": msg_ids})
+                            cleaned += len(msg_ids)
+                break  # Success, move to next agent
+            except Exception as e:
+                err_str = str(e).lower()
+                if "rate" in err_str or "429" in err_str:
+                    retries += 1
+                    backoff = 2 ** retries  # 2s, 4s, 8s
+                    print(f"  Rate limited on {agent}, retrying in {backoff}s...")
+                    await asyncio.sleep(backoff)
+                else:
+                    break  # Non-rate-limit error, skip this agent
 
     print(f"  Acked {cleaned} leftover messages.")
 
@@ -710,6 +756,15 @@ async def phase_cleanup(url: str, token: str | None, num_clients: int = 0):
 async def run(args):
     print(f"C3PO Stress Test")
     print(f"Target: {args.url}")
+
+    # --cleanup-only mode: just clean up and exit (no enrollment needed)
+    if args.cleanup_only:
+        await phase_cleanup(
+            args.url, args.token,
+            num_clients=max(200, args.high_clients),
+            admin_token=args.admin_token,
+        )
+        return 0
 
     # Auto-enroll if admin token provided
     if args.admin_token:
@@ -730,13 +785,16 @@ async def run(args):
     # High client count mode: skip standard phases
     if args.high_clients > 0:
         print(f"Mode: high client count ({args.high_clients} clients)")
-        result = await phase_high_client_count(
-            args.url, args.token,
-            num_clients=args.high_clients,
-            msgs_per_client=args.msgs_per_client,
-            send_interval=args.send_interval,
-        )
-        await phase_cleanup(args.url, args.token, num_clients=args.high_clients)
+        try:
+            result = await phase_high_client_count(
+                args.url, args.token,
+                num_clients=args.high_clients,
+                msgs_per_client=args.msgs_per_client,
+                send_interval=args.send_interval,
+            )
+        finally:
+            await phase_cleanup(args.url, args.token, num_clients=args.high_clients,
+                                admin_token=args.admin_token)
 
         print("\n" + "=" * 60)
         print("SUMMARY")
@@ -760,30 +818,31 @@ async def run(args):
     print(f"Config: {args.senders} senders × {args.msgs_per_sender} msgs/sender")
 
     results = {}
-    results["baseline"] = await phase_baseline(args.url, args.token)
+    try:
+        results["baseline"] = await phase_baseline(args.url, args.token)
 
-    if not args.quick:
-        results["throughput"] = await phase_throughput(
-            args.url, args.token,
-            senders=args.senders,
-            msgs_per_sender=args.msgs_per_sender,
-        )
-        results["wait"] = await phase_wait_latency(
-            args.url, args.token,
-            rounds=args.wait_rounds,
-        )
-        results["peek"] = await phase_peek_under_load(
-            args.url, args.token,
-            inbox_size=args.inbox_size,
-        )
-        results["pipeline"] = await phase_full_pipeline(
-            args.url, args.token,
-            senders=args.senders,
-            listeners=args.listeners,
-            msgs_per_sender=args.msgs_per_sender,
-        )
-
-    await phase_cleanup(args.url, args.token)
+        if not args.quick:
+            results["throughput"] = await phase_throughput(
+                args.url, args.token,
+                senders=args.senders,
+                msgs_per_sender=args.msgs_per_sender,
+            )
+            results["wait"] = await phase_wait_latency(
+                args.url, args.token,
+                rounds=args.wait_rounds,
+            )
+            results["peek"] = await phase_peek_under_load(
+                args.url, args.token,
+                inbox_size=args.inbox_size,
+            )
+            results["pipeline"] = await phase_full_pipeline(
+                args.url, args.token,
+                senders=args.senders,
+                listeners=args.listeners,
+                msgs_per_sender=args.msgs_per_sender,
+            )
+    finally:
+        await phase_cleanup(args.url, args.token, admin_token=args.admin_token)
 
     # Summary
     print("\n" + "=" * 60)
@@ -882,9 +941,25 @@ def main():
         "--send-interval", type=float, default=0.15,
         help="Seconds between sends in --high-clients mode (default: 0.15)",
     )
+    parser.add_argument(
+        "--cleanup-only", action="store_true",
+        help="Skip all test phases and just clean up stress/* agents",
+    )
 
     args = parser.parse_args()
-    exit_code = asyncio.run(run(args))
+    try:
+        exit_code = asyncio.run(run(args))
+    except KeyboardInterrupt:
+        print("\n\nInterrupted! Attempting best-effort cleanup...")
+        try:
+            asyncio.run(phase_cleanup(
+                args.url, args.token,
+                num_clients=max(200, args.high_clients),
+                admin_token=args.admin_token,
+            ))
+        except Exception as e:
+            print(f"  Cleanup failed: {e}")
+        exit_code = 130
     sys.exit(exit_code)
 
 

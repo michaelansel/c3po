@@ -533,3 +533,63 @@ class TestBlobDownloadEndpoint:
         response = await client.get(f"/agent/api/blob/{blob_id}")
         assert response.status_code == 200
         assert response.content == binary_data
+
+
+class TestAdminBulkRemoveEndpoint:
+    """Tests for DELETE /admin/api/agents endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_requires_pattern_parameter(self, client):
+        """Should return 400 when pattern query param is missing."""
+        response = await client.delete("/admin/api/agents")
+
+        assert response.status_code == 400
+        assert "pattern" in response.json()["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_rejects_wildcard_star(self, client):
+        """Should reject bare * pattern as safety guard."""
+        response = await client.delete("/admin/api/agents?pattern=*")
+
+        assert response.status_code == 400
+        assert "Refusing" in response.json()["error"]
+
+    @pytest.mark.asyncio
+    async def test_removes_matching_agents(self, client, agent_manager):
+        """Should remove agents matching the pattern and return count."""
+        agent_manager.register_agent("stress/sender-0")
+        agent_manager.register_agent("stress/sender-1")
+        agent_manager.register_agent("other/agent")
+
+        response = await client.delete("/admin/api/agents?pattern=stress/*")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["pattern"] == "stress/*"
+        assert data["removed"] == 2
+        assert sorted(data["agent_ids"]) == ["stress/sender-0", "stress/sender-1"]
+
+        # Verify agents are actually gone
+        assert agent_manager.get_agent("stress/sender-0") is None
+        assert agent_manager.get_agent("other/agent") is not None
+
+    @pytest.mark.asyncio
+    async def test_no_matches_returns_zero(self, client, agent_manager):
+        """Should return removed: 0 when no agents match."""
+        agent_manager.register_agent("other/agent")
+
+        response = await client.delete("/admin/api/agents?pattern=stress/*")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["removed"] == 0
+        assert data["agent_ids"] == []
+
+    @pytest.mark.asyncio
+    async def test_empty_pattern_rejected(self, client):
+        """Should reject empty pattern."""
+        response = await client.delete("/admin/api/agents?pattern=")
+
+        assert response.status_code == 400
+        assert "pattern" in response.json()["error"].lower()

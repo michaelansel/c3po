@@ -29,6 +29,7 @@ RATE_LIMITS = {
     "fetch_blob": (30, 60),
     "rest_blob_upload": (10, 60),
     "rest_blob_download": (30, 60),
+    "admin_bulk_remove": (5, 60),
 }
 
 

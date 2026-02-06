@@ -102,6 +102,11 @@ class AuditLogger:
         """Log blob download."""
         return self._log("blob_download", blob_id=blob_id, agent_id=agent_id, source=source)
 
+    def admin_bulk_remove(self, pattern: str, count: int, agent_ids: list[str]) -> dict:
+        """Log bulk agent removal."""
+        sample = agent_ids[:10]
+        return self._log("admin_bulk_remove", pattern=pattern, count=count, agent_ids_sample=sample)
+
     def authorization_denied(self, agent_id: str, key_id: str, pattern: str) -> dict:
         """Log authorization denial."""
         return self._log("authorization_denied", agent_id=agent_id, key_id=key_id, pattern=pattern)

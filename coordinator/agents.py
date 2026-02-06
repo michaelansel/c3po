@@ -1,5 +1,6 @@
 """Agent registration and management for C3PO coordinator."""
 
+import fnmatch
 import json
 import logging
 from datetime import datetime, timezone
@@ -264,6 +265,47 @@ class AgentManager:
         self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(agent_data))
         logger.info("agent_description_set agent=%s description=%s", agent_id, description[:50])
         return self._add_status(agent_data)
+
+    def remove_agents_by_pattern(self, pattern: str, cleanup_keys: bool = True) -> list[str]:
+        """Remove all agents matching an fnmatch glob pattern.
+
+        Args:
+            pattern: fnmatch glob pattern (e.g. "stress/*")
+            cleanup_keys: If True, also delete associated Redis keys
+                (inbox, notify, responses, acked) for each removed agent
+
+        Returns:
+            List of removed agent IDs
+        """
+        agents_raw = self.redis.hgetall(self.AGENTS_KEY)
+        removed = []
+
+        for agent_id_raw in agents_raw:
+            agent_id = agent_id_raw.decode() if isinstance(agent_id_raw, bytes) else agent_id_raw
+            if fnmatch.fnmatch(agent_id, pattern):
+                removed.append(agent_id)
+
+        if not removed:
+            return []
+
+        # Remove from agents hash
+        self.redis.hdel(self.AGENTS_KEY, *removed)
+
+        # Clean up associated Redis keys
+        if cleanup_keys:
+            keys_to_delete = []
+            for agent_id in removed:
+                keys_to_delete.extend([
+                    f"c3po:inbox:{agent_id}",
+                    f"c3po:notify:{agent_id}",
+                    f"c3po:responses:{agent_id}",
+                    f"c3po:acked:{agent_id}",
+                ])
+            if keys_to_delete:
+                self.redis.delete(*keys_to_delete)
+
+        logger.info("agents_bulk_removed pattern=%s count=%d", pattern, len(removed))
+        return removed
 
     def count_online_agents(self) -> int:
         """Count the number of currently online agents.
