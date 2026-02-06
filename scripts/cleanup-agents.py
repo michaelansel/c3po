@@ -21,10 +21,32 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+
+# Retry config: nginx REST per-IP limit is 8r/s burst=3.
+# Start at 2s, double each retry, max 16s, 5 attempts total.
+_RETRY_MAX_ATTEMPTS = 5
+_RETRY_INITIAL_DELAY = 2.0
+_RETRY_MAX_DELAY = 16.0
+
+
+def _request_with_retry(method: str, url: str, **kwargs) -> httpx.Response:
+    """Make an HTTP request with exponential backoff on 429 responses."""
+    delay = _RETRY_INITIAL_DELAY
+    for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
+        resp = httpx.request(method, url, **kwargs)
+        if resp.status_code != 429:
+            return resp
+        if attempt == _RETRY_MAX_ATTEMPTS:
+            return resp  # Give up, return the 429
+        print(f"Rate limited, retrying in {delay:.0f}s...", file=sys.stderr)
+        time.sleep(delay)
+        delay = min(delay * 2, _RETRY_MAX_DELAY)
+    return resp  # Unreachable, but satisfies type checker
 
 
 def _load_coordinator_url() -> str:
@@ -104,7 +126,8 @@ def cmd_list(args: argparse.Namespace) -> int:
         headers["Authorization"] = f"Bearer {args.admin_token}"
 
     try:
-        resp = httpx.get(
+        resp = _request_with_retry(
+            "GET",
             f"{args.url}/admin/api/agents",
             params=params,
             headers=headers,
@@ -150,7 +173,8 @@ def cmd_remove(args: argparse.Namespace) -> int:
         list_params["pattern"] = args.pattern
 
     try:
-        resp = httpx.get(
+        resp = _request_with_retry(
+            "GET",
             f"{args.url}/admin/api/agents",
             params=list_params,
             headers=headers,
@@ -202,7 +226,8 @@ def cmd_remove(args: argparse.Namespace) -> int:
     delete_params["pattern"] = args.pattern or "*"
 
     try:
-        resp = httpx.delete(
+        resp = _request_with_retry(
+            "DELETE",
             f"{args.url}/admin/api/agents",
             params=delete_params,
             headers=headers,
