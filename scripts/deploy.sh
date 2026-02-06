@@ -291,6 +291,7 @@ map \$http_authorization \$agent_auth_valid {
 
 # Rate limit zones
 limit_req_zone \$binary_remote_addr zone=c3po_api:10m rate=30r/s;
+limit_req_zone \$binary_remote_addr zone=c3po_mcp:10m rate=100r/s;
 limit_req_zone \$binary_remote_addr zone=c3po_admin:1m rate=5r/m;
 
 server {
@@ -326,10 +327,10 @@ server {
         if (\$agent_auth_valid = 0) {
             return 401 '{"error": "Unauthorized"}';
         }
-        # Higher burst for MCP: each session does ~2 rapid requests on setup
-        # (initialize + register), so 10 concurrent sessions need burst>=20.
-        # 60 provides headroom for legitimate concurrent tool calls.
-        limit_req zone=c3po_api burst=60 nodelay;
+        # Separate MCP zone: each session does ~2 rapid requests on setup
+        # (initialize + register) plus frequent tool calls. 10 concurrent
+        # sessions at ~3 calls/s each = ~30 sustained, with startup bursts.
+        limit_req zone=c3po_mcp burst=60 nodelay;
         proxy_set_header X-C3PO-Auth-Path "/agent";
         rewrite ^/agent(/mcp)\$ \$1 break;
         proxy_pass http://c3po_coordinator;

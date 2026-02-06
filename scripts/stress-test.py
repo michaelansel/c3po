@@ -403,7 +403,12 @@ async def phase_full_pipeline(
                                 cycle_latencies.append(cycle_ms / len(msg_ids))
 
         except BaseException as e:
-            errors.append(f"listener-{listener_idx}: {type(e).__name__}: {e}")
+            # Unwrap ExceptionGroups to get the actual sub-exception
+            detail = f"{type(e).__name__}: {e}"
+            if isinstance(e, BaseExceptionGroup):
+                for sub in e.exceptions:
+                    detail += f"\n    sub: {type(sub).__name__}: {sub}"
+            errors.append(f"listener-{listener_idx}: {detail}")
 
     async def sender_work(sender_idx: int) -> list[float]:
         agent_id = f"stress/pipeline-sender-{sender_idx}"
@@ -419,8 +424,12 @@ async def phase_full_pipeline(
                         "message": f"pipeline-{sender_idx}-{i}",
                     })
                     latencies.append((time.perf_counter() - t0) * 1000)
-        except Exception as e:
-            errors.append(f"pipeline-sender-{sender_idx}: {e}")
+        except BaseException as e:
+            detail = f"{type(e).__name__}: {e}"
+            if isinstance(e, BaseExceptionGroup):
+                for sub in e.exceptions:
+                    detail += f"\n    sub: {type(sub).__name__}: {sub}"
+            errors.append(f"pipeline-sender-{sender_idx}: {detail}")
         return latencies
 
     # Start listeners
