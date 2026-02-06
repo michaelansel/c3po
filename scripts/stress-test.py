@@ -355,27 +355,33 @@ async def phase_full_pipeline(
                 while True:
                     # wait_for_message (short timeout so we can check senders_done)
                     t0 = time.perf_counter()
-                    result = await s.call_tool("wait_for_message", {"timeout": 3})
+                    result = await s.call_tool("wait_for_message", {"timeout": 5})
                     parsed = parse_result(result)
 
                     if isinstance(parsed, dict) and parsed.get("status") == "timeout":
                         # No message arrived — check if senders are done
                         if senders_done.is_set():
-                            # Do a final get_messages to drain anything left
-                            result = await s.call_tool("get_messages", {})
-                            parsed = parse_result(result)
-                            if isinstance(parsed, list) and parsed:
-                                msg_ids = []
-                                for m in parsed:
-                                    mid = m.get("id") or m.get("reply_id")
-                                    if mid:
-                                        msg_ids.append(mid)
-                                if msg_ids:
-                                    await s.call_tool("ack_messages", {"message_ids": msg_ids})
-                                    cycle_ms = (time.perf_counter() - t0) * 1000
-                                    for _ in msg_ids:
-                                        delivered.append((listener_idx, cycle_ms / len(msg_ids)))
-                                        cycle_latencies.append(cycle_ms / len(msg_ids))
+                            # Poll until inbox is empty for 2 consecutive checks
+                            empty_checks = 0
+                            while empty_checks < 2:
+                                result = await s.call_tool("get_messages", {})
+                                parsed = parse_result(result)
+                                if isinstance(parsed, list) and parsed:
+                                    msg_ids = []
+                                    for m in parsed:
+                                        mid = m.get("id") or m.get("reply_id")
+                                        if mid:
+                                            msg_ids.append(mid)
+                                    if msg_ids:
+                                        await s.call_tool("ack_messages", {"message_ids": msg_ids})
+                                        cycle_ms = (time.perf_counter() - t0) * 1000
+                                        for _ in msg_ids:
+                                            delivered.append((listener_idx, cycle_ms / len(msg_ids)))
+                                            cycle_latencies.append(cycle_ms / len(msg_ids))
+                                    empty_checks = 0
+                                else:
+                                    empty_checks += 1
+                                    await asyncio.sleep(0.5)
                             break
                         continue
 
@@ -396,8 +402,8 @@ async def phase_full_pipeline(
                                 delivered.append((listener_idx, cycle_ms / len(msg_ids)))
                                 cycle_latencies.append(cycle_ms / len(msg_ids))
 
-        except Exception as e:
-            errors.append(f"listener-{listener_idx}: {e}")
+        except BaseException as e:
+            errors.append(f"listener-{listener_idx}: {type(e).__name__}: {e}")
 
     async def sender_work(sender_idx: int) -> list[float]:
         agent_id = f"stress/pipeline-sender-{sender_idx}"
