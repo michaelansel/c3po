@@ -34,6 +34,7 @@ class ErrorCodes:
     FORBIDDEN = "FORBIDDEN"
     BLOB_NOT_FOUND = "BLOB_NOT_FOUND"
     BLOB_TOO_LARGE = "BLOB_TOO_LARGE"
+    ANONYMOUS_ONBOARDING_REQUIRED = "ANONYMOUS_ONBOARDING_REQUIRED"
 
 
 def agent_not_found(target: str, available: list[str]) -> C3POError:
@@ -130,6 +131,27 @@ def blob_too_large(size: int, max_size: int) -> C3POError:
         code=ErrorCodes.BLOB_TOO_LARGE,
         message=f"Blob size ({size_mb:.1f}MB) exceeds maximum ({max_mb:.1f}MB).",
         suggestion="Reduce the file size or split it into smaller parts.",
+    )
+
+
+def anonymous_onboarding_required() -> C3POError:
+    """Create error for anonymous sessions that need unique IDs."""
+    return C3POError(
+        code=ErrorCodes.ANONYMOUS_ONBOARDING_REQUIRED,
+        message=(
+            "You're using a shared anonymous agent ID. "
+            "To separate your conversation from others, you need a unique ID."
+        ),
+        suggestion=(
+            "1. Generate a UUID:\n"
+            "   - macOS/Linux: run `uuidgen`\n"
+            "   - Python: python3 -c \"import uuid; print(uuid.uuid4())\"\n"
+            "   - Or use any random string: a1b2c3d4\n\n"
+            "2. Include this UUID in all tool calls using the agent_id parameter:\n"
+            "   agent_id=\"anonymous/chat-a1b2c3d4\"\n\n"
+            "3. Remember this ID throughout our conversation.\n\n"
+            "Example: send_message(to=\"other/agent\", message=\"hi\", agent_id=\"anonymous/chat-YOUR-UUID\")"
+        ),
     )
 
 

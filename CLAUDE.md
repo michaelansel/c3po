@@ -77,6 +77,13 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 
 **Agent ID format**: `{machine}/{project}` (e.g., `macbook/myproject`). Bare machine names without a slash are rejected.
 
+**Anonymous sessions (Claude.ai/Desktop)**: Sessions that can't set custom headers (Claude Desktop, Claude.ai) are detected as `machine=anonymous` with no project name. These sessions must provide a unique identifier in the `agent_id` parameter of all MCP tool calls:
+- **Required format**: `anonymous/chat-<UUID>` (e.g., `anonymous/chat-a1b2c3d4`)
+- **UUID generation**: Use `uuidgen` (macOS/Linux) or `python3 -c "import uuid; print(uuid.uuid4())"`
+- **Bare `anonymous/chat` is rejected**: Returns onboarding error with instructions
+- **Any suffix accepted**: While documentation recommends UUIDs, any suffix works (e.g., `anonymous/chat-my-project`)
+- **No middleware registration**: Anonymous sessions set a placeholder in middleware; registration happens in `_resolve_agent_id()` when the explicit agent_id is validated
+
 **Collision detection**: When two sessions claim the same agent ID, the second gets a suffix (`-2`, `-3`, etc.). Same session reconnecting just updates the heartbeat.
 
 **Dual interface**: MCP tools for agent-to-agent communication within Claude Code sessions; REST API for hook scripts that run outside MCP context. URLs are split by auth type:

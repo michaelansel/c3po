@@ -250,6 +250,70 @@ class TestCollisionHandling:
         assert result["session_id"] is None
 
 
+class TestBulkRemove:
+    """Tests for remove_agents_by_pattern."""
+
+    def test_removes_matching_agents(self, agent_manager):
+        """Should remove agents matching the pattern."""
+        agent_manager.register_agent("stress/sender-0")
+        agent_manager.register_agent("stress/sender-1")
+        agent_manager.register_agent("other/agent")
+
+        removed = agent_manager.remove_agents_by_pattern("stress/*")
+
+        assert sorted(removed) == ["stress/sender-0", "stress/sender-1"]
+        assert agent_manager.get_agent("stress/sender-0") is None
+        assert agent_manager.get_agent("stress/sender-1") is None
+        assert agent_manager.get_agent("other/agent") is not None
+
+    def test_returns_empty_when_no_matches(self, agent_manager):
+        """Should return empty list when no agents match."""
+        agent_manager.register_agent("other/agent")
+
+        removed = agent_manager.remove_agents_by_pattern("stress/*")
+
+        assert removed == []
+        assert agent_manager.get_agent("other/agent") is not None
+
+    def test_cleans_up_redis_keys(self, agent_manager, redis_client):
+        """Should delete associated Redis keys when cleanup_keys=True."""
+        agent_manager.register_agent("stress/test")
+
+        # Simulate Redis keys that would exist for this agent
+        redis_client.rpush("c3po:inbox:stress/test", "msg1")
+        redis_client.rpush("c3po:notify:stress/test", "notify1")
+        redis_client.rpush("c3po:responses:stress/test", "resp1")
+        redis_client.sadd("c3po:acked:stress/test", "acked1")
+
+        agent_manager.remove_agents_by_pattern("stress/*")
+
+        assert redis_client.llen("c3po:inbox:stress/test") == 0
+        assert redis_client.llen("c3po:notify:stress/test") == 0
+        assert redis_client.llen("c3po:responses:stress/test") == 0
+        assert redis_client.scard("c3po:acked:stress/test") == 0
+
+    def test_preserves_redis_keys_when_cleanup_disabled(self, agent_manager, redis_client):
+        """Should preserve Redis keys when cleanup_keys=False."""
+        agent_manager.register_agent("stress/test")
+        redis_client.rpush("c3po:inbox:stress/test", "msg1")
+
+        agent_manager.remove_agents_by_pattern("stress/*", cleanup_keys=False)
+
+        assert agent_manager.get_agent("stress/test") is None
+        assert redis_client.llen("c3po:inbox:stress/test") == 1
+
+    def test_sub_pattern_matching(self, agent_manager):
+        """Should support sub-patterns like stress/sender-*."""
+        agent_manager.register_agent("stress/sender-0")
+        agent_manager.register_agent("stress/sender-1")
+        agent_manager.register_agent("stress/listener-0")
+
+        removed = agent_manager.remove_agents_by_pattern("stress/sender-*")
+
+        assert sorted(removed) == ["stress/sender-0", "stress/sender-1"]
+        assert agent_manager.get_agent("stress/listener-0") is not None
+
+
 class TestSetDescription:
     """Tests for agent description."""
 
@@ -287,3 +351,74 @@ class TestSetDescription:
         agents = agent_manager.list_agents()
         assert len(agents) == 1
         assert agents[0]["description"] == "My description"
+
+
+class TestAnonymousSessions:
+    """Tests for anonymous session handling (Claude.ai/Desktop)."""
+
+    def test_anonymous_chat_with_uuid_suffix_registers(self, agent_manager):
+        """anonymous/chat-UUID pattern should register successfully."""
+        agent_id = "anonymous/chat-a1b2c3d4"
+        result = agent_manager.register_agent(agent_id, session_id="test-session")
+
+        assert result["id"] == agent_id
+        assert result["status"] == "online"
+
+    def test_anonymous_chat_with_different_uuids_are_separate(self, agent_manager):
+        """Different UUID suffixes create separate agent registrations."""
+        agent1 = "anonymous/chat-uuid1"
+        agent2 = "anonymous/chat-uuid2"
+
+        result1 = agent_manager.register_agent(agent1, session_id="session-1")
+        result2 = agent_manager.register_agent(agent2, session_id="session-2")
+
+        assert result1["id"] == agent1
+        assert result2["id"] == agent2
+
+        agents = agent_manager.list_agents()
+        assert len(agents) == 2
+        assert {a["id"] for a in agents} == {agent1, agent2}
+
+    def test_anonymous_chat_same_uuid_same_session_updates(self, agent_manager):
+        """Same UUID and session should update existing agent, not create new."""
+        agent_id = "anonymous/chat-myuuid"
+        session_id = "test-session"
+
+        result1 = agent_manager.register_agent(agent_id, session_id=session_id)
+        original_registered_at = result1["registered_at"]
+
+        time.sleep(0.01)
+
+        result2 = agent_manager.register_agent(agent_id, session_id=session_id)
+
+        # Should update existing, not create collision
+        assert result2["id"] == agent_id
+        assert result2["registered_at"] == original_registered_at
+        assert result2["last_seen"] > result1["last_seen"]
+
+    def test_anonymous_chat_same_uuid_different_session_creates_collision(self, agent_manager):
+        """Same UUID but different session triggers collision resolution."""
+        agent_id = "anonymous/chat-shared-uuid"
+
+        result1 = agent_manager.register_agent(agent_id, session_id="session-1")
+        assert result1["id"] == agent_id
+
+        result2 = agent_manager.register_agent(agent_id, session_id="session-2")
+        # Should get -2 suffix
+        assert result2["id"] == f"{agent_id}-2"
+
+    def test_anonymous_chat_accepts_any_suffix(self, agent_manager):
+        """Should accept any suffix, not just UUID format."""
+        test_cases = [
+            "anonymous/chat-123abc",
+            "anonymous/chat-my-project",
+            "anonymous/chat-test",
+            "anonymous/chat-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        ]
+
+        for agent_id in test_cases:
+            result = agent_manager.register_agent(agent_id)
+            assert result["id"] == agent_id
+
+        agents = agent_manager.list_agents()
+        assert len(agents) == len(test_cases)

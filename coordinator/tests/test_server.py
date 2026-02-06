@@ -265,3 +265,76 @@ class TestFetchBlobImpl:
         meta = blob_manager.store_blob(data, "large.bin")
         result = _fetch_blob_impl(blob_manager, meta["blob_id"])
         assert "smaller pieces" in result["note"] or "split" in result["note"]
+
+
+class MockContext:
+    """Mock FastMCP Context for testing _resolve_agent_id."""
+    def __init__(self, state=None):
+        self.state = state or {}
+
+    def get_state(self, key):
+        return self.state.get(key)
+
+
+class TestResolveAgentId:
+    """Tests for _resolve_agent_id function."""
+
+    def test_explicit_agent_id_accepted(self, agent_manager):
+        """Should accept explicit agent_id parameter."""
+        from coordinator.server import _resolve_agent_id
+        ctx = MockContext({"agent_id": "placeholder", "session_id": "test-session"})
+        result = _resolve_agent_id(ctx, explicit_agent_id="macbook/myproject")
+        assert result == "macbook/myproject"
+
+    def test_bare_anonymous_chat_rejected(self, agent_manager):
+        """Should reject bare 'anonymous/chat' with onboarding error."""
+        from coordinator.server import _resolve_agent_id
+        ctx = MockContext({"agent_id": "anonymous", "session_id": "test-session"})
+
+        with pytest.raises(ToolError) as exc_info:
+            _resolve_agent_id(ctx, explicit_agent_id="anonymous/chat")
+
+        error_msg = str(exc_info.value)
+        assert "shared anonymous agent ID" in error_msg
+        assert "uuidgen" in error_msg
+        assert "agent_id=" in error_msg
+
+    def test_anonymous_chat_with_uuid_accepted(self, agent_manager):
+        """Should accept anonymous/chat-UUID pattern."""
+        from coordinator.server import _resolve_agent_id
+        ctx = MockContext({"agent_id": "anonymous", "session_id": "test-session"})
+        result = _resolve_agent_id(ctx, explicit_agent_id="anonymous/chat-a1b2c3d4")
+        assert result == "anonymous/chat-a1b2c3d4"
+
+    def test_anonymous_chat_with_custom_suffix_accepted(self, agent_manager):
+        """Should accept anonymous/chat with any suffix."""
+        from coordinator.server import _resolve_agent_id
+        ctx = MockContext({"agent_id": "anonymous", "session_id": "test-session"})
+
+        test_cases = [
+            "anonymous/chat-123abc",
+            "anonymous/chat-my-project",
+            "anonymous/chat-test",
+        ]
+
+        for agent_id in test_cases:
+            result = _resolve_agent_id(ctx, explicit_agent_id=agent_id)
+            assert result == agent_id
+
+    def test_anonymous_placeholder_without_explicit_id_rejected(self, agent_manager):
+        """Should reject anonymous placeholder when no explicit agent_id provided."""
+        from coordinator.server import _resolve_agent_id
+        ctx = MockContext({"agent_id": "anonymous", "session_id": "test-session"})
+
+        with pytest.raises(ToolError) as exc_info:
+            _resolve_agent_id(ctx, explicit_agent_id=None)
+
+        error_msg = str(exc_info.value)
+        assert "shared anonymous agent ID" in error_msg or "unique ID" in error_msg
+
+    def test_middleware_fallback_with_slash(self, agent_manager):
+        """Should accept middleware ID if it contains a slash."""
+        from coordinator.server import _resolve_agent_id
+        ctx = MockContext({"agent_id": "macbook/myproject", "session_id": "test-session"})
+        result = _resolve_agent_id(ctx, explicit_agent_id=None)
+        assert result == "macbook/myproject"

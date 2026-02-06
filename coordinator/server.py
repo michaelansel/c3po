@@ -27,6 +27,7 @@ from coordinator.auth import AuthManager
 from coordinator.blobs import BlobManager, MAX_BLOB_SIZE
 from coordinator.errors import (
     agent_not_found,
+    anonymous_onboarding_required,
     blob_not_found,
     blob_too_large,
     invalid_request,
@@ -227,16 +228,11 @@ class AgentIdentityMiddleware(Middleware):
         elif machine_name == "anonymous":
             # No project name and no machine name — likely Claude Desktop/Claude.ai
             # which can't set custom headers or run hooks.
-            # Auto-register with "anonymous/chat" so the agent has a valid ID.
-            # Collision detection will append -2, -3, etc. for concurrent sessions.
-            agent_id = "anonymous/chat"
-            # Enforce agent_pattern from API key before registration
-            agent_pattern = context.fastmcp_context.get_state("auth_agent_pattern") or "*"
-            if agent_pattern != "*" and not AuthManager.validate_agent_pattern(agent_id, agent_pattern):
-                raise ToolError(f"Agent ID '{agent_id}' does not match key pattern '{agent_pattern}'")
-            registration = agent_manager.register_agent(agent_id, session_id)
-            actual_agent_id = registration["id"]
-            logger.info("auto_registered_anonymous agent_id=%s", actual_agent_id)
+            # Set a placeholder; _resolve_agent_id() will check the explicit agent_id
+            # parameter and require a UUID suffix (anonymous/chat-* pattern).
+            agent_id = "anonymous"  # Placeholder (not a valid agent ID)
+            actual_agent_id = "anonymous"  # Placeholder
+            logger.info("anonymous_session session_id=%s (requires UUID suffix in agent_id parameter)", session_id)
         else:
             # Has machine name but no project name — Claude Code session where
             # the SessionStart hook already registered with full identity.
@@ -774,6 +770,51 @@ async def api_admin_audit(request):
     return JSONResponse({"entries": entries, "count": len(entries)})
 
 
+@mcp.custom_route("/admin/api/agents", methods=["DELETE"])
+async def admin_bulk_remove_agents(request):
+    """Bulk-remove agents matching an fnmatch glob pattern.
+
+    Requires admin key authentication.
+    Query param: pattern (e.g. ?pattern=stress/*)
+    Returns: {"status": "ok", "pattern": "...", "removed": N, "agent_ids": [...]}
+    """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("error", "Authentication required")},
+            status_code=401,
+        )
+
+    # Rate limit by client IP
+    client_ip = _get_client_ip(request)
+    rate_resp = _check_rest_rate_limit(request, "admin_bulk_remove", client_ip)
+    if rate_resp:
+        return rate_resp
+
+    pattern = request.query_params.get("pattern", "").strip()
+    if not pattern:
+        return JSONResponse(
+            {"error": "Missing required query parameter: pattern"},
+            status_code=400,
+        )
+
+    if pattern == "*":
+        return JSONResponse(
+            {"error": "Refusing to remove all agents. Use a more specific pattern."},
+            status_code=400,
+        )
+
+    removed_ids = agent_manager.remove_agents_by_pattern(pattern)
+    audit_logger.admin_bulk_remove(pattern, len(removed_ids), removed_ids)
+
+    return SecureJSONResponse({
+        "status": "ok",
+        "pattern": pattern,
+        "removed": len(removed_ids),
+        "agent_ids": removed_ids,
+    })
+
+
 # ============================================================
 # Tool implementations (testable standalone functions)
 # ============================================================
@@ -1026,6 +1067,10 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
     Falls back to middleware header only if it contains a slash (full ID).
     Raises ToolError if no valid agent_id can be determined.
 
+    Special handling for anonymous sessions:
+    - Rejects bare "anonymous/chat" (requires UUID suffix)
+    - Accepts "anonymous/chat-*" pattern (e.g., "anonymous/chat-a1b2c3d4")
+
     Args:
         ctx: MCP context with state from middleware
         explicit_agent_id: Optional agent_id passed by Claude
@@ -1034,10 +1079,24 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
         The effective agent_id to use
 
     Raises:
-        ToolError: If no valid agent_id is available
+        ToolError: If no valid agent_id is available or anonymous onboarding required
     """
     if explicit_agent_id and explicit_agent_id.strip():
         resolved = explicit_agent_id.strip()
+
+        # Check for bare anonymous/chat (reject with onboarding instructions)
+        if resolved == "anonymous/chat":
+            err = anonymous_onboarding_required()
+            logger.warning("anonymous_onboarding_required session_id=%s", ctx.get_state("session_id"))
+            raise ToolError(f"{err.message}\n\n{err.suggestion}")
+
+        # Register anonymous/chat-* agents on first use
+        # (they can't use the SessionStart hook because they lack headers)
+        if resolved.startswith("anonymous/chat-"):
+            session_id = ctx.get_state("session_id")
+            registration = agent_manager.register_agent(resolved, session_id)
+            logger.info("anonymous_agent_registered agent_id=%s", registration["id"])
+
         logger.info("resolve_agent_id explicit=%s", resolved)
     elif (middleware_id := ctx.get_state("agent_id")) and "/" in middleware_id:
         # Middleware fallback — only accept full agent IDs (with slash)
@@ -1046,6 +1105,14 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
     else:
         # No valid agent_id — fail loudly
         middleware_id = ctx.get_state("agent_id")
+
+        # Special case: anonymous session without explicit agent_id
+        # (middleware set placeholder "anonymous")
+        if middleware_id == "anonymous":
+            err = anonymous_onboarding_required()
+            logger.warning("anonymous_onboarding_required_no_explicit_id session_id=%s", ctx.get_state("session_id"))
+            raise ToolError(f"{err.message}\n\n{err.suggestion}")
+
         logger.error(
             "resolve_agent_id_failed middleware_id=%s (missing slash — "
             "PreToolUse hook did not inject agent_id)",
