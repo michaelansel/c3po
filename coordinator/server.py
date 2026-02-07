@@ -1249,7 +1249,7 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
             registration = agent_manager.register_agent(resolved, session_id)
             logger.info("anonymous_agent_registered agent_id=%s", registration["id"])
 
-        logger.info("resolve_agent_id explicit=%s", resolved)
+        logger.debug("resolve_agent_id explicit=%s", resolved)
     elif (middleware_id := ctx.get_state("agent_id")) and "/" in middleware_id:
         # Middleware fallback — only accept full agent IDs (with slash)
         logger.warning("resolve_agent_id fallback_to_middleware=%s", middleware_id)
@@ -1276,6 +1276,10 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
             f"'{middleware_id}'. This usually means the ensure_agent_id hook is not "
             f"running or not finding the session file. Try restarting your session."
         )
+
+    # Refresh heartbeat so the agent stays "online" across all tool calls,
+    # not just wait_for_message (which has its own heartbeat loop).
+    agent_manager.touch_heartbeat(resolved)
 
     return resolved
 
