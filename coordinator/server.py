@@ -1177,6 +1177,7 @@ def _wait_for_message_impl(
         err = invalid_request("type", "must be 'message', 'reply', or omitted for both")
         raise ToolError(f"{err.message} {err.suggestion}")
     logger.info("wait_for_message agent=%s timeout=%d type=%s", agent_id, timeout, message_type)
+    start_time = time.monotonic()
     with _active_waiters_lock:
         _active_waiters.add(agent_id)
     try:
@@ -1186,22 +1187,29 @@ def _wait_for_message_impl(
             shutdown_event=shutdown_event,
         )
     finally:
+        elapsed = time.monotonic() - start_time
         with _active_waiters_lock:
             _active_waiters.discard(agent_id)
     if result == "shutdown":
+        logger.info("wait_for_message_done agent=%s result=shutdown elapsed=%.1fs", agent_id, elapsed)
         return {
             "status": "retry",
             "message": "Server is restarting. Please call wait_for_message again in 15 seconds.",
             "retry_after": 15,
+            "elapsed_seconds": round(elapsed, 1),
         }
     if result is None:
+        logger.info("wait_for_message_done agent=%s result=timeout elapsed=%.1fs", agent_id, elapsed)
         return {
             "status": "timeout",
             "code": ErrorCodes.TIMEOUT,
             "message": f"No messages received within {timeout} seconds",
             "suggestion": "No agents have sent messages. You can continue with other work.",
+            "elapsed_seconds": round(elapsed, 1),
         }
-    return {"status": "received", "messages": result}
+    logger.info("wait_for_message_done agent=%s result=received count=%d elapsed=%.1fs",
+                agent_id, len(result), elapsed)
+    return {"status": "received", "messages": result, "elapsed_seconds": round(elapsed, 1)}
 
 
 def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> str:
@@ -1449,8 +1457,13 @@ async def wait_for_message(
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
     _enforce_agent_pattern(ctx, effective_id)
+
+    with _active_waiters_lock:
+        waiter_count = len(_active_waiters)
+    logger.info("wait_for_message_start agent=%s timeout=%d waiters=%d", effective_id, timeout, waiter_count)
+
     try:
-        return await asyncio.get_running_loop().run_in_executor(
+        result = await asyncio.get_running_loop().run_in_executor(
             _wait_pool,
             functools.partial(
                 _wait_for_message_impl, message_manager, effective_id, timeout, type,
@@ -1458,12 +1471,18 @@ async def wait_for_message(
                 shutdown_event=_shutdown_event,
             ),
         )
+        logger.info("wait_for_message_returned agent=%s status=%s", effective_id, result.get("status"))
+        return result
     except asyncio.CancelledError:
+        logger.warning("wait_for_message_cancelled agent=%s (asyncio CancelledError)", effective_id)
         return {
             "status": "retry",
             "message": "Server is restarting. Please call wait_for_message again in 15 seconds.",
             "retry_after": 15,
         }
+    except Exception as e:
+        logger.error("wait_for_message_error agent=%s error=%s", effective_id, e)
+        raise
 
 
 def _ack_messages_impl(

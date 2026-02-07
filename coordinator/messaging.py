@@ -752,18 +752,24 @@ return kept
         notify_key = f"{self.NOTIFY_PREFIX}{agent_id}"
         deadline = datetime.now(timezone.utc).timestamp() + timeout
 
+        cycle = 0
         while True:
             remaining = deadline - datetime.now(timezone.utc).timestamp()
             if remaining <= 0:
-                logger.info("wait_for_message_timeout agent=%s timeout=%d", agent_id, timeout)
+                logger.info("wait_for_message_timeout agent=%s timeout=%d cycles=%d", agent_id, timeout, cycle)
                 return None
 
             blpop_timeout = max(1, int(min(remaining, 10)))
             result = self.redis.blpop(notify_key, timeout=blpop_timeout)
+            cycle += 1
+
+            if cycle % 6 == 0:  # Every ~60s
+                logger.info("wait_for_message_alive agent=%s cycle=%d remaining=%.0fs notified=%s",
+                           agent_id, cycle, remaining, result is not None)
 
             # Check for graceful shutdown
             if shutdown_event and shutdown_event.is_set():
-                logger.info("wait_for_message_shutdown agent=%s", agent_id)
+                logger.info("wait_for_message_shutdown agent=%s cycles=%d", agent_id, cycle)
                 return "shutdown"
 
             # Refresh heartbeat so long-polling agents stay "online"
@@ -778,6 +784,6 @@ return kept
             # are found within one BLPOP cycle instead of waiting forever.
             messages = self.peek_messages(agent_id, message_type)
             if messages:
-                logger.info("wait_for_message_received agent=%s count=%d notified=%s",
-                           agent_id, len(messages), result is not None)
+                logger.info("wait_for_message_received agent=%s count=%d notified=%s cycles=%d",
+                           agent_id, len(messages), result is not None, cycle)
                 return messages
