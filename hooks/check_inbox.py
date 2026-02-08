@@ -92,15 +92,34 @@ def main() -> None:
 
         count = data.get("count", 0)
         if count > 0:
-            # Format the pending messages for Claude
+            # Format the pending messages for Claude with richer previews
             messages = data.get("messages", [])
             message_summary = []
+            urgent_keywords = ["urgent", "interrupt", "cancel", "asap", "emergency", "critical"]
+
             for msg_data in messages[:3]:  # Show first 3
                 from_agent = msg_data.get("from_agent", "unknown")
-                message_preview = msg_data.get("message", "")[:100]
-                if len(msg_data.get("message", "")) > 100:
+                full_message = msg_data.get("message", "")
+                context = msg_data.get("context", "")
+
+                # Check for urgency keywords
+                is_urgent = any(kw in full_message.lower() for kw in urgent_keywords)
+                urgency_marker = "🔴 URGENT: " if is_urgent else ""
+
+                # Show more preview for urgent messages (200 chars vs 150)
+                preview_len = 200 if is_urgent else 150
+                message_preview = full_message[:preview_len]
+                if len(full_message) > preview_len:
                     message_preview += "..."
-                message_summary.append(f"  - From {from_agent}: {message_preview}")
+
+                # Include context preview if available
+                context_preview = ""
+                if context:
+                    context_preview = f" (context: {context[:50]}{'...' if len(context) > 50 else ''})"
+
+                message_summary.append(
+                    f"  - {urgency_marker}From {from_agent}: {message_preview}{context_preview}"
+                )
 
             if count > 3:
                 message_summary.append(f"  ... and {count - 3} more")
@@ -111,7 +130,7 @@ def main() -> None:
             output = {
                 "decision": "block",
                 "reason": (
-                    f"You have {count} pending coordination message(s) from other agents:\n"
+                    f"You have {count} pending coordination message(s) from other agents:\n\n"
                     f"{summary}\n\n"
                     "Use the get_messages tool to retrieve the full message(s), "
                     "then use reply to send your response. "

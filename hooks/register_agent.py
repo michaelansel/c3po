@@ -22,15 +22,17 @@ import sys
 import urllib.request
 import urllib.error
 
-from c3po_common import auth_headers, get_coordinator_url, get_machine_name, get_session_id, parse_hook_input, save_agent_id, urlopen_with_ssl
+from c3po_common import auth_headers, get_coordinator_url, get_machine_name, get_session_id, parse_hook_input, sanitize_name, save_agent_id, urlopen_with_ssl
 
 
 # Configuration
 COORDINATOR_URL = get_coordinator_url()
 MACHINE_NAME = get_machine_name()
 
-# Project context (for display, not part of agent ID)
-PROJECT_NAME = os.environ.get("CLAUDE_PROJECT_NAME") or os.path.basename(os.getcwd())
+# Project context — sanitize to match coordinator's AGENT_ID_PATTERN
+PROJECT_NAME = sanitize_name(
+    os.environ.get("CLAUDE_PROJECT_NAME") or os.path.basename(os.getcwd())
+)
 
 
 def register_with_coordinator(session_id: str) -> dict | None:

@@ -19,6 +19,22 @@ import urllib.request
 
 CREDENTIALS_FILE = os.path.expanduser("~/.claude/c3po-credentials.json")
 
+# Characters allowed in agent IDs (must match AGENT_ID_PATTERN in coordinator/server.py)
+_AGENT_ID_SAFE = re.compile(r"[^a-zA-Z0-9_./-]")
+
+
+def sanitize_name(name: str) -> str:
+    """Sanitize a name component for use in agent IDs.
+
+    Replaces characters not allowed by the coordinator's AGENT_ID_PATTERN
+    with hyphens and collapses consecutive hyphens.
+    """
+    result = _AGENT_ID_SAFE.sub("-", name)
+    # Collapse consecutive hyphens
+    while "--" in result:
+        result = result.replace("--", "-")
+    return result.strip("-")
+
 
 def get_credentials() -> dict:
     """Load credentials from ~/.claude/c3po-credentials.json.
