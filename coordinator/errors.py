@@ -138,19 +138,19 @@ def anonymous_onboarding_required() -> C3POError:
     """Create error for anonymous sessions that need unique IDs."""
     return C3POError(
         code=ErrorCodes.ANONYMOUS_ONBOARDING_REQUIRED,
-        message=(
-            "You're using a shared anonymous agent ID. "
-            "To separate your conversation from others, you need a unique ID."
-        ),
+        message="You need a unique agent ID. Generate one now.",
         suggestion=(
-            "1. Generate a UUID:\n"
-            "   - macOS/Linux: run `uuidgen`\n"
-            "   - Python: python3 -c \"import uuid; print(uuid.uuid4())\"\n"
-            "   - Or use any random string: a1b2c3d4\n\n"
-            "2. Include this UUID in all tool calls using the agent_id parameter:\n"
-            "   agent_id=\"anonymous/chat-a1b2c3d4\"\n\n"
-            "3. Remember this ID throughout our conversation.\n\n"
-            "Example: send_message(to=\"other/agent\", message=\"hi\", agent_id=\"anonymous/chat-YOUR-UUID\")"
+            "STEP 1 — Generate your ID:\n"
+            "  Run: python3 -c \"import uuid; print(uuid.uuid4())\"\n\n"
+            "STEP 2 — Use it in ALL tool calls:\n"
+            "  agent_id=\"anonymous/chat-<UUID>\"\n"
+            "  Example: list_agents(agent_id=\"anonymous/chat-e47ac10b-58cc-4372-a567-0e02b2c3d479\")\n\n"
+            "STEP 3 — Learn the messaging pattern:\n"
+            "  Send:    send_message(to=\"agent/id\", message=\"hi\", agent_id=\"...\")\n"
+            "  Wait:    wait_for_message(timeout=300, agent_id=\"...\") — blocks until reply arrives\n"
+            "  Reply:   reply(message_id=msg['id'], response=\"...\", agent_id=\"...\")\n"
+            "  Cleanup: ack_messages(message_ids=[msg['id']], agent_id=\"...\") — removes from inbox\n\n"
+            "Messages are non-destructive until acked. Always ack after processing."
         ),
     )
 

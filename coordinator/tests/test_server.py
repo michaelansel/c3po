@@ -334,8 +334,8 @@ class TestResolveAgentId:
             _resolve_agent_id(ctx, explicit_agent_id="anonymous/chat")
 
         error_msg = str(exc_info.value)
-        assert "shared anonymous agent ID" in error_msg
-        assert "uuidgen" in error_msg
+        assert "unique agent ID" in error_msg
+        assert "uuid" in error_msg
         assert "agent_id=" in error_msg
 
     def test_anonymous_chat_with_uuid_accepted(self, agent_manager):
@@ -369,7 +369,7 @@ class TestResolveAgentId:
             _resolve_agent_id(ctx, explicit_agent_id=None)
 
         error_msg = str(exc_info.value)
-        assert "shared anonymous agent ID" in error_msg or "unique ID" in error_msg
+        assert "unique agent ID" in error_msg
 
     def test_middleware_fallback_with_slash(self, agent_manager):
         """Should accept middleware ID if it contains a slash."""
