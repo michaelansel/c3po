@@ -490,3 +490,74 @@ class TestAnonymousSessions:
 
         agents = agent_manager.list_agents()
         assert len(agents) == len(test_cases)
+
+
+class TestSetWebhook:
+    """Tests for webhook configuration."""
+
+    def test_set_webhook(self, agent_manager):
+        """Should set webhook URL and secret for an agent."""
+        agent_manager.register_agent("agent-a")
+        result = agent_manager.set_webhook(
+            "agent-a",
+            "https://example.com/webhook",
+            "secret123"
+        )
+
+        assert result["id"] == "agent-a"
+        assert result["webhook_url"] == "https://example.com/webhook"
+        assert result["webhook_secret"] == "secret123"
+
+    def test_set_webhook_nonexistent_agent(self, agent_manager):
+        """Should raise KeyError for nonexistent agent."""
+        with pytest.raises(KeyError):
+            agent_manager.set_webhook("nonexistent", "https://example.com", "secret")
+
+    def test_webhook_persists_in_redis(self, agent_manager, redis_client):
+        """Webhook config should persist in Redis."""
+        agent_manager.register_agent("agent-a")
+        agent_manager.set_webhook("agent-a", "https://example.com/hook", "secret123")
+
+        # Read directly from Redis
+        data = redis_client.hget("c3po:agents", "agent-a")
+        agent_data = json.loads(data)
+
+        assert agent_data["webhook_url"] == "https://example.com/hook"
+        assert agent_data["webhook_secret"] == "secret123"
+
+    def test_new_agents_have_empty_webhook_fields(self, agent_manager):
+        """Newly registered agents should have empty webhook fields."""
+        result = agent_manager.register_agent("agent-a")
+
+        assert result["webhook_url"] == ""
+        assert result["webhook_secret"] == ""
+
+
+class TestClearWebhook:
+    """Tests for clearing webhook configuration."""
+
+    def test_clear_webhook(self, agent_manager):
+        """Should clear webhook URL and secret for an agent."""
+        agent_manager.register_agent("agent-a")
+        agent_manager.set_webhook("agent-a", "https://example.com/hook", "secret123")
+        result = agent_manager.clear_webhook("agent-a")
+
+        assert result["id"] == "agent-a"
+        assert result["webhook_url"] == ""
+        assert result["webhook_secret"] == ""
+
+    def test_clear_webhook_nonexistent_agent(self, agent_manager):
+        """Should raise KeyError for nonexistent agent."""
+        with pytest.raises(KeyError):
+            agent_manager.clear_webhook("nonexistent")
+
+    def test_clear_webhook_persists_in_redis(self, agent_manager, redis_client):
+        """Cleared webhook should persist in Redis."""
+        agent_manager.register_agent("agent-a")
+        agent_manager.set_webhook("agent-a", "https://example.com/hook", "secret123")
+        agent_manager.clear_webhook("agent-a")
+
+        data = redis_client.hget("c3po:agents", "agent-a")
+        agent_data = json.loads(data)
+        assert agent_data["webhook_url"] == ""
+        assert agent_data["webhook_secret"] == ""

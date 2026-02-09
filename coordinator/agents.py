@@ -88,6 +88,8 @@ class AgentManager:
             "session_id": session_id,
             "capabilities": capabilities or [],
             "description": "",
+            "webhook_url": "",
+            "webhook_secret": "",
             "registered_at": now,
             "last_seen": now,
         }
@@ -264,6 +266,52 @@ class AgentManager:
         agent_data["description"] = description
         self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(agent_data))
         logger.info("agent_description_set agent=%s description=%s", agent_id, description[:50])
+        return self._add_status(agent_data)
+
+    def set_webhook(self, agent_id: str, webhook_url: str, webhook_secret: str) -> dict:
+        """Set webhook configuration for an agent.
+
+        Args:
+            agent_id: The agent ID
+            webhook_url: The webhook URL to POST to when messages/replies arrive
+            webhook_secret: The HMAC secret for signing webhook payloads
+
+        Returns:
+            Updated agent data with status
+
+        Raises:
+            KeyError: If agent not found
+        """
+        agent_data = self._get_agent_raw(agent_id)
+        if not agent_data:
+            raise KeyError(f"Agent {agent_id} not found")
+
+        agent_data["webhook_url"] = webhook_url
+        agent_data["webhook_secret"] = webhook_secret
+        self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(agent_data))
+        logger.info("agent_webhook_set agent=%s url=%s", agent_id, webhook_url)
+        return self._add_status(agent_data)
+
+    def clear_webhook(self, agent_id: str) -> dict:
+        """Remove webhook configuration for an agent.
+
+        Args:
+            agent_id: The agent ID
+
+        Returns:
+            Updated agent data with status
+
+        Raises:
+            KeyError: If agent not found
+        """
+        agent_data = self._get_agent_raw(agent_id)
+        if not agent_data:
+            raise KeyError(f"Agent {agent_id} not found")
+
+        agent_data["webhook_url"] = ""
+        agent_data["webhook_secret"] = ""
+        self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(agent_data))
+        logger.info("agent_webhook_cleared agent=%s", agent_id)
         return self._add_status(agent_data)
 
     def remove_agents_by_pattern(self, pattern: str, cleanup_keys: bool = True) -> list[str]:

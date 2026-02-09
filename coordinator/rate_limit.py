@@ -32,6 +32,8 @@ RATE_LIMITS = {
     "admin_bulk_remove": (20, 60),
     "admin_list_agents": (30, 60),
     "rest_validate": (10, 60),
+    "register_webhook": (5, 60),
+    "unregister_webhook": (5, 60),
 }
 
 

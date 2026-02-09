@@ -116,7 +116,7 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 
 **Credentials**: Plugin hooks read `~/.claude/c3po-credentials.json` (0o600 perms) for auth. Contains `coordinator_url`, `api_token` (composite `server_secret.api_key`), `key_id`, `agent_pattern`. Legacy format with separate `server_secret` and `api_key` fields is also supported. Created by `setup.py --enroll`.
 
-**MCP tools**: `send_message` (send to another agent), `reply` (respond to a message), `get_messages` (peek at pending messages/replies, non-destructive), `wait_for_message` (block until message arrives, non-destructive), `ack_messages` (acknowledge messages so they no longer appear), `ping`, `list_agents`, `register_agent`, `set_description`.
+**MCP tools**: `send_message` (send to another agent), `reply` (respond to a message), `get_messages` (peek at pending messages/replies, non-destructive), `wait_for_message` (block until message arrives, non-destructive), `ack_messages` (acknowledge messages so they no longer appear), `register_webhook` (register webhook URL for instant notifications), `unregister_webhook` (remove webhook), `ping`, `list_agents`, `register_agent`, `set_description`.
 
 **Adding MCP tools**: When adding a new tool to `coordinator/server.py`, also update `hooks/hooks.json` (PreToolUse matcher list) and, if the tool uses `agent_id`, `hooks/ensure_agent_id.py` (TOOLS_NEEDING_AGENT_ID). The matcher must explicitly list all tool names because prefix patterns don't work in plugin hooks. New modules also need to be added to the `Dockerfile` COPY commands.
 
@@ -125,6 +125,8 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 **Message flow**: Messages go to `c3po:inbox:{agent}` Redis lists. Notifications (separate from messages) go to `c3po:notify:{agent}` to wake blocked `wait_for_message` calls without consuming messages. This separation prevents message loss. Messages have type `"message"`, replies have type `"reply"`. Each message gets a `message_id` used for replies. Replies also get a unique `reply_id` for individual acknowledgment.
 
 **Peek+Ack semantics**: `get_messages` and `wait_for_message` are non-destructive (peek). Messages stay in Redis lists until explicitly acknowledged via `ack_messages`. Acked IDs are stored in `c3po:acked:{agent}` (Redis SET, 24h TTL). When the acked set exceeds 20 entries, compaction removes acked entries from the underlying lists and clears the set. This prevents message loss when MCP tool calls are interrupted client-side.
+
+**Webhooks**: Agents can register a webhook URL via `register_webhook(url, secret)`. When a message or reply arrives, the coordinator fires an async HTTP POST to the webhook with body `{"agent_id": "recipient-id"}` and `X-C3PO-Signature` header containing HMAC-SHA256(secret, body_bytes) in hex. Webhooks are fire-and-forget notifications (5s timeout, no retries) — the agent still retrieves actual messages via `get_messages` + `ack_messages`. Webhook fields (`webhook_url`, `webhook_secret`) are stored in agent registration data in Redis.
 
 **Rate limiting**: Per-operation sliding window rate limits using Redis sorted sets. Different limits for different operations (e.g., `send_message`: 10/60s, `list_agents`: 30/60s, `rest_register`: 5/60s). Per-agent for MCP tools, per-IP for REST endpoints.
 

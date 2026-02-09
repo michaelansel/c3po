@@ -1,12 +1,16 @@
 """Tests for C3PO coordinator server."""
 
 import asyncio
+import hmac
+import hashlib
+import json
+from unittest.mock import Mock, patch
 
 import pytest
 
 import fakeredis
 
-from coordinator.server import _ping_impl, _list_agents_impl, _register_agent_impl, _set_description_impl, _get_messages_impl, _wait_for_message_impl, _upload_blob_impl, _fetch_blob_impl, INLINE_BLOB_THRESHOLD
+from coordinator.server import _ping_impl, _list_agents_impl, _register_agent_impl, _set_description_impl, _get_messages_impl, _wait_for_message_impl, _upload_blob_impl, _fetch_blob_impl, _register_webhook_impl, _unregister_webhook_impl, _fire_webhook, INLINE_BLOB_THRESHOLD
 from coordinator.agents import AgentManager
 from coordinator.blobs import BlobManager
 from coordinator.messaging import MessageManager
@@ -373,3 +377,150 @@ class TestResolveAgentId:
         ctx = MockContext({"agent_id": "macbook/myproject", "session_id": "test-session"})
         result = _resolve_agent_id(ctx, explicit_agent_id=None)
         assert result == "macbook/myproject"
+
+
+class TestRegisterWebhook:
+    """Tests for webhook registration."""
+
+    def test_register_webhook(self, agent_manager):
+        """Should register webhook for an agent."""
+        agent_manager.register_agent("agent-a")
+        result = _register_webhook_impl(
+            agent_manager,
+            "agent-a",
+            "https://example.com/webhook",
+            "secret-at-least-16ch"
+        )
+
+        assert result["id"] == "agent-a"
+        assert result["webhook_url"] == "https://example.com/webhook"
+        # Secret should be stripped from returned data
+        assert "webhook_secret" not in result
+
+    def test_register_webhook_nonexistent_agent(self, agent_manager):
+        """Should raise ToolError for nonexistent agent."""
+        with pytest.raises(ToolError):
+            _register_webhook_impl(
+                agent_manager,
+                "nonexistent",
+                "https://example.com",
+                "secret"
+            )
+
+
+class TestWebhookFiring:
+    """Tests for webhook HTTP calls."""
+
+    @patch('coordinator.server.httpx.Client')
+    def test_fire_webhook_calls_url_with_signature(self, mock_client):
+        """Should POST to webhook URL with HMAC signature."""
+        mock_instance = Mock()
+        mock_client.return_value.__enter__.return_value = mock_instance
+
+        _fire_webhook("agent-a", "https://example.com/hook", "secret-at-least-16ch")
+
+        # Give background thread time to execute
+        import time
+        time.sleep(0.1)
+
+        # Verify POST was called
+        assert mock_instance.post.called
+        call_args = mock_instance.post.call_args
+
+        # Check URL
+        assert call_args[0][0] == "https://example.com/hook"
+
+        # Check body
+        body = call_args[1]["content"]
+        assert body == b'{"agent_id": "agent-a"}'
+
+        # Check signature
+        headers = call_args[1]["headers"]
+        expected_sig = hmac.new(
+            b"secret-at-least-16ch",
+            body,
+            hashlib.sha256
+        ).hexdigest()
+        assert headers["X-C3PO-Signature"] == expected_sig
+
+    @patch('coordinator.server.httpx.Client')
+    def test_fire_webhook_does_not_raise_on_error(self, mock_client):
+        """Webhook errors should be logged but not raised."""
+        mock_instance = Mock()
+        mock_instance.post.side_effect = Exception("Connection failed")
+        mock_client.return_value.__enter__.return_value = mock_instance
+
+        # Should not raise
+        _fire_webhook("agent-a", "https://example.com/hook", "secret-at-least-16ch")
+
+        import time
+        time.sleep(0.1)  # Let background thread complete
+
+
+class TestUnregisterWebhook:
+    """Tests for webhook unregistration."""
+
+    def test_unregister_webhook(self, agent_manager):
+        """Should clear webhook fields for an agent."""
+        agent_manager.register_agent("agent-a")
+        agent_manager.set_webhook("agent-a", "https://example.com/hook", "secret123")
+        result = _unregister_webhook_impl(agent_manager, "agent-a")
+
+        assert result["id"] == "agent-a"
+        assert result["webhook_url"] == ""
+        # Secret should be stripped from returned data
+        assert "webhook_secret" not in result
+
+    def test_unregister_webhook_nonexistent_agent(self, agent_manager):
+        """Should raise ToolError for nonexistent agent."""
+        with pytest.raises(ToolError):
+            _unregister_webhook_impl(agent_manager, "nonexistent")
+
+
+class TestWebhookValidation:
+    """Tests for webhook input validation."""
+
+    def test_rejects_invalid_url(self, agent_manager):
+        """Should reject URLs that don't start with http/https."""
+        agent_manager.register_agent("agent-a")
+        with pytest.raises(ToolError, match="HTTP"):
+            _register_webhook_impl(agent_manager, "agent-a", "ftp://bad", "secret-at-least-16ch")
+
+    def test_rejects_short_secret(self, agent_manager):
+        """Should reject secrets shorter than 16 chars."""
+        agent_manager.register_agent("agent-a")
+        with pytest.raises(ToolError, match="16 characters"):
+            _register_webhook_impl(agent_manager, "agent-a", "https://example.com", "short")
+
+    def test_accepts_minimum_secret_length(self, agent_manager):
+        """Should accept secrets of exactly 16 chars."""
+        agent_manager.register_agent("agent-a")
+        result = _register_webhook_impl(
+            agent_manager, "agent-a", "https://example.com", "exactly16chars!!"
+        )
+        assert result["webhook_url"] == "https://example.com"
+
+
+class TestSecretStripping:
+    """Tests that webhook_secret is never exposed in tool responses."""
+
+    def test_list_agents_strips_secret(self, agent_manager):
+        """list_agents should not include webhook_secret."""
+        agent_manager.register_agent("agent-a")
+        agent_manager.set_webhook("agent-a", "https://example.com", "topsecretvalue!!")
+        agents = _list_agents_impl(agent_manager)
+        assert len(agents) == 1
+        assert "webhook_secret" not in agents[0]
+        assert agents[0]["webhook_url"] == "https://example.com"
+
+    def test_register_agent_strips_secret(self, agent_manager):
+        """register_agent should not include webhook_secret."""
+        result = _register_agent_impl(agent_manager, "agent-a")
+        assert "webhook_secret" not in result
+
+    def test_set_description_strips_secret(self, agent_manager):
+        """set_description should not include webhook_secret."""
+        agent_manager.register_agent("agent-a")
+        agent_manager.set_webhook("agent-a", "https://example.com", "topsecretvalue!!")
+        result = _set_description_impl(agent_manager, "agent-a", "desc")
+        assert "webhook_secret" not in result

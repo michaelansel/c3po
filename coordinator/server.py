@@ -3,6 +3,8 @@
 import asyncio
 import concurrent.futures
 import functools
+import hmac
+import hashlib
 import json
 import logging
 import os
@@ -13,6 +15,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 import redis
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -96,6 +99,44 @@ _shutdown_event = threading.Event()
 # Track active wait_for_message callers so the SIGTERM handler can wake them.
 _active_waiters: set[str] = set()
 _active_waiters_lock = threading.Lock()
+
+
+def _fire_webhook(agent_id: str, webhook_url: str, webhook_secret: str) -> None:
+    """Fire a webhook notification to an agent (fire-and-forget, non-blocking).
+
+    Posts {"agent_id": "recipient-id"} with HMAC-SHA256 signature in X-C3PO-Signature header.
+    Runs in background thread to avoid blocking message delivery.
+
+    Args:
+        agent_id: The recipient agent ID
+        webhook_url: The webhook URL to POST to
+        webhook_secret: The HMAC secret for signing the payload
+    """
+    def _post_webhook():
+        try:
+            body = json.dumps({"agent_id": agent_id}).encode("utf-8")
+            signature = hmac.new(
+                webhook_secret.encode("utf-8"),
+                body,
+                hashlib.sha256
+            ).hexdigest()
+
+            with httpx.Client(timeout=5.0) as client:
+                client.post(
+                    webhook_url,
+                    content=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-C3PO-Signature": signature,
+                    }
+                )
+            logger.info("webhook_fired agent=%s url=%s", agent_id, webhook_url)
+        except Exception as e:
+            # Log but don't raise - webhook failure shouldn't affect message delivery
+            logger.warning("webhook_failed agent=%s url=%s error=%s", agent_id, webhook_url, str(e))
+
+    # Fire webhook in background thread (non-blocking)
+    threading.Thread(target=_post_webhook, daemon=True).start()
 
 
 def _determine_path_prefix(path: str) -> str:
@@ -227,9 +268,14 @@ class AgentIdentityMiddleware(Middleware):
             agent_pattern = context.fastmcp_context.get_state("auth_agent_pattern") or "*"
             if agent_pattern != "*" and not AuthManager.validate_agent_pattern(agent_id, agent_pattern):
                 raise ToolError(f"Agent ID '{agent_id}' does not match key pattern '{agent_pattern}'")
-            # Register/heartbeat with full identity
-            registration = agent_manager.register_agent(agent_id, session_id)
-            actual_agent_id = registration["id"]
+            # Suppress auto-registration for system/service projects (underscore prefix)
+            if project_name.strip().startswith("_"):
+                actual_agent_id = agent_id
+                logger.info("system_project_skipped agent=%s (underscore prefix suppresses registration)", agent_id)
+            else:
+                # Register/heartbeat with full identity
+                registration = agent_manager.register_agent(agent_id, session_id)
+                actual_agent_id = registration["id"]
         elif machine_name == "anonymous":
             # No project name and no machine name — likely Claude Desktop/Claude.ai
             # which can't set custom headers or run hooks.
@@ -965,9 +1011,15 @@ def _ping_impl() -> dict:
     }
 
 
+def _strip_secrets(agent_data: dict) -> dict:
+    """Strip webhook_secret from agent data before returning to callers."""
+    agent_data.pop("webhook_secret", None)
+    return agent_data
+
+
 def _list_agents_impl(manager: AgentManager) -> list[dict]:
     """List all registered agents."""
-    return manager.list_agents()
+    return [_strip_secrets(a) for a in manager.list_agents()]
 
 
 def _register_agent_impl(
@@ -978,7 +1030,7 @@ def _register_agent_impl(
     capabilities: Optional[list[str]] = None,
 ) -> dict:
     """Register an agent with optional name and capabilities."""
-    return manager.register_agent(agent_id, session_id, capabilities)
+    return _strip_secrets(manager.register_agent(agent_id, session_id, capabilities))
 
 
 # Validation patterns
@@ -1056,7 +1108,43 @@ def _set_description_impl(
 ) -> dict:
     """Set the description for an agent."""
     try:
-        return manager.set_description(agent_id, description)
+        return _strip_secrets(manager.set_description(agent_id, description))
+    except KeyError:
+        available = manager.list_agents()
+        agent_ids = [a["id"] for a in available]
+        err = agent_not_found(agent_id, agent_ids)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+
+def _register_webhook_impl(
+    manager: AgentManager,
+    agent_id: str,
+    url: str,
+    secret: str,
+) -> dict:
+    """Register webhook configuration for an agent."""
+    if not url or not url.startswith(("http://", "https://")):
+        err = invalid_request("url", "must be a valid HTTP(S) URL")
+        raise ToolError(f"{err.message} {err.suggestion}")
+    if not secret or len(secret) < 16:
+        err = invalid_request("secret", "must be at least 16 characters")
+        raise ToolError(f"{err.message} {err.suggestion}")
+    try:
+        return _strip_secrets(manager.set_webhook(agent_id, url, secret))
+    except KeyError:
+        available = manager.list_agents()
+        agent_ids = [a["id"] for a in available]
+        err = agent_not_found(agent_id, agent_ids)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+
+def _unregister_webhook_impl(
+    manager: AgentManager,
+    agent_id: str,
+) -> dict:
+    """Remove webhook configuration for an agent."""
+    try:
+        return _strip_secrets(manager.clear_webhook(agent_id))
     except KeyError:
         available = manager.list_agents()
         agent_ids = [a["id"] for a in available]
@@ -1102,7 +1190,16 @@ def _send_message_impl(
         logger.warning("send_rejected from=%s to=%s reason=agent_not_found", from_agent, to)
         raise ToolError(f"{err.message} {err.suggestion}")
 
-    return msg_manager.send_message(from_agent, to, message, context)
+    # Send message to Redis inbox
+    result = msg_manager.send_message(from_agent, to, message, context)
+
+    # Fire webhook if recipient has one registered
+    webhook_url = resolved_target.get("webhook_url")
+    webhook_secret = resolved_target.get("webhook_secret")
+    if webhook_url and webhook_secret:
+        _fire_webhook(to, webhook_url, webhook_secret)
+
+    return result
 
 
 def _get_messages_impl(
@@ -1354,6 +1451,67 @@ def set_description(
 
 
 @mcp.tool()
+def register_webhook(
+    ctx: Context,
+    url: str,
+    secret: str,
+    agent_id: Optional[str] = None,
+) -> dict:
+    """Register a webhook for instant message notifications.
+
+    When a message or reply arrives for this agent, the coordinator will POST
+    to the webhook URL with HMAC-SHA256 signature for verification.
+
+    POST body: {"agent_id": "recipient-id"}
+    Header: X-C3PO-Signature: <hex-encoded HMAC-SHA256(secret, body_bytes)>
+
+    The webhook is a wake-up notification only. Use get_messages + ack_messages
+    to retrieve actual message content.
+
+    Args:
+        ctx: MCP context (injected automatically)
+        url: The webhook URL to POST to (must be http:// or https://)
+        secret: The HMAC secret for signing payloads (min 16 characters)
+        agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
+
+    Returns:
+        Updated agent data including webhook configuration
+    """
+    effective_id = _resolve_agent_id(ctx, agent_id)
+    _enforce_agent_pattern(ctx, effective_id)
+
+    allowed, _ = rate_limiter.check_and_record("register_webhook", effective_id)
+    if not allowed:
+        err = rate_limited(effective_id, 5, 60)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    return _register_webhook_impl(agent_manager, effective_id, url, secret)
+
+
+@mcp.tool()
+def unregister_webhook(
+    ctx: Context,
+    agent_id: Optional[str] = None,
+) -> dict:
+    """Remove the webhook registration for this agent.
+
+    After unregistering, message delivery notifications will no longer
+    be sent to the webhook URL. Messages can still be retrieved via
+    get_messages and wait_for_message.
+
+    Args:
+        ctx: MCP context (injected automatically)
+        agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
+
+    Returns:
+        Updated agent data confirming webhook removal
+    """
+    effective_id = _resolve_agent_id(ctx, agent_id)
+    _enforce_agent_pattern(ctx, effective_id)
+    return _unregister_webhook_impl(agent_manager, effective_id)
+
+
+@mcp.tool()
 def send_message(
     ctx: Context,
     to: str,
@@ -1428,9 +1586,21 @@ def reply(
     """
     from_agent = _resolve_agent_id(ctx, agent_id)
     _enforce_agent_pattern(ctx, from_agent)
-    return _reply_impl(
+    result = _reply_impl(
         message_manager, from_agent, message_id, response, status
     )
+
+    # Fire webhook if reply recipient has one registered
+    to_agent = result.get("to_agent")
+    if to_agent:
+        target_agent = agent_manager.get_agent(to_agent)
+        if target_agent:
+            webhook_url = target_agent.get("webhook_url")
+            webhook_secret = target_agent.get("webhook_secret")
+            if webhook_url and webhook_secret:
+                _fire_webhook(to_agent, webhook_url, webhook_secret)
+
+    return result
 
 
 @mcp.tool()
