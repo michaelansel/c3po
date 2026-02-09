@@ -3,6 +3,7 @@
 import json
 import os
 import platform
+import re
 import sys
 
 import pytest
@@ -18,6 +19,7 @@ from c3po_common import (
     get_coordinator_url,
     get_session_id,
     read_agent_id,
+    sanitize_name,
     save_agent_id,
     save_credentials,
     delete_agent_id_file,
@@ -290,3 +292,138 @@ class TestAuthHeaders:
         monkeypatch.setattr(c3po_common, "CREDENTIALS_FILE", str(creds_file))
         headers = auth_headers()
         assert headers == {"Authorization": "Bearer new-token"}
+
+
+class TestSanitizeName:
+    """Tests for the sanitize_name function."""
+
+    def test_preserves_simple_names(self):
+        assert sanitize_name("my-project") == "my-project"
+
+    def test_preserves_alphanumeric_with_dots_and_underscores(self):
+        assert sanitize_name("my_project.v2") == "my_project.v2"
+
+    def test_replaces_spaces_with_hyphens(self):
+        assert sanitize_name("my project") == "my-project"
+
+    def test_replaces_special_characters(self):
+        assert sanitize_name("my@project#name!") == "my-project-name"
+
+    def test_collapses_consecutive_hyphens(self):
+        assert sanitize_name("my@@project") == "my-project"
+        assert sanitize_name("a!!!b") == "a-b"
+
+    def test_strips_leading_and_trailing_hyphens(self):
+        assert sanitize_name("@project@") == "project"
+        assert sanitize_name("!!name!!") == "name"
+
+    def test_empty_string_returns_empty(self):
+        assert sanitize_name("") == ""
+
+    def test_all_special_chars_returns_empty(self):
+        assert sanitize_name("@#$%") == ""
+
+    def test_preserves_slashes(self):
+        """Slashes are valid in agent IDs (machine/project format)."""
+        assert sanitize_name("machine/project") == "machine/project"
+
+    def test_result_matches_coordinator_pattern(self):
+        """Sanitized names should match the coordinator's AGENT_ID_PATTERN."""
+        # Pattern from coordinator/server.py
+        pattern = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,63}$")
+
+        test_names = ["my-project", "Code", "c3po", "My Project v2.0"]
+        for name in test_names:
+            result = sanitize_name(name)
+            assert pattern.match(result), f"sanitize_name({name!r}) = {result!r} doesn't match AGENT_ID_PATTERN"
+
+
+class TestHooksJsonValidation:
+    """Validate that hooks.json is structurally correct and references existing files."""
+
+    HOOKS_JSON = os.path.join(os.path.dirname(__file__), "..", "hooks.json")
+    PLUGIN_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
+
+    # Known valid hook event types from Claude Code docs
+    KNOWN_EVENTS = {
+        "Setup",  # Plugin-specific
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Notification",
+        "SubagentStart",
+        "SubagentStop",
+        "Stop",
+        "TeammateIdle",
+        "TaskCompleted",
+        "PreCompact",
+        "SessionEnd",
+    }
+
+    KNOWN_HOOK_FIELDS = {"type", "command", "timeout", "async", "statusMessage", "once", "prompt", "model"}
+
+    def _load_hooks_json(self):
+        with open(self.HOOKS_JSON) as f:
+            return json.load(f)
+
+    def test_valid_json(self):
+        """hooks.json should be valid JSON."""
+        self._load_hooks_json()  # Raises on invalid JSON
+
+    def test_has_hooks_key(self):
+        data = self._load_hooks_json()
+        assert "hooks" in data
+
+    def test_uses_known_event_types(self):
+        """All event types in hooks.json should be recognized by Claude Code."""
+        data = self._load_hooks_json()
+        for event_name in data["hooks"]:
+            assert event_name in self.KNOWN_EVENTS, (
+                f"Unknown hook event type: {event_name!r}. "
+                f"Known types: {sorted(self.KNOWN_EVENTS)}"
+            )
+
+    def test_hook_entries_have_valid_structure(self):
+        """Each hook entry should have a 'hooks' array with valid hook definitions."""
+        data = self._load_hooks_json()
+        for event_name, entries in data["hooks"].items():
+            assert isinstance(entries, list), f"{event_name} should be a list"
+            for i, entry in enumerate(entries):
+                assert "hooks" in entry, f"{event_name}[{i}] missing 'hooks' key"
+                assert isinstance(entry["hooks"], list), f"{event_name}[{i}].hooks should be a list"
+                for j, hook in enumerate(entry["hooks"]):
+                    assert "type" in hook, f"{event_name}[{i}].hooks[{j}] missing 'type'"
+                    assert hook["type"] in ("command", "prompt", "agent"), (
+                        f"{event_name}[{i}].hooks[{j}] has unknown type: {hook['type']}"
+                    )
+
+    def test_hook_fields_are_known(self):
+        """Hook definitions should only use known fields."""
+        data = self._load_hooks_json()
+        for event_name, entries in data["hooks"].items():
+            for i, entry in enumerate(entries):
+                for j, hook in enumerate(entry["hooks"]):
+                    unknown = set(hook.keys()) - self.KNOWN_HOOK_FIELDS
+                    assert not unknown, (
+                        f"{event_name}[{i}].hooks[{j}] has unknown fields: {unknown}"
+                    )
+
+    def test_referenced_files_exist(self):
+        """All script files referenced in hooks.json should exist."""
+        data = self._load_hooks_json()
+        for event_name, entries in data["hooks"].items():
+            for entry in entries:
+                for hook in entry["hooks"]:
+                    if hook["type"] == "command":
+                        command = hook["command"]
+                        # Extract the Python script path from the command
+                        # Format: python3 "${CLAUDE_PLUGIN_ROOT}/path/to/script.py"
+                        if "${CLAUDE_PLUGIN_ROOT}" in command:
+                            relative_path = command.split("${CLAUDE_PLUGIN_ROOT}/")[1].rstrip('"')
+                            full_path = os.path.join(self.PLUGIN_ROOT, relative_path)
+                            assert os.path.exists(full_path), (
+                                f"{event_name} references non-existent file: {relative_path}"
+                            )

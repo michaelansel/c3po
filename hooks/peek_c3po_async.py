@@ -2,6 +2,7 @@
 """
 C3PO Async Peek Hook - Check for new coordination messages with low latency.
 
+
 This hook runs asynchronously after every tool call (PostToolUse event).
 It peeks at the C-3PO inbox and surfaces new messages via systemMessage
 on the next conversation turn, providing <10s interrupt latency.
@@ -17,6 +18,8 @@ Environment variables:
 - C3PO_COORDINATOR_URL: Coordinator URL (default: http://localhost:8420)
 - TMPDIR: Temp directory for rate-limit tracking (default: /tmp)
 """
+
+from __future__ import annotations
 
 import json
 import os
