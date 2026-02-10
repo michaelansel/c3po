@@ -29,10 +29,22 @@ from c3po_common import auth_headers, get_coordinator_url, get_machine_name, get
 COORDINATOR_URL = get_coordinator_url()
 MACHINE_NAME = get_machine_name()
 
-# Project context — sanitize to match coordinator's AGENT_ID_PATTERN
-PROJECT_NAME = sanitize_name(
-    os.environ.get("CLAUDE_PROJECT_NAME") or os.path.basename(os.getcwd())
-)
+# Project context from Gas Town environment variables
+# Format: gt-{rig}-{role}-{crew} (e.g., gt-c3po-crew-michaelansel)
+# Fallback to CLAUDE_PROJECT_NAME or basename(cwd) if GT_RIG not set
+gt_rig = os.environ.get("GT_RIG", "")
+gt_role = os.environ.get("GT_ROLE", "")
+gt_crew = os.environ.get("GT_CREW", "")
+
+if gt_rig:
+    # Build project name from Gas Town env vars
+    components = [c for c in [gt_rig, gt_role, gt_crew] if c]
+    PROJECT_NAME = sanitize_name("gt-" + "-".join(components))
+else:
+    # Fallback: use legacy behavior
+    PROJECT_NAME = sanitize_name(
+        os.environ.get("CLAUDE_PROJECT_NAME") or os.path.basename(os.getcwd())
+    )
 
 
 def register_with_coordinator(session_id: str) -> dict | None:
