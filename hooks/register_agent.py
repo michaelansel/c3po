@@ -36,10 +36,46 @@ gt_rig = os.environ.get("GT_RIG", "")
 gt_role = os.environ.get("GT_ROLE", "")
 gt_crew = os.environ.get("GT_CREW", "")
 
-if gt_rig:
+if gt_role:
+    # Log all GT_* environment variables for future analysis
+    if os.environ.get("C3PO_DEBUG"):
+        gt_env_vars = {k: v for k, v in os.environ.items() if k.startswith("GT_")}
+        print(f"[c3po:debug] GT environment variables: {gt_env_vars}", file=sys.stderr)
+
     # Build project name from Gas Town env vars
-    components = [c for c in [gt_rig, gt_role, gt_crew] if c]
-    PROJECT_NAME = sanitize_name("gt-" + "-".join(components))
+    # Handle special cases for roles like mayor/deacon
+    if gt_role in ["mayor", "deacon"]:
+        # For mayor/deacon, we use a different pattern: gt-{rig}-{role}
+        # This prevents the crew from being appended inappropriately
+        # Remove "gt-" prefix from rig if present to avoid double prefix
+        clean_rig = gt_rig.replace("gt-", "", 1) if gt_rig.startswith("gt-") else gt_rig
+        # If clean_rig is empty (GT_RIG was not set), we don't want to include it
+        if clean_rig:
+            components = [clean_rig, gt_role]
+        else:
+            components = [gt_role]
+        PROJECT_NAME = sanitize_name("gt-" + "-".join(components))
+        # Log for future enhancement analysis
+        if os.environ.get("C3PO_DEBUG"):
+            if clean_rig:
+                print(f"[c3po:debug] Special role handling: {gt_role} -> gt-{clean_rig}-{gt_role}", file=sys.stderr)
+            else:
+                print(f"[c3po:debug] Special role handling: {gt_role} -> gt-{gt_role}", file=sys.stderr)
+    else:
+        # Standard crew pattern: gt-{rig}-{role}-{crew}
+        # Build components properly, filtering out empty values
+        components = []
+        if gt_rig:
+            components.append(gt_rig)
+        components.append(gt_role)
+        if gt_crew:  # Only add crew if it's not empty
+            components.append(gt_crew)
+        PROJECT_NAME = sanitize_name("gt-" + "-".join(components))
+        if os.environ.get("C3PO_DEBUG"):
+            if gt_rig:
+                print(f"[c3po:debug] Standard role handling: {gt_role} -> gt-{gt_rig}-{gt_role}{('-' + gt_crew) if gt_crew else ''}", file=sys.stderr)
+            else:
+                print(f"[c3po:debug] Standard role handling: {gt_role} -> gt-{gt_role}{('-' + gt_crew) if gt_crew else ''}", file=sys.stderr)
 else:
     # Fallback: use legacy behavior
     PROJECT_NAME = sanitize_name(
