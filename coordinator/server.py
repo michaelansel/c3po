@@ -1226,19 +1226,14 @@ def _send_message_impl(
 def _get_messages_impl(
     msg_manager: MessageManager,
     agent_id: str,
-    message_type: Optional[str] = None,
 ) -> list[dict]:
-    """Get all pending messages (incoming and/or replies) for an agent.
+    """Get all pending messages (incoming and replies) for an agent.
 
     Non-destructive: messages remain until acked. Repeated calls may
     return the same messages.
     """
-    valid_types = ("message", "reply", "request", "response")  # accept legacy values
-    if message_type is not None and message_type not in valid_types:
-        err = invalid_request("type", "must be 'message', 'reply', or omitted for both")
-        raise ToolError(f"{err.message} {err.suggestion}")
-    logger.info("get_messages agent=%s type=%s", agent_id, message_type)
-    return msg_manager.get_messages(agent_id, message_type)
+    logger.info("get_messages agent=%s", agent_id)
+    return msg_manager.get_messages(agent_id)
 
 
 def _reply_impl(

@@ -116,37 +116,35 @@ class TestGetMessagesImpl:
         message_manager.send_message("a", "b", "hello")
         result = _get_messages_impl(message_manager, "b")
         assert len(result) == 1
-        assert result[0]["type"] == "message"
+        assert result[0]["message"] == "hello"
+        assert "type" not in result[0]  # No type field
 
-    def test_invalid_type_raises(self, message_manager):
-        """Should raise ToolError for invalid type parameter."""
-        with pytest.raises(ToolError):
-            _get_messages_impl(message_manager, "b", message_type="invalid")
-
-    def test_none_type_returns_both(self, message_manager):
-        """Should return both messages and replies when type is None."""
+    def test_returns_both_messages_and_replies(self, message_manager):
+        """Should return both messages and replies from single queue."""
         req = message_manager.send_message("a", "b", "Q")
         message_manager.reply(req["id"], "b", "A")
 
         # Agent a gets replies, agent b gets messages
-        msgs_a = _get_messages_impl(message_manager, "a", message_type=None)
+        msgs_a = _get_messages_impl(message_manager, "a")
         assert len(msgs_a) == 1
-        assert msgs_a[0]["type"] == "reply"
+        assert msgs_a[0]["response"] == "A"
+        assert msgs_a[0]["to_agent"] == "a"
+        assert "type" not in msgs_a[0]  # No type field
 
-    def test_legacy_type_request_accepted(self, message_manager):
-        """Should accept legacy type='request' and return messages."""
-        message_manager.send_message("a", "b", "hello")
-        result = _get_messages_impl(message_manager, "b", message_type="request")
-        assert len(result) == 1
-        assert result[0]["type"] == "message"
+        msgs_b = _get_messages_impl(message_manager, "b")
+        assert len(msgs_b) == 1
+        assert msgs_b[0]["message"] == "Q"
+        assert msgs_b[0]["from_agent"] == "a"
+        assert "type" not in msgs_b[0]  # No type field
 
-    def test_legacy_type_response_accepted(self, message_manager):
-        """Should accept legacy type='response' and return replies."""
+    def test_message_has_reply_to(self, message_manager):
+        """Messages should have reply_to field when they are replies."""
         req = message_manager.send_message("a", "b", "Q")
-        message_manager.reply(req["id"], "b", "A")
-        result = _get_messages_impl(message_manager, "a", message_type="response")
-        assert len(result) == 1
-        assert result[0]["type"] == "reply"
+        reply = message_manager.reply(req["id"], "b", "A")
+
+        # Check that reply has reply_to field
+        assert reply["reply_to"] == req["id"]
+        assert "type" not in reply  # No type field
 
 
 class TestWaitForMessageImpl:
@@ -164,11 +162,16 @@ class TestWaitForMessageImpl:
         result = _wait_for_message_impl(message_manager, "b", timeout=5)
         assert result["status"] == "received"
         assert len(result["messages"]) == 1
+        assert result["messages"][0]["message"] == "hello"
 
-    def test_invalid_type_raises(self, message_manager):
-        """Should raise ToolError for invalid type parameter."""
-        with pytest.raises(ToolError):
-            _wait_for_message_impl(message_manager, "b", timeout=1, message_type="invalid")
+    def test_wakes_on_reply(self, message_manager):
+        """Should wake when a reply is queued."""
+        req = message_manager.send_message("a", "b", "Q")
+        message_manager.reply(req["id"], "b", "A")
+        result = _wait_for_message_impl(message_manager, "a", timeout=5)
+        assert result["status"] == "received"
+        assert len(result["messages"]) == 1
+        assert result["messages"][0]["response"] == "A"
 
     def test_timeout_clamped_to_max(self, message_manager):
         """Timeout > 3600 should be clamped, not error. Pre-queue a message so it returns immediately."""

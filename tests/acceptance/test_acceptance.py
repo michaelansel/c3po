@@ -266,9 +266,7 @@ async def phase_5():
 
                     # Step 2: Agent B gets pending messages
                     log("Step 2: Agent B checks pending messages")
-                    result = await sess_b.call_tool("get_messages", {
-                        "type": "message",
-                    })
+                    result = await sess_b.call_tool("get_messages", {})
                     result_text = str(result)
                     passed = assert_true(
                         "What is 2+2" in result_text,
