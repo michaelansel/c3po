@@ -80,7 +80,7 @@ Show the description in quotes after the status if the agent has one. Omit it if
 ### `/c3po send <agent> <message>`
 
 1. Call `send_message` tool with to=agent and message=message
-2. Call `wait_for_message` with type="reply" and `timeout=3600` (user will Ctrl+C if needed)
+2. Call `wait_for_message` with `timeout=3600` (user will Ctrl+C if needed)
 3. Display the response or timeout message
 
 Example:
@@ -113,8 +113,8 @@ Enter auto-listen mode: a tight loop that waits for incoming messages with minim
 4. Call `get_messages` to check for already-queued messages. If messages are returned, skip to step 6.
 5. Call `wait_for_message` with `timeout=3600`. If timeout (no messages): print ONLY `Still listening...` and go back to step 4.
 6. Process each message fully:
-   - For incoming messages (type="message"): read the message, use any tools needed to research an answer, then call `reply` with your response
-   - For replies (type="reply"): display the reply content to the user
+   - For messages with `reply_to` field: display the reply content to the user
+   - For messages without `reply_to` field: read the message, use any tools needed to research an answer, then call `reply` with your response
    - After processing all messages, go back to step 4
 
 **Critical rules for auto-listen mode:**

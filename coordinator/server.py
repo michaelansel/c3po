@@ -1276,7 +1276,6 @@ def _wait_for_message_impl(
     msg_manager: MessageManager,
     agent_id: str,
     timeout: int = 60,
-    message_type: Optional[str] = None,
     heartbeat_fn: Optional[callable] = None,
     shutdown_event: Optional[threading.Event] = None,
 ) -> dict:
@@ -1291,17 +1290,12 @@ def _wait_for_message_impl(
     if timeout > MAX_WAIT_TIMEOUT:
         timeout = MAX_WAIT_TIMEOUT
 
-    valid_types = ("message", "reply", "request", "response")
-    if message_type is not None and message_type not in valid_types:
-        err = invalid_request("type", "must be 'message', 'reply', or omitted for both")
-        raise ToolError(f"{err.message} {err.suggestion}")
-    logger.info("wait_for_message agent=%s timeout=%d type=%s", agent_id, timeout, message_type)
     start_time = time.monotonic()
     with _active_waiters_lock:
         _active_waiters.add(agent_id)
     try:
         result = msg_manager.wait_for_message(
-            agent_id, timeout, message_type,
+            agent_id, timeout,
             heartbeat_fn=heartbeat_fn,
             shutdown_event=shutdown_event,
         )
@@ -1569,27 +1563,23 @@ def send_message(
 @mcp.tool()
 def get_messages(
     ctx: Context,
-    type: Optional[str] = None,
     agent_id: Optional[str] = None,
 ) -> list[dict]:
     """Get all pending messages (incoming messages and replies) for this agent.
 
     Messages are NOT consumed. Call ack_messages with the message IDs to
     remove them. Repeated calls may return the same messages until acked.
-    Each message has a "type" field: "message" or "reply".
 
     Args:
         ctx: MCP context (injected automatically)
-        type: Optional filter - "message" for incoming messages only,
-              "reply" for replies only, or omit for both
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
-        List of message dicts with type, id/message_id, from_agent, message/response, etc.
+        List of message dicts with id/message_id, from_agent, to_agent, message/response, etc.
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
     _enforce_agent_pattern(ctx, effective_id)
-    return _get_messages_impl(message_manager, effective_id, type)
+    return _get_messages_impl(message_manager, effective_id)
 
 
 @mcp.tool()
@@ -1635,7 +1625,6 @@ def reply(
 async def wait_for_message(
     ctx: Context,
     timeout: int = 60,
-    type: Optional[str] = None,
     agent_id: Optional[str] = None,
 ) -> dict:
     """Wait for any message (incoming message or reply) to arrive.
@@ -1650,8 +1639,6 @@ async def wait_for_message(
     Args:
         ctx: MCP context (injected automatically)
         timeout: Maximum seconds to wait (default 60, max 3600)
-        type: Optional filter - "message" for incoming messages only,
-              "reply" for replies only, or omit for both
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
@@ -1668,7 +1655,7 @@ async def wait_for_message(
         result = await asyncio.get_running_loop().run_in_executor(
             _wait_pool,
             functools.partial(
-                _wait_for_message_impl, message_manager, effective_id, timeout, type,
+                _wait_for_message_impl, message_manager, effective_id, timeout,
                 heartbeat_fn=lambda: agent_manager.touch_heartbeat(effective_id),
                 shutdown_event=_shutdown_event,
             ),

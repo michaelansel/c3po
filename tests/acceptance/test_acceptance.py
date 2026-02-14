@@ -292,7 +292,6 @@ async def phase_5():
                     # Step 4: Agent A waits for reply
                     log("Step 4: Agent A waits for reply via wait_for_message")
                     result = await sess_a.call_tool("wait_for_message", {
-                        "type": "reply",
                         "timeout": 30,
                     })
                     result_text = str(result)
@@ -355,19 +354,18 @@ async def phase_6():
                     f"wait_for_message crashed immediately: {e}",
                 ) and passed
 
-            # Step 2: wait_for_message with type=message filter (timeout)
-            log("Step 2: wait_for_message type=message with timeout=5")
+            # Step 2: wait_for_message with no pending messages (timeout)
+            log("Step 2: wait_for_message with no pending messages (timeout=5)")
             start = time.time()
             try:
                 result = await session.call_tool("wait_for_message", {
-                    "type": "message",
                     "timeout": 5,
                 })
                 result_text = str(result)
                 elapsed = time.time() - start
                 passed = assert_true(
                     "timeout" in result_text.lower(),
-                    f"wait_for_message type=message returns timeout status (took {elapsed:.1f}s)",
+                    f"wait_for_message returns timeout status (took {elapsed:.1f}s)",
                     f"Expected timeout, got: {result_text}",
                 ) and passed
             except Exception as e:
@@ -500,8 +498,8 @@ async def phase_6b():
                         f"list_agents took {other_elapsed:.1f}s — coordinator was blocked by wait_for_message",
                     ) and passed
 
-                    # Step 2: Same test with wait_for_message type=reply
-                    log("Step 2: blocker starts wait_for_message(type=reply, timeout=15), other calls ping concurrently")
+                    # Step 2: Same test with wait_for_message (no type filter)
+                    log("Step 2: blocker starts wait_for_message (no type filter, timeout=15), other calls ping concurrently")
 
                     async def blocker_wait_response():
                         return await sess_blocker.call_tool("wait_for_message", {
