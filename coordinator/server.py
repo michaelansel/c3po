@@ -1284,6 +1284,7 @@ def _wait_for_message_impl(
 
     Returns the messages directly, not a notification.
     """
+    logger.info("wait_for_message_impl started agent=%s timeout=%d", agent_id, timeout)
     # Clamp timeout to valid range
     if timeout < 1:
         timeout = 1
@@ -1304,6 +1305,12 @@ def _wait_for_message_impl(
             heartbeat_fn=heartbeat_fn,
             shutdown_event=shutdown_event,
         )
+    except BaseException as e:
+        # Catch thread termination (e.g., when thread is killed by SIGTERM)
+        # This logs the exception but doesn't break the function
+        logger.error("wait_for_message_impl_terminated agent=%s exception_type=%s exception=%s",
+                     agent_id, type(e).__name__, e)
+        raise  # Re-raise so the async wrapper catches it
     finally:
         elapsed = time.monotonic() - start_time
         with _active_waiters_lock:
@@ -1675,9 +1682,16 @@ async def wait_for_message(
             "message": "Server is restarting. Please call wait_for_message again in 15 seconds.",
             "retry_after": 15,
         }
-    except Exception as e:
-        logger.error("wait_for_message_error agent=%s error=%s", effective_id, e)
-        raise
+    except BaseException as e:
+        # Catch thread termination exceptions (e.g., when thread is killed by SIGTERM)
+        # These are not caught by the current exception handler
+        logger.error("wait_for_message_thread_terminated agent=%s exception_type=%s", effective_id, type(e).__name__)
+        return {
+            "status": "error",
+            "code": ErrorCodes.INTERNAL_ERROR,
+            "message": "Session terminated while waiting for messages. Please call wait_for_message again.",
+            "retry_after": 15,
+        }
 
 
 def _ack_messages_impl(
