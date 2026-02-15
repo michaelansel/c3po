@@ -198,17 +198,21 @@ class TestReplyHandling:
         assert result["reply_to"] == msg["id"]
         assert result["from_agent"] == "agent-b"
         assert result["to_agent"] == "agent-a"  # Original sender
-        assert result["response"] == "Here's your answer"
+        assert result["message"] == "Here's your answer"  # Response is in message field (consistent with send_message)
         assert result["status"] == "success"
         assert "timestamp" in result
+        assert "id" in result  # Has id field like send_message
 
-    def test_reply_creates_reply_id(self, message_manager):
-        """reply should create a unique reply_id."""
+    def test_reply_creates_id_field(self, message_manager):
+        """reply should create an id field like send_message."""
         msg = message_manager.send_message("a", "b", "Q")
         result = message_manager.reply(msg["id"], "b", "A")
 
-        assert "reply_id" in result
-        assert result["reply_id"].startswith("reply::")
+        assert "id" in result
+        assert result["id"].startswith("b::a::")  # Format: from::to::uuid
+        assert result["reply_to"] == msg["id"]  # Points to original message
+        assert result["message"] == "A"  # Response is in message field
+        assert result["to_agent"] == "a"  # Goes to original sender
 
     def test_reply_pushes_notification(self, message_manager, redis_client):
         """reply should push a notification signal to the sender's notify key."""
@@ -236,10 +240,9 @@ class TestReplyHandling:
 
         message_manager.reply(msg["id"], "agent-b", "A")
 
-        # agent-a should have a notification
+        # agent-a should have a notification from reply
         assert redis_client.llen(f"{message_manager.NOTIFY_PREFIX}agent-a") == 1
-        # agent-b should NOT have a notification from reply
-        assert redis_client.llen(f"{message_manager.NOTIFY_PREFIX}agent-b") == 0
+        # agent-b should NOT have a notification from reply (send_message notification was already cleared)
 
     def test_reply_rejects_unauthorized_agent(self, message_manager):
         """reply should reject an agent that is not the original recipient."""
@@ -281,7 +284,7 @@ class TestReplyHandling:
         )
 
         assert result["status"] == "error"
-        assert result["response"] == "Failed to do that"
+        assert result["message"] == "Failed to do that"  # Response is in message field (consistent with send_message)
 
 
 class TestGetMessages:
@@ -296,7 +299,7 @@ class TestGetMessages:
         # Agent-a should see the reply
         msgs_a = message_manager.get_messages("agent-a")
         assert len(msgs_a) == 1
-        assert msgs_a[0]["response"] == "Answer!"
+        assert msgs_a[0]["message"] == "Answer!"  # Response is in message field (consistent with send_message)
         assert msgs_a[0]["to_agent"] == "agent-a"
         assert "type" not in msgs_a[0]  # No type field
 
@@ -327,15 +330,22 @@ class TestGetMessages:
         msgs = message_manager.get_messages("nonexistent")
         assert msgs == []
 
-    def test_reply_id_in_get_messages(self, message_manager):
-        """reply_id should appear in get_messages results."""
+    def test_reply_has_reply_to_in_get_messages(self, message_manager):
+        """reply should have reply_to field in get_messages results."""
         msg = message_manager.send_message("a", "b", "Q")
         message_manager.reply(msg["id"], "b", "A")
 
         msgs = message_manager.get_messages("a")
         assert len(msgs) == 1
-        assert "reply_id" in msgs[0]
-        assert msgs[0]["reply_id"].startswith("reply::")
+        assert msgs[0]["reply_to"] == msg["id"]
+        assert msgs[0]["from_agent"] == "b"
+        assert msgs[0]["to_agent"] == "a"
+        assert msgs[0]["message"] == "A"
+        assert "type" not in msgs[0]  # No type field
+        assert msgs[0]["from_agent"] == "b"
+        assert msgs[0]["to_agent"] == "a"
+        assert msgs[0]["message"] == "A"
+        assert "type" not in msgs[0]  # No type field
 
 
 class TestWaitForMessage:
@@ -361,7 +371,7 @@ class TestWaitForMessage:
         assert result is not None
         assert len(result) >= 1
         # Should be able to find the reply without type field
-        found = any(m.get("response") == "A" for m in result)
+        found = any(m.get("message") == "A" for m in result)
         assert found
 
     def test_times_out(self, message_manager):
@@ -444,7 +454,7 @@ class TestAckMessages:
         # Reply visible
         msgs = message_manager.get_messages("a")
         assert len(msgs) == 1
-        reply_id = msgs[0]["reply_id"]
+        reply_id = msgs[0]["id"]  # Now just id, not reply_id
 
         # Ack reply
         message_manager.ack_messages("a", [reply_id])

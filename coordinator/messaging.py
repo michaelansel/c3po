@@ -324,16 +324,18 @@ return kept
     ) -> dict:
         """Send a reply to a previous message.
 
+        This is a thin wrapper around send_message() that adds reply_to field.
+
         Args:
             message_id: The ID of the original message
-            from_agent: The agent sending the reply (must be the original recipient)
+            from_agent: The agent sending the reply
             response: The reply content
             status: Reply status, default "success"
 
         Returns:
-            Reply data dict with reply_to, from_agent, to_agent, response, etc.
+            Message data dict with id, from_agent, to_agent, message, etc.
         """
-        # Parse message_id to find original sender
+        # Parse message_id to find original sender and recipient
         original_sender, original_recipient = self._parse_message_id(message_id)
 
         # Authorization: only the original recipient can reply to a message
@@ -343,17 +345,20 @@ return kept
                 f"(recipient is '{original_recipient}')"
             )
 
-        now = datetime.now(timezone.utc).isoformat()
-        reply_id = f"reply::{message_id}::{uuid.uuid4().hex[:8]}"
+        # Generate unique ID for this reply (like send_message does)
+        reply_id = self._generate_message_id(from_agent, original_sender)
 
+        # Create reply message with same structure as send_message
+        # Use 'message' field for consistency with send_message()
         reply_data = {
-            "reply_to": message_id,
-            "reply_id": reply_id,
+            "id": reply_id,
+            "reply_to": message_id,  # Points to original message
             "from_agent": from_agent,
             "to_agent": original_sender,
-            "response": response,
-            "status": status,
-            "timestamp": now,
+            "message": response,  # Response content in message field (consistent with send_message)
+            "context": "",  # Empty context
+            "status": status,  # Status field
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         # Push to original sender's single messages queue
