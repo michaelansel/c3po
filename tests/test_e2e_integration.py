@@ -378,3 +378,147 @@ class TestLatency:
             assert msg_count >= 25, (
                 f"Expected >=25 messages, got {msg_count}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Acknowledgment behavior tests
+# ---------------------------------------------------------------------------
+
+class TestAckBehavior:
+    """End-to-end tests for ack_messages behavior.
+
+    Run with:
+        C3PO_TEST_LIVE=1 pytest tests/test_e2e_integration.py::TestAckBehavior -v
+    """
+
+    @pytest.mark.asyncio
+    async def test_ack_removes_message_from_queue(self):
+        """Verify that acked messages don't appear in subsequent get_messages calls."""
+        async with mcp_client_session("ack/sender") as sender:
+            async with mcp_client_session("ack/receiver") as receiver:
+                # Register agents
+                await sender.call_tool("register_agent", {"name": "ack/sender"})
+                await receiver.call_tool("register_agent", {"name": "ack/receiver"})
+
+                # Sender sends a message
+                await sender.call_tool("send_message", {
+                    "to": "ack/receiver",
+                    "message": "Test message"
+                })
+
+                # Receiver gets the message
+                result = await receiver.call_tool("wait_for_message", {"timeout": 5})
+                parsed = _parse_tool_result(result)
+
+                assert isinstance(parsed, dict) and parsed.get("status") == "received"
+                messages = parsed.get("messages", [])
+                assert len(messages) == 1
+                msg_id = messages[0]["id"]
+
+                # Receiver acknowledges
+                await receiver.call_tool("ack_messages", {
+                    "message_ids": [msg_id]
+                })
+
+                # Verify message is gone from subsequent get_messages call
+                result = await receiver.call_tool("get_messages", {})
+                parsed = _parse_tool_result(result)
+
+                if isinstance(parsed, list):
+                    msg_count = len(parsed)
+                elif isinstance(parsed, dict):
+                    msg_count = len(parsed.get("messages", []))
+                else:
+                    msg_count = 0
+                assert msg_count == 0, "Message should be removed after ack"
+
+    @pytest.mark.asyncio
+    async def test_partial_ack_leaves_other_messages(self):
+        """Verify that acking some messages doesn't remove unacked ones."""
+        async with mcp_client_session("ack/sender2") as sender:
+            async with mcp_client_session("ack/receiver2") as receiver:
+                await sender.call_tool("register_agent", {"name": "ack/sender2"})
+                await receiver.call_tool("register_agent", {"name": "ack/receiver2"})
+
+                # Send 3 messages
+                for i in range(3):
+                    await sender.call_tool("send_message", {
+                        "to": "ack/receiver2",
+                        "message": f"Message {i}"
+                    })
+
+                # Get and acknowledge only the first
+                result = await receiver.call_tool("get_messages", {})
+                parsed = _parse_tool_result(result)
+                if isinstance(parsed, list):
+                    msg_count = len(parsed)
+                elif isinstance(parsed, dict):
+                    msg_count = len(parsed.get("messages", []))
+                else:
+                    msg_count = 0
+                assert msg_count == 3, "Should have 3 messages"
+
+                msg_ids = [m["id"] for m in parsed[:2]]  # Ack first 2
+                await receiver.call_tool("ack_messages", {
+                    "message_ids": msg_ids
+                })
+
+                # Verify only 1 remains (the 3rd was not acked)
+                result = await receiver.call_tool("get_messages", {})
+                parsed = _parse_tool_result(result)
+
+                if isinstance(parsed, list):
+                    msg_count = len(parsed)
+                elif isinstance(parsed, dict):
+                    msg_count = len(parsed.get("messages", []))
+                else:
+                    msg_count = 0
+                assert msg_count == 1, "Should have 1 unacked message"
+                if isinstance(parsed, list):
+                    assert parsed[0]["message"] == "Message 2"
+                elif isinstance(parsed, dict):
+                    assert parsed["messages"][0]["message"] == "Message 2"
+
+    @pytest.mark.asyncio
+    async def test_compaction_removes_acked_messages(self):
+        """Verify compaction removes all acked messages when threshold is exceeded."""
+        async with mcp_client_session("ack/sender3") as sender:
+            async with mcp_client_session("ack/receiver3") as receiver:
+                await sender.call_tool("register_agent", {"name": "ack/sender3"})
+                await receiver.call_tool("register_agent", {"name": "ack/receiver3"})
+
+                # Send 25 messages (above compaction threshold of 20)
+                for i in range(25):
+                    await sender.call_tool("send_message", {
+                        "to": "ack/receiver3",
+                        "message": f"Message {i}"
+                    })
+
+                # Get all messages
+                result = await receiver.call_tool("get_messages", {})
+                parsed = _parse_tool_result(result)
+                if isinstance(parsed, list):
+                    msg_count = len(parsed)
+                elif isinstance(parsed, dict):
+                    msg_count = len(parsed.get("messages", []))
+                else:
+                    msg_count = 0
+                assert msg_count == 25, "Should have 25 messages"
+
+                # Ack all messages
+                msg_ids = [m["id"] for m in parsed]
+                await receiver.call_tool("ack_messages", {
+                    "message_ids": msg_ids
+                })
+
+                # Verify all messages are gone (compaction should have run)
+                result = await receiver.call_tool("get_messages", {})
+                parsed = _parse_tool_result(result)
+
+                if isinstance(parsed, list):
+                    msg_count = len(parsed)
+                elif isinstance(parsed, dict):
+                    msg_count = len(parsed.get("messages", []))
+                else:
+                    msg_count = 0
+                assert msg_count == 0, "All messages should be removed after compaction"

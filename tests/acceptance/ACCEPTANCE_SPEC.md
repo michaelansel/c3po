@@ -213,6 +213,27 @@ Repeat on both host-a and host-b:
 
 ---
 
+## Phase 5: Acknowledgment and Compaction
+
+**Goal**: Verify that acknowledged messages are removed from the queue and compaction works correctly.
+
+Repeat on both host-a and host-b:
+
+1. **Action**: From host-a, send 25 messages to host-b using the c3po MCP tool
+   - **Assert**: All messages are queued successfully
+2. **Action**: From host-b, receive all 25 messages using `wait_for_message`
+   - **Assert**: All 25 messages are received in order
+3. **Action**: From host-b, acknowledge all 25 messages using `ack_messages`
+   - **Assert**: No errors returned
+4. **Action**: From host-b, call `get_messages` again
+   - **Assert**: Returns empty list (all messages removed)
+5. **Action**: From host-a, send 3 more messages to host-b
+   - **Assert**: All 3 messages are queued
+6. **Action**: From host-b, receive and acknowledge the 3 messages
+   - **Assert**: All 3 messages are removed after ack
+
+---
+
 ## Phase 6: Blocking Wait Behavior
 
 **Goal**: Verify that blocking wait calls handle timeouts gracefully without crashing.
