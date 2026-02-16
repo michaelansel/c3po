@@ -423,14 +423,20 @@ return kept
         """
         acked_ids = self._get_acked_ids(agent_id)
 
+        # Log current state
+        logger.info("peek_messages_start agent=%s acked_ids_count=%d",
+                   agent_id, len(acked_ids))
+
         messages = []
         for msg in self.peek_pending_messages(agent_id):
             msg_id = self._get_message_id(msg)
             if msg_id and msg_id in acked_ids:
+                logger.debug("peek_messages_filtering_out_acked agent=%s msg_id=%s",
+                           agent_id, msg_id)
                 continue
             messages.append(msg)
 
-        logger.info("peek_messages agent=%s count=%d acked=%d",
+        logger.info("peek_messages_end agent=%s count=%d acked=%d",
                      agent_id, len(messages), len(acked_ids))
         return messages
 
@@ -454,15 +460,26 @@ return kept
             return {"acked": 0, "compacted": False}
 
         acked_key = f"{self.ACKED_PREFIX}{agent_id}"
+
+        # Log current state before adding
+        current_acked = self.redis.smembers(acked_key)
+        logger.info("ack_messages_start agent=%s ids=%s current_acked_count=%d",
+                   agent_id, message_ids, len(current_acked))
+
         self.redis.sadd(acked_key, *message_ids)
         self.redis.expire(acked_key, self.MESSAGE_TTL_SECONDS)
 
-        logger.info("ack_messages agent=%s ids=%s", agent_id, message_ids)
+        # Log current state after adding
+        new_acked = self.redis.smembers(acked_key)
+        logger.info("ack_messages_after agent=%s new_acked_count=%d added_count=%d",
+                   agent_id, len(new_acked), len(new_acked) - len(current_acked))
 
         # Check if compaction is needed
         acked_count = self.redis.scard(acked_key)
         compacted = False
         if acked_count > self.COMPACT_THRESHOLD:
+            logger.info("ack_messages_compaction_trigger agent=%s acked_count=%d > threshold=%d",
+                       agent_id, acked_count, self.COMPACT_THRESHOLD)
             self._compact_queues(agent_id)
             compacted = True
 
@@ -479,16 +496,26 @@ return kept
         """
         acked_ids = self._get_acked_ids(agent_id)
         if not acked_ids:
+            logger.info("compact_queues_no_ids agent=%s", agent_id)
             return
 
         messages_key = f"{self.INBOX_PREFIX}{agent_id}"
+
+        # Log state before compaction
+        all_messages = self.redis.lrange(messages_key, 0, -1)
+        logger.info("compact_queues_before agent=%s messages_count=%d acked_count=%d acked_ids=%s",
+                   agent_id, len(all_messages), len(acked_ids), list(acked_ids))
+
         self._compact_list(messages_key, acked_ids, "reply_id", fallback_field="id")
 
         # Clear the acked set after compaction
         acked_key = f"{self.ACKED_PREFIX}{agent_id}"
         self.redis.delete(acked_key)
 
-        logger.info("compacted agent=%s removed=%d", agent_id, len(acked_ids))
+        # Log state after compaction
+        remaining_messages = self.redis.lrange(messages_key, 0, -1)
+        logger.info("compact_queues_after agent=%s removed=%d remaining_count=%d acked_key_deleted=%s",
+                   agent_id, len(acked_ids), len(remaining_messages), True)
 
     def _compact_list(
         self,
