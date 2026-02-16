@@ -82,16 +82,16 @@ Explicitly register this agent with optional capabilities.
 
 ---
 
-### send_request
+### send_message
 
-Send a request to another agent.
+Send a message to another agent.
 
 **Parameters:**
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | `target` | string | Yes | Agent ID to send to |
-| `message` | string | Yes | The request message (max 50KB) |
-| `context` | string | No | Background context for the request (max 50KB) |
+| `message` | string | Yes | The message (max 50KB) |
+| `context` | string | No | Background context (max 50KB) |
 
 **Returns:**
 ```json
@@ -113,9 +113,9 @@ Send a request to another agent.
 
 ---
 
-### get_pending_requests
+### get_messages
 
-Get all pending requests for this agent. **This consumes the requests** - they will not be returned again.
+Get all pending messages for this agent. **This is non-destructive** - messages remain until explicitly acknowledged.
 
 **Parameters:** None
 
@@ -132,25 +132,25 @@ Get all pending requests for this agent. **This consumes the requests** - they w
 ]
 ```
 
-**Note:** Returns an empty array `[]` if no pending requests.
+**Note:** Returns an empty array `[]` if no pending messages.
 
 ---
 
-### respond_to_request
+### reply
 
-Respond to a request from another agent.
+Send a reply to a previous message.
 
 **Parameters:**
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `request_id` | string | Yes | ID from the request to respond to |
-| `response` | string | Yes | Your response message (max 50KB) |
+| `message_id` | string | Yes | ID from the message to reply to (format: `from_agent::to_agent::uuid`) |
+| `response` | string | Yes | Your response (max 50KB) |
 | `status` | string | No | "success" (default) or "error" |
 
 **Returns:**
 ```json
 {
-  "request_id": "meshtastic::homeassistant::def67890",
+  "message_id": "meshtastic::homeassistant::def67890",
   "from_agent": "homeassistant",
   "to_agent": "meshtastic",
   "response": "Done! Living room lights are now on.",
@@ -160,24 +160,56 @@ Respond to a request from another agent.
 ```
 
 **Errors:**
-- `INVALID_REQUEST`: Invalid request_id format or empty response
+- `INVALID_REQUEST`: Invalid message_id format or empty response
 
 ---
 
-### wait_for_response
+### wait_for_message
 
-Wait for a response to a previously sent request. This is a blocking call.
+Wait for any message (incoming or reply) to arrive. This is a blocking call.
 
 **Parameters:**
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `request_id` | string | Yes | ID returned by send_request |
-| `timeout` | integer | No | Maximum seconds to wait (default: 60) |
+| `timeout` | integer | No | Maximum seconds to wait (1-3600, default: 60) |
 
 **Returns (success):**
 ```json
 {
-  "request_id": "homeassistant::meshtastic::abc12345",
+  "id": "homeassistant::meshtastic::abc12345",
+  "from_agent": "meshtastic",
+  "message": "What MQTT topics are available?",
+  "context": "Building a sensor dashboard",
+  "timestamp": "2024-01-15T10:30:00Z"
+}
+```
+
+**Returns (timeout):**
+```json
+{
+  "status": "timeout",
+  "code": "TIMEOUT",
+  "message": "No message received within 60 seconds",
+  "suggestion": "No messages are pending. You can continue with other work."
+}
+```
+
+---
+
+### wait_for_message
+
+Wait for a specific reply to a previously sent message. This is a blocking call.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `message_id` | string | Yes | ID returned by send_message (format: `from_agent::to_agent::uuid`) |
+| `timeout` | integer | No | Maximum seconds to wait (1-3600, default: 60) |
+
+**Returns (success):**
+```json
+{
+  "message_id": "homeassistant::meshtastic::abc12345",
   "from_agent": "meshtastic",
   "response": "Available topics: mesh/node/#, mesh/stat/#",
   "status": "success",
@@ -190,7 +222,7 @@ Wait for a response to a previously sent request. This is a blocking call.
 {
   "status": "timeout",
   "code": "TIMEOUT",
-  "request_id": "homeassistant::meshtastic::abc12345",
+  "message_id": "homeassistant::meshtastic::abc12345",
   "message": "No response received within 60 seconds",
   "suggestion": "The target agent may be offline or busy. Check agent status with list_agents."
 }
@@ -198,14 +230,14 @@ Wait for a response to a previously sent request. This is a blocking call.
 
 ---
 
-### wait_for_request
+### wait_for_message
 
-Wait for an incoming request from another agent. This is a blocking call and an alternative to polling with `get_pending_requests`.
+Wait for an incoming message from another agent. This is a blocking call and an alternative to polling with `get_messages`.
 
 **Parameters:**
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `timeout` | integer | No | Maximum seconds to wait (default: 60) |
+| `timeout` | integer | No | Maximum seconds to wait (1-3600, default: 60) |
 
 **Returns (success):**
 ```json
@@ -223,8 +255,8 @@ Wait for an incoming request from another agent. This is a blocking call and an 
 {
   "status": "timeout",
   "code": "TIMEOUT",
-  "message": "No request received within 60 seconds",
-  "suggestion": "No agents have sent requests. You can continue with other work."
+  "message": "No message received within 60 seconds",
+  "suggestion": "No messages are pending. You can continue with other work."
 }
 ```
 
@@ -260,7 +292,7 @@ Health check endpoint.
 
 ### GET /api/pending
 
-Check pending requests without consuming them. Used by the Stop hook.
+Check pending messages without consuming them. Used by the Stop hook.
 
 **Headers:**
 | Name | Required | Description |
@@ -271,7 +303,7 @@ Check pending requests without consuming them. Used by the Stop hook.
 ```json
 {
   "count": 2,
-  "requests": [
+  "messages": [
     {
       "id": "agent-a::myagent::abc123",
       "from_agent": "agent-a",
@@ -365,6 +397,26 @@ Valid agent IDs must:
 Examples:
 - Valid: `homeassistant`, `web-frontend`, `sensor.temp1`, `agent_2`
 - Invalid: `-agent`, `_test`, `agent with spaces`, `agent@home`
+
+---
+
+## Message/Reply ID Format
+
+All message and reply IDs have the format: `from_agent::to_agent::uuid`
+
+- `from_agent`: The agent that sent the message
+- `to_agent`: The agent that should receive the message
+- `uuid`: 8 hexadecimal characters (0-9, a-f)
+
+**Examples:**
+- `homeassistant::meshtastic::abc12345`
+- `meshtastic::homeassistant::def67890`
+
+**Important notes:**
+- The UUID is generated by the coordinator when the message is sent
+- Always use the full message/reply ID when replying or acknowledging
+- You can get valid IDs from `get_messages()` or `wait_for_message()` results
+- Sending malformed IDs (wrong format, wrong length, non-hex) will raise an `INVALID_REQUEST` error
 
 ---
 

@@ -1103,6 +1103,53 @@ def _validate_message(message: str) -> None:
         raise ToolError(f"{err.message} {err.suggestion}")
 
 
+def _validate_message_id(message_id: str, field_name: str = "message_id") -> None:
+    """Validate message/reply ID format: from_agent::to_agent::uuid
+
+    Args:
+        message_id: The ID to validate
+        field_name: Field name for error context
+
+    Raises:
+        ToolError: If validation fails
+    """
+    if not message_id:
+        err = invalid_request(field_name, "must be a non-empty message/reply ID")
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    parts = message_id.split("::")
+    if len(parts) != 3:
+        err = invalid_request(
+            field_name,
+            "invalid format - must be in format 'from_agent::to_agent::uuid'"
+        )
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    from_agent, to_agent, uuid_part = parts
+
+    if not from_agent or not to_agent:
+        err = invalid_request(
+            field_name,
+            "from_agent and to_agent must be non-empty"
+        )
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    if len(from_agent) > 64 or len(to_agent) > 64:
+        err = invalid_request(
+            field_name,
+            "agent IDs must be 64 characters or less"
+        )
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    import re
+    if not re.match(r"^[a-f0-9]{8}$", uuid_part):
+        err = invalid_request(
+            field_name,
+            "UUID must be exactly 8 hex characters"
+        )
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+
 def _enforce_agent_pattern(ctx: Context, agent_id: str) -> None:
     """Enforce that agent_id matches the API key's agent_pattern.
 
@@ -1257,12 +1304,7 @@ def _reply_impl(
         raise ToolError(f"{err.message} {err.suggestion}")
 
     # Validate message_id format
-    if not message_id or "::" not in message_id:
-        err = invalid_request(
-            "message_id",
-            "invalid format - should be from a previous message"
-        )
-        raise ToolError(f"{err.message} {err.suggestion}")
+    _validate_message_id(message_id)
 
     return msg_manager.reply(message_id, from_agent, response, status)
 
@@ -1277,13 +1319,24 @@ def _wait_for_message_impl(
     """Wait for any message (incoming or reply) to arrive.
 
     Returns the messages directly, not a notification.
+
+    Args:
+        msg_manager: Message manager instance
+        agent_id: Your agent ID
+        timeout: Maximum seconds to wait (1-3600, default 60)
+        heartbeat_fn: Optional callback to update heartbeat
+        shutdown_event: Optional event to signal shutdown
+
+    Note:
+        Timeout is clamped to valid range (1-3600 seconds) if out of bounds.
     """
-    logger.info("wait_for_message_impl started agent=%s timeout=%d", agent_id, timeout)
     # Clamp timeout to valid range
     if timeout < 1:
         timeout = 1
     if timeout > MAX_WAIT_TIMEOUT:
         timeout = MAX_WAIT_TIMEOUT
+
+    logger.info("wait_for_message_impl started agent=%s timeout=%d", agent_id, timeout)
 
     start_time = time.monotonic()
     with _active_waiters_lock:
@@ -1589,13 +1642,16 @@ def reply(
 
     Args:
         ctx: MCP context (injected automatically)
-        message_id: The ID of the message to reply to
+        message_id: Message/reply ID to reply to (format: from_agent::to_agent::uuid)
         response: Your reply message
         status: Reply status (default "success", can be "error" for failures)
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
-        Reply data including message_id, status, and timestamp
+        Reply data including message_id, from_agent, to_agent, response, status, and timestamp
+
+    Raises:
+        ToolError: If message_id format is invalid or response is empty
     """
     from_agent = _resolve_agent_id(ctx, agent_id)
     _enforce_agent_pattern(ctx, from_agent)
@@ -1633,11 +1689,14 @@ async def wait_for_message(
 
     Args:
         ctx: MCP context (injected automatically)
-        timeout: Maximum seconds to wait (default 60, max 3600)
+        timeout: Maximum seconds to wait (1-3600, default 60)
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
         Dict with status="received" and messages list, or timeout indicator
+
+    Raises:
+        ToolError: If timeout is out of valid range (1-3600 seconds)
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
     _enforce_agent_pattern(ctx, effective_id)
@@ -1683,8 +1742,23 @@ def _ack_messages_impl(
 ) -> dict:
     """Acknowledge messages so they no longer appear in get_messages/wait_for_message."""
     if not message_ids:
-        err = invalid_request("message_ids", "cannot be empty")
+        return {"acked": 0, "compacted": False}
+
+    # Validate each message_id
+    invalid_ids = []
+    for msg_id in message_ids:
+        try:
+            _validate_message_id(msg_id)
+        except ToolError:
+            invalid_ids.append(msg_id)
+
+    if invalid_ids:
+        err = invalid_request(
+            "message_ids",
+            f"contains {len(invalid_ids)} invalid ID(s): {', '.join(invalid_ids[:5])}"
+        )
         raise ToolError(f"{err.message} {err.suggestion}")
+
     return msg_manager.ack_messages(agent_id, message_ids)
 
 
@@ -1759,11 +1833,14 @@ def ack_messages(
 
     Args:
         ctx: MCP context (injected automatically)
-        message_ids: List of message/reply IDs to acknowledge
+        message_ids: List of message/reply IDs to acknowledge (format: from_agent::to_agent::uuid)
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
 
     Returns:
         Dict with acked count and whether compaction was triggered
+
+    Raises:
+        ToolError: If message_ids is empty or contains invalid IDs
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
     _enforce_agent_pattern(ctx, effective_id)

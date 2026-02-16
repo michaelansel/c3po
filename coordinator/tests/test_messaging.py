@@ -528,10 +528,11 @@ class TestAckMessages:
         assert len(msgs) == 1
         assert msgs[0]["id"] == kept_id
 
-    def test_ack_messages_impl_rejects_empty(self, message_manager):
-        """_ack_messages_impl should reject empty message_ids."""
-        with pytest.raises(ToolError):
-            _ack_messages_impl(message_manager, "b", [])
+    def test_ack_messages_impl_accepts_empty(self, message_manager):
+        """_ack_messages_impl should accept empty message_ids and return early."""
+        result = _ack_messages_impl(message_manager, "b", [])
+        assert result["acked"] == 0
+        assert result["compacted"] is False
 
 
 class TestWaitForMessage10sLoopFix:

@@ -10,7 +10,11 @@ from coordinator.server import (
     _reply_impl,
     _validate_agent_id,
     _validate_message,
+    _validate_message_id,
+    _wait_for_message_impl,
+    _ack_messages_impl,
     MAX_MESSAGE_LENGTH,
+    MAX_WAIT_TIMEOUT,
 )
 from coordinator.agents import AgentManager
 from coordinator.messaging import MessageManager
@@ -136,6 +140,130 @@ class TestValidation:
         with pytest.raises(ToolError) as exc_info:
             _validate_message(long_msg)
         assert "maximum length" in str(exc_info.value)
+
+    def test_valid_message_id(self):
+        """Valid message IDs pass validation."""
+        # Should not raise
+        _validate_message_id("homeassistant::meshtastic::abc12345")
+
+    def test_invalid_message_id_empty(self):
+        """Empty message_id raises error."""
+        with pytest.raises(ToolError) as exc_info:
+            _validate_message_id("")
+        assert "must be a non-empty" in str(exc_info.value)
+
+    def test_invalid_message_id_missing_parts(self):
+        """Message_id with wrong number of parts raises error."""
+        with pytest.raises(ToolError) as exc_info:
+            _validate_message_id("single-part")
+        assert "invalid format" in str(exc_info.value)
+
+        with pytest.raises(ToolError) as exc_info:
+            _validate_message_id("part1::part2")
+        assert "invalid format" in str(exc_info.value)
+
+    def test_invalid_message_id_empty_from_agent(self):
+        """Message_id with empty from_agent raises error."""
+        with pytest.raises(ToolError) as exc_info:
+            _validate_message_id("::to-agent::abc12345")
+        assert "from_agent" in str(exc_info.value)
+
+    def test_invalid_message_id_empty_to_agent(self):
+        """Message_id with empty to_agent raises error."""
+        with pytest.raises(ToolError) as exc_info:
+            _validate_message_id("from-agent::abc12345")
+        assert "to_agent" in str(exc_info.value)
+
+    def test_invalid_message_id_too_long_from_agent(self):
+        """Message_id with too long from_agent raises error."""
+        long_agent = "a" * 65
+        with pytest.raises(ToolError) as exc_info:
+            _validate_message_id(f"{long_agent}::to-agent::abc12345")
+        assert "64 characters" in str(exc_info.value)
+
+    def test_invalid_message_id_too_long_to_agent(self):
+        """Message_id with too long to_agent raises error."""
+        long_agent = "b" * 65
+        with pytest.raises(ToolError) as exc_info:
+            _validate_message_id(f"from-agent::{long_agent}::abc12345")
+        assert "64 characters" in str(exc_info.value)
+
+    def test_invalid_message_id_non_hex_uuid(self):
+        """Message_id with non-hex UUID raises error."""
+        with pytest.raises(ToolError) as exc_info:
+            _validate_message_id("from-agent::to-agent::invalid")
+        assert "UUID" in str(exc_info.value)
+
+    def test_invalid_message_id_wrong_uuid_length(self):
+        """Message_id with wrong UUID length raises error."""
+        with pytest.raises(ToolError) as exc_info:
+            _validate_message_id("from-agent::to-agent::short")
+        assert "UUID" in str(exc_info.value)
+
+    def test_invalid_message_id_too_long_uuid(self):
+        """Message_id with too long UUID raises error."""
+        with pytest.raises(ToolError) as exc_info:
+            _validate_message_id("from-agent::to-agent::verylonguuid12345678")
+        assert "UUID" in str(exc_info.value)
+
+    def test_wait_for_message_timeout_clamped_to_min(self, message_manager):
+        """wait_for_message clamps timeout less than 1 second to 1."""
+        result = _wait_for_message_impl(
+            message_manager,
+            "test-agent",
+            timeout=0
+        )
+        assert result["status"] == "timeout"
+
+    def test_wait_for_message_timeout_too_large(self, message_manager):
+        """wait_for_message rejects timeout greater than MAX_WAIT_TIMEOUT."""
+        with pytest.raises(ToolError) as exc_info:
+            _wait_for_message_impl(
+                message_manager,
+                "test-agent",
+                timeout=MAX_WAIT_TIMEOUT + 1
+            )
+        assert str(MAX_WAIT_TIMEOUT) in str(exc_info.value)
+
+    def test_ack_messages_single_invalid_id(self, message_manager):
+        """ack_messages rejects single invalid ID."""
+        with pytest.raises(ToolError) as exc_info:
+            _ack_messages_impl(
+                message_manager,
+                "test-agent",
+                ["invalid-format"]
+            )
+        assert "invalid ID(s)" in str(exc_info.value)
+
+    def test_ack_messages_multiple_invalid_ids(self, message_manager):
+        """ack_messages rejects multiple invalid IDs."""
+        with pytest.raises(ToolError) as exc_info:
+            _ack_messages_impl(
+                message_manager,
+                "test-agent",
+                ["valid::valid::abc12345", "invalid1", "invalid2"]
+            )
+        assert "contains 2 invalid ID(s)" in str(exc_info.value)
+
+    def test_ack_messages_mixed_valid_invalid(self, message_manager):
+        """ack_messages rejects list with mixed valid/invalid IDs."""
+        with pytest.raises(ToolError) as exc_info:
+            _ack_messages_impl(
+                message_manager,
+                "test-agent",
+                ["valid::valid::abc12345", "another::valid::def67890", "bad-format"]
+            )
+        assert "contains 1 invalid ID(s)" in str(exc_info.value)
+
+    def test_ack_messages_empty_list(self, message_manager):
+        """ack_messages with empty list returns early."""
+        result = _ack_messages_impl(
+            message_manager,
+            "test-agent",
+            []
+        )
+        assert result["acked"] == 0
+        assert result["compacted"] is False
 
 
 class TestRateLimiting:
@@ -294,7 +422,11 @@ class TestReplyValidation:
             "sender::receiver::12345678",
             "This is my response"
         )
-        assert result["response"] == "This is my response"
+        # reply() returns data with "message" field, not "response"
+        assert result["message"] == "This is my response"
+        assert result["reply_to"] == "sender::receiver::12345678"
+        assert result["from_agent"] == "receiver"
+        assert result["to_agent"] == "sender"
 
 
 class TestRedisErrorHandling:

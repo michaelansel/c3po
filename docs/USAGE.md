@@ -91,48 +91,48 @@ Returns:
 ]
 ```
 
-### send_request
+### send_message
 
-Send a request to another agent.
+Send a message to another agent.
 
 Parameters:
 - `target` (required): Agent ID to send to
-- `message` (required): Your request message
-- `context` (optional): Background context for the request
+- `message` (required): Your message
+- `context` (optional): Background context for the message
 
-Returns a request ID for tracking the response.
+Returns a message ID with format: `from_agent::to_agent::uuid`
 
-### wait_for_response
+### wait_for_message
 
-Wait for a response to a sent request.
-
-Parameters:
-- `request_id` (required): ID from send_request
-- `timeout` (optional): Seconds to wait (default: 60)
-
-### get_pending_requests
-
-Get all pending requests for your agent (consumes them).
-
-Use this to check what other agents have asked you.
-
-### respond_to_request
-
-Respond to a request from another agent.
+Wait for a response to a sent message.
 
 Parameters:
-- `request_id` (required): ID of the request to respond to
+- `message_id` (required): ID from send_message (format: `from_agent::to_agent::uuid`)
+- `timeout` (optional): Seconds to wait (1-3600, default: 60)
+
+### get_messages
+
+Get all pending messages for your agent (non-destructive).
+
+Use this to check what other agents have sent you.
+
+### reply
+
+Respond to a received message.
+
+Parameters:
+- `message_id` (required): ID of the message to reply to (format: `from_agent::to_agent::uuid`)
 - `response` (required): Your response message
 - `status` (optional): "success" or "error" (default: "success")
 
-### wait_for_request
+### wait_for_message
 
-Block until an incoming request arrives.
+Block until an incoming message arrives.
 
 Parameters:
-- `timeout` (optional): Seconds to wait (default: 60)
+- `timeout` (optional): Seconds to wait (1-3600, default: 60)
 
-Alternative to polling with get_pending_requests.
+Alternative to polling with get_messages.
 
 ## Workflow Examples
 
@@ -141,19 +141,19 @@ Alternative to polling with get_pending_requests.
 **Agent A (homeassistant):**
 ```
 I need to know what MQTT topics are available from the meshtastic project.
-Use send_request to ask the meshtastic agent.
+Use send_message to ask the meshtastic agent.
 ```
 
-Claude sends request and waits for response.
+Claude sends message and waits for response.
 
 **Agent B (meshtastic):**
 When Claude finishes other work and tries to stop, the Stop hook fires:
 ```
 You have 1 pending coordination request(s).
-Use get_pending_requests to retrieve and process them.
+Use get_messages to retrieve and process them.
 ```
 
-Claude reads the request and responds with `respond_to_request`.
+Claude reads the message and replies with `reply`, using the full message ID format.
 
 **Agent A receives the response automatically.**
 
@@ -163,7 +163,7 @@ Agents can have back-and-forth conversations:
 
 1. Agent A sends initial question
 2. Agent B responds
-3. Agent A follows up (new request)
+3. Agent A follows up (new message)
 4. Agent B responds again
 5. Continue as needed
 
@@ -174,14 +174,14 @@ Each message is independent - use context to reference previous exchanges.
 Instead of relying on the Stop hook, an agent can actively wait:
 
 ```
-Use wait_for_request with a 120 second timeout to listen for incoming requests.
+Use wait_for_message with a 120 second timeout to listen for incoming messages.
 ```
 
 This is useful when you expect communication and want to respond immediately.
 
 ## Message Format
 
-### Request Structure
+### Message Structure
 
 ```json
 {
@@ -195,11 +195,11 @@ This is useful when you expect communication and want to respond immediately.
 }
 ```
 
-### Response Structure
+### Reply Structure
 
 ```json
 {
-  "request_id": "homeassistant::meshtastic::abc12345",
+  "message_id": "homeassistant::meshtastic::abc12345",
   "from_agent": "meshtastic",
   "to_agent": "homeassistant",
   "response": "Available topics: mesh/node/#, mesh/stat/#",
