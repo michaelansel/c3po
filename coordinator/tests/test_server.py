@@ -127,7 +127,7 @@ class TestGetMessagesImpl:
         # Agent a gets replies, agent b gets messages
         msgs_a = _get_messages_impl(message_manager, "a")
         assert len(msgs_a) == 1
-        assert msgs_a[0]["response"] == "A"
+        assert msgs_a[0]["message"] == "A"
         assert msgs_a[0]["to_agent"] == "a"
         assert "type" not in msgs_a[0]  # No type field
 
@@ -171,7 +171,7 @@ class TestWaitForMessageImpl:
         result = _wait_for_message_impl(message_manager, "a", timeout=5)
         assert result["status"] == "received"
         assert len(result["messages"]) == 1
-        assert result["messages"][0]["response"] == "A"
+        assert result["messages"][0]["message"] == "A"
 
     def test_timeout_clamped_to_max(self, message_manager):
         """Timeout > 3600 should be clamped, not error. Pre-queue a message so it returns immediately."""
