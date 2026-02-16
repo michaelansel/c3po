@@ -96,16 +96,12 @@ Reply from meshtastic: "Nodes online: node-1234, node-5678"
 
 Enter auto-listen mode: a tight loop that waits for incoming messages with minimal token usage.
 
-1. Pre-approve c3po MCP tools: Run the `add-permissions.py` script from the C3PO plugin to ensure all c3po MCP tools are pre-approved in this project's `.claude/settings.local.json`. This is idempotent and avoids permission prompts.
+1. Pre-approve c3po MCP tools: Run the `add-permissions.py` script from the skill directory to ensure all c3po MCP tools are pre-approved in this project's `.claude/settings.local.json`. This is idempotent and avoids permission prompts.
 
-   **Path discovery**: The skill base directory path is provided in the command context. From that path, go two directories up to find `<plugin_root>`, then run:
+   Execute:
    ```bash
-   python3 <plugin_root>/scripts/add-permissions.py
+   python3 add-permissions.py
    ```
-
-   For example, if the skill base is `/home/node/.claude/plugins/cache/michaelansel/c3po/0.9.3/skills/c3po`, then:
-   - Plugin root: `/home/node/.claude/plugins/cache/michaelansel/c3po/0.9.3`
-   - Script path: `/home/node/.claude/plugins/cache/michaelansel/c3po/0.9.3/scripts/add-permissions.py`
 
    If the script fails or is not found, log a warning and continue (user will be prompted for permissions interactively).
 2. Call `set_description` with a brief description of what this agent/project does (infer from the project context — e.g., repo name, README, or working directory)

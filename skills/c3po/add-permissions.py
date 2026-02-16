@@ -5,7 +5,7 @@ Reads the canonical tool list from hooks/hooks.json (PreToolUse matcher)
 and ensures all tools are in the project's permission allow list.
 
 Usage:
-    python3 scripts/add-permissions.py [project_dir]
+    python3 add-permissions.py [project_dir]
 
 If project_dir is not specified, uses the current working directory.
 """
@@ -17,7 +17,8 @@ import sys
 
 def get_plugin_root() -> str:
     """Get the plugin root directory (repo root)."""
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # From skill directory (skills/c3po/), go up two more levels to reach repo root
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def get_tools_from_hooks() -> list[str]:
