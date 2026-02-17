@@ -100,7 +100,7 @@ Enter auto-listen mode: a tight loop that waits for incoming messages with minim
 
    Execute:
    ```bash
-   python3 add-permissions.py
+   python3 scripts/add-permissions.py
    ```
 
    If the script fails or is not found, log a warning and continue (user will be prompted for permissions interactively).
