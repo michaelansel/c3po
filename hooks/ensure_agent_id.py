@@ -59,18 +59,12 @@ def _log(msg: str) -> None:
 
 
 def _deny(explanation: str) -> None:
-    """Output a deny decision with explanation (stdout for Claude Code, stderr for visibility)."""
-    full_explanation = f"C3PO: {explanation}"
-    result = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "explanation": full_explanation,
-        }
-    }
-    print(json.dumps(result))
-    print(full_explanation, file=sys.stderr)
-    sys.exit(0)
+    """Block the tool call and show explanation to the model via stderr.
+
+    Exit code 2: show stderr to model and block tool call.
+    """
+    print(f"C3PO: {explanation}", file=sys.stderr)
+    sys.exit(2)
 
 
 def main() -> None:

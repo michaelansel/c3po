@@ -37,8 +37,8 @@ def run_hook(stdin_data: dict, env: dict = None) -> tuple[int, str, str]:
 class TestEnsureAgentIdHook:
     """Tests for the ensure_agent_id PreToolUse hook."""
 
-    def test_stdin_parse_error_outputs_deny(self):
-        """Hook should output deny decision when stdin parse fails."""
+    def test_stdin_parse_error_denies(self):
+        """Hook should block with explanation when stdin parse fails."""
         result = subprocess.run(
             [sys.executable, HOOK_SCRIPT],
             input="invalid json {",
@@ -47,14 +47,12 @@ class TestEnsureAgentIdHook:
             timeout=10,
         )
 
-        assert result.returncode == 0
-        output = json.loads(result.stdout)
-        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "parse failed" in output["hookSpecificOutput"]["explanation"]
+        assert result.returncode == 2
+        assert "C3PO:" in result.stderr
+        assert "parse failed" in result.stderr
 
-    def test_missing_session_id_outputs_deny(self):
-        """Hook should output deny decision when session_id is missing."""
-        # Directly test without using run_hook which adds default session_id
+    def test_missing_session_id_denies(self):
+        """Hook should block with explanation when session_id is missing."""
         result = subprocess.run(
             [sys.executable, HOOK_SCRIPT],
             input=json.dumps({
@@ -67,23 +65,21 @@ class TestEnsureAgentIdHook:
             timeout=10,
         )
 
-        assert result.returncode == 0
-        output = json.loads(result.stdout)
-        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "session_id" in output["hookSpecificOutput"]["explanation"]
+        assert result.returncode == 2
+        assert "C3PO:" in result.stderr
+        assert "session_id" in result.stderr
 
-    def test_missing_agent_id_file_outputs_deny(self):
-        """Hook should output deny decision when agent_id file doesn't exist."""
+    def test_missing_agent_id_file_denies(self):
+        """Hook should block with explanation when agent_id file doesn't exist."""
         exit_code, stdout, stderr = run_hook({
             "tool_name": "mcp__c3po__set_description",
             "tool_input": {},
             "session_id": "nonexistent-session-that-never-registered",
         })
 
-        assert exit_code == 0
-        output = json.loads(stdout)
-        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "SessionStart hook" in output["hookSpecificOutput"]["explanation"]
+        assert exit_code == 2
+        assert "C3PO:" in stderr
+        assert "SessionStart hook" in stderr
 
     def test_skips_non_c3po_tools(self):
         """Hook should exit silently for non-c3po tools."""
@@ -145,7 +141,7 @@ class TestEnsureAgentIdHook:
             os.unlink(temp_file)
 
     def test_oauth_tools_are_rejected(self):
-        """Hook should reject claude.ai OAuth MCP tools with directions to use direct connection."""
+        """Hook should block claude.ai OAuth MCP tools with directions to use direct connection."""
         oauth_tools = [
             "mcp__claude_ai_c3po__send_message",
             "mcp__claude_ai_c3po__get_messages",
@@ -159,19 +155,17 @@ class TestEnsureAgentIdHook:
                 "tool_input": {},
             })
 
-            assert exit_code == 0
-            output = json.loads(stdout)
-            assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
-            explanation = output["hookSpecificOutput"]["explanation"]
+            assert exit_code == 2
+            assert "C3PO:" in stderr
             # Should name the direct-connection equivalent
             base_tool = tool_name.replace("mcp__claude_ai_c3po__", "")
-            assert f"mcp__c3po__{base_tool}" in explanation
+            assert f"mcp__c3po__{base_tool}" in stderr
             # Should mention /c3po setup and account settings
-            assert "/c3po setup" in explanation
-            assert "Settings" in explanation
+            assert "/c3po setup" in stderr
+            assert "Settings" in stderr
 
     def test_all_tools_needing_agent_id(self):
-        """Hook should intercept all tools in TOOLS_NEEDING_AGENT_ID."""
+        """Hook should block all tools in TOOLS_NEEDING_AGENT_ID when no agent_id file."""
         tools_needing_agent_id = [
             "mcp__c3po__set_description",
             "mcp__c3po__register_webhook",
@@ -192,7 +186,6 @@ class TestEnsureAgentIdHook:
                 "session_id": "nonexistent",
             })
 
-            # Should output deny (no agent_id file found), not skip silently
-            assert exit_code == 0
-            output = json.loads(stdout)
-            assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+            # Should block (exit 2) with explanation in stderr
+            assert exit_code == 2, f"{tool_name}: expected exit 2, got {exit_code}"
+            assert "C3PO:" in stderr, f"{tool_name}: expected C3PO: in stderr"
