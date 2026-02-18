@@ -55,12 +55,25 @@ def _log(msg: str) -> None:
     print(f"[c3po:ensure_agent_id] {msg}", file=sys.stderr)
 
 
+def _deny(explanation: str) -> None:
+    """Output a deny decision with explanation."""
+    result = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "explanation": f"C3PO: {explanation}",
+        }
+    }
+    print(json.dumps(result))
+    sys.exit(0)
+
+
 def main() -> None:
     try:
         stdin_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError) as e:
         _log(f"STDIN PARSE FAILED: {type(e).__name__}: {e}")
-        sys.exit(0)
+        _deny(f"Hook stdin parse failed: {type(e).__name__}")
 
     tool_name = stdin_data.get("tool_name", "")
     _log(f"HOOK CALLED: tool_name={tool_name!r}")
@@ -81,12 +94,12 @@ def main() -> None:
     try:
         session_id = get_session_id(stdin_data)
     except ValueError:
-        _log(
-            f"INJECTION FAILED: no session_id in hook stdin. "
-            f"Keys present: {sorted(stdin_data.keys())}. "
-            f"Claude Code should provide session_id automatically."
+        msg = (
+            f"no session_id in hook stdin. Keys present: {sorted(stdin_data.keys())}. "
+            "Claude Code should provide session_id automatically."
         )
-        sys.exit(0)
+        _log(f"INJECTION FAILED: {msg}")
+        _deny(msg)
 
     # Read the assigned agent_id from the session file (retry to handle race with SessionStart hook)
     path = get_agent_id_file(session_id)
@@ -101,12 +114,13 @@ def main() -> None:
     _log(f"LOOKUP: session_id={session_id} path={path} exists={os.path.exists(path)} agent_id={agent_id!r}")
 
     if not agent_id:
-        _log(
-            f"INJECTION FAILED: no agent ID file for session {session_id} after 5 retries. "
-            f"Expected at: {path}. exists={os.path.exists(path)}. "
-            f"SessionStart hook may not have run or failed to register."
+        msg = (
+            f"SessionStart hook did not register agent for session {session_id}. "
+            f"Expected agent ID file at: {path}. "
+            f"Check that SessionStart hook ran successfully."
         )
-        sys.exit(0)
+        _log(f"INJECTION FAILED: {msg}")
+        _deny(msg)
 
     # Inject agent_id into the tool input
     updated_input = dict(tool_input)
