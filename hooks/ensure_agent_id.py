@@ -20,6 +20,9 @@ import time
 
 from c3po_common import get_agent_id_file, get_session_id, read_agent_id
 
+# Tool name prefix for the OAuth (Claude.ai) MCP connection — hooks don't work here.
+OAUTH_TOOL_PREFIX = "mcp__claude_ai_c3po__"
+
 # Tools that need agent_id injection.
 # NOTE: Also update the PreToolUse matcher in hooks.json when adding tools.
 TOOLS_NEEDING_AGENT_ID = {
@@ -77,6 +80,22 @@ def main() -> None:
 
     tool_name = stdin_data.get("tool_name", "")
     _log(f"HOOK CALLED: tool_name={tool_name!r}")
+
+    # Reject calls using the Claude.ai OAuth MCP connection — hooks don't work
+    # there (agent_id injection is skipped), and it bypasses the direct API key path.
+    # See: https://github.com/anthropics/claude-code/issues/20412
+    if tool_name.startswith(OAUTH_TOOL_PREFIX):
+        base_tool = tool_name[len(OAUTH_TOOL_PREFIX):]
+        msg = (
+            f"You're using the Claude.ai OAuth MCP connection (mcp__claude_ai_c3po__*), "
+            f"which bypasses C3PO's hooks. "
+            f"Use the direct connection instead: mcp__c3po__{base_tool}. "
+            f"To set it up: run /c3po setup in a new session. "
+            f"To prevent this permanently: disable the C3PO OAuth MCP connector in "
+            f"your Claude.ai account settings (Settings → Integrations)."
+        )
+        _log(f"OAUTH REJECTED: {tool_name}")
+        _deny(msg)
 
     # Only intercept c3po MCP tools that need agent_id
     if tool_name not in TOOLS_NEEDING_AGENT_ID:

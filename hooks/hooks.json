@@ -25,7 +25,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "mcp__c3po__send_message",
+        "matcher": "mcp__(claude_ai_)?c3po__send_message",
         "hooks": [
           {
             "type": "command",
@@ -35,7 +35,7 @@
         ]
       },
       {
-        "matcher": "mcp__c3po__ping|mcp__c3po__list_agents|mcp__c3po__register_agent|mcp__c3po__set_description|mcp__c3po__register_webhook|mcp__c3po__unregister_webhook|mcp__c3po__send_message|mcp__c3po__get_messages|mcp__c3po__reply|mcp__c3po__wait_for_message|mcp__c3po__ack_messages|mcp__c3po__upload_blob|mcp__c3po__fetch_blob",
+        "matcher": "mcp__(claude_ai_)?c3po__(ping|list_agents|register_agent|set_description|register_webhook|unregister_webhook|send_message|get_messages|reply|wait_for_message|ack_messages|upload_blob|fetch_blob)",
         "hooks": [
           {
             "type": "command",

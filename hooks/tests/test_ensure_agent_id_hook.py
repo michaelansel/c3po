@@ -144,6 +144,32 @@ class TestEnsureAgentIdHook:
         finally:
             os.unlink(temp_file)
 
+    def test_oauth_tools_are_rejected(self):
+        """Hook should reject claude.ai OAuth MCP tools with directions to use direct connection."""
+        oauth_tools = [
+            "mcp__claude_ai_c3po__send_message",
+            "mcp__claude_ai_c3po__get_messages",
+            "mcp__claude_ai_c3po__ping",
+            "mcp__claude_ai_c3po__list_agents",
+        ]
+
+        for tool_name in oauth_tools:
+            exit_code, stdout, stderr = run_hook({
+                "tool_name": tool_name,
+                "tool_input": {},
+            })
+
+            assert exit_code == 0
+            output = json.loads(stdout)
+            assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+            explanation = output["hookSpecificOutput"]["explanation"]
+            # Should name the direct-connection equivalent
+            base_tool = tool_name.replace("mcp__claude_ai_c3po__", "")
+            assert f"mcp__c3po__{base_tool}" in explanation
+            # Should mention /c3po setup and account settings
+            assert "/c3po setup" in explanation
+            assert "Settings" in explanation
+
     def test_all_tools_needing_agent_id(self):
         """Hook should intercept all tools in TOOLS_NEEDING_AGENT_ID."""
         tools_needing_agent_id = [
