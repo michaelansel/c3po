@@ -94,6 +94,10 @@ def register_with_coordinator(session_id: str) -> dict | None:
     Returns:
         Registration result dict (with assigned agent_id) or None if failed
     """
+    attempted_agent_id = f"{MACHINE_NAME}/{PROJECT_NAME}"
+    if os.environ.get("C3PO_DEBUG"):
+        print(f"[c3po:debug] Attempting to register agent: {attempted_agent_id}", file=sys.stderr)
+
     headers = {
         "X-Machine-Name": MACHINE_NAME,
         "X-Project-Name": PROJECT_NAME,
@@ -109,16 +113,23 @@ def register_with_coordinator(session_id: str) -> dict | None:
 
     try:
         with urlopen_with_ssl(req, timeout=15) as resp:
-            return json.loads(resp.read())
+            result = json.loads(resp.read())
+            if os.environ.get("C3PO_DEBUG"):
+                print(f"[c3po:debug] Registration successful: {result}", file=sys.stderr)
+            return result
     except urllib.error.URLError as e:
         if os.environ.get("C3PO_DEBUG"):
-            print(f"[c3po:debug] URLError registering: {e.reason}", file=sys.stderr)
+            print(f"[c3po:debug] URLError registering {attempted_agent_id}: {e.reason}", file=sys.stderr)
     except urllib.error.HTTPError as e:
         if os.environ.get("C3PO_DEBUG"):
-            print(f"[c3po:debug] HTTPError registering: {e.code} {e.read().decode()}", file=sys.stderr)
+            try:
+                error_body = e.read().decode()
+                print(f"[c3po:debug] HTTPError registering {attempted_agent_id}: {e.code} {error_body}", file=sys.stderr)
+            except:
+                print(f"[c3po:debug] HTTPError registering {attempted_agent_id}: {e.code}", file=sys.stderr)
     except Exception as e:
         if os.environ.get("C3PO_DEBUG"):
-            print(f"[c3po:debug] Exception registering: {type(e).__name__}: {e}", file=sys.stderr)
+            print(f"[c3po:debug] Exception registering {attempted_agent_id}: {type(e).__name__}: {e}", file=sys.stderr)
     return None
 
 
