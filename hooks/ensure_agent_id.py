@@ -59,15 +59,17 @@ def _log(msg: str) -> None:
 
 
 def _deny(explanation: str) -> None:
-    """Output a deny decision with explanation."""
+    """Output a deny decision with explanation (stdout for Claude Code, stderr for visibility)."""
+    full_explanation = f"C3PO: {explanation}"
     result = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "explanation": f"C3PO: {explanation}",
+            "explanation": full_explanation,
         }
     }
     print(json.dumps(result))
+    print(full_explanation, file=sys.stderr)
     sys.exit(0)
 
 
@@ -94,7 +96,7 @@ def main() -> None:
             f"Also disable the C3PO OAuth MCP connector in your Claude.ai account settings "
             f"(Settings → Integrations) to avoid this conflict."
         )
-        _log(f"OAUTH REJECTED: {tool_name}")
+        _log(f"OAUTH REJECTED: {tool_name} — {msg}")
         _deny(msg)
 
     # Only intercept c3po MCP tools that need agent_id
