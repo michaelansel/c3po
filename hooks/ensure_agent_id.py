@@ -89,10 +89,10 @@ def main() -> None:
         msg = (
             f"You're using the Claude.ai OAuth MCP connection (mcp__claude_ai_c3po__*), "
             f"which bypasses C3PO's hooks. "
-            f"Use the direct connection instead: mcp__c3po__{base_tool}. "
-            f"To set it up: run /c3po setup in a new session. "
-            f"To prevent this permanently: disable the C3PO OAuth MCP connector in "
-            f"your Claude.ai account settings (Settings → Integrations)."
+            f"Use the direct connection instead: mcp__c3po__{base_tool} "
+            f"(if that tool isn't available, run /c3po setup to register the direct connection). "
+            f"Also disable the C3PO OAuth MCP connector in your Claude.ai account settings "
+            f"(Settings → Integrations) to avoid this conflict."
         )
         _log(f"OAUTH REJECTED: {tool_name}")
         _deny(msg)
