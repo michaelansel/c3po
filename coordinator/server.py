@@ -341,7 +341,17 @@ mcp = FastMCP(
         "## Anonymous sessions (Claude Desktop / Claude.ai)\n\n"
         "If you don't have a pre-configured agent ID, you must generate one and pass it "
         "as agent_id in every tool call. Run: python3 -c \"import uuid; print(uuid.uuid4())\" "
-        "then use agent_id=\"anonymous/chat-<your-uuid>\" on all calls."
+        "then use agent_id=\"anonymous/chat-<your-uuid>\" on all calls.\n\n"
+        "## Blob transfers\n\n"
+        "Use blobs to share files between agents. When to use blobs vs inline messages:\n"
+        "- Inline in message: small text snippets under ~1KB composed in-memory\n"
+        "- Blob: anything larger, binary content, or content from a file on disk\n\n"
+        "Prefer scripts over MCP blob tools (token-efficient — content doesn't pass through context):\n"
+        "- Upload: blob_id=$(c3po-upload /path/to/file)  then share the blob_id in a message\n"
+        "- Download: c3po-download <blob_id> [output_path]\n"
+        "- Find scripts: `which c3po-upload` OR ~/.claude/plugins/cache/michaelansel/c3po/*/scripts/\n\n"
+        "Only use upload_blob/fetch_blob MCP tools when scripts are unavailable (set scripts_unavailable=True).\n"
+        "fetch_blob returns inline content for blobs <=10KB; set inline_large=True for up to 100KB."
     ),
 )
 mcp.add_middleware(AgentIdentityMiddleware())
@@ -2027,7 +2037,8 @@ def _ack_messages_impl(
     return msg_manager.ack_messages(agent_id, message_ids)
 
 
-INLINE_BLOB_THRESHOLD = 100 * 1024  # 100KB: blobs under this are returned inline
+INLINE_BLOB_THRESHOLD = 10 * 1024   # 10KB: "protect you from yourself" limit; use c3po-download for larger blobs
+HARD_BLOB_THRESHOLD = 100 * 1024    # 100KB: absolute cap, even with inline_large=True
 
 
 def _upload_blob_impl(
@@ -2057,20 +2068,24 @@ def _fetch_blob_impl(
     blob_mgr: BlobManager,
     blob_id: str,
     coordinator_url: str = "",
+    inline_large: bool = False,
 ) -> dict:
     """Fetch a blob by ID. Returns inline content for small blobs, metadata for large.
 
-    Size threshold: blobs at or below INLINE_BLOB_THRESHOLD (100KB) are returned inline
-    in the `content` field. Larger blobs return only metadata plus a `download_url`.
+    Three-tier size logic:
+    - size <= INLINE_BLOB_THRESHOLD (10KB): always returned inline
+    - INLINE_BLOB_THRESHOLD < size <= HARD_BLOB_THRESHOLD (100KB) and inline_large=True:
+      returned inline (caller explicitly opted in)
+    - size > HARD_BLOB_THRESHOLD OR (size > INLINE_BLOB_THRESHOLD and inline_large=False):
+      returns metadata + download_url + actionable note (hard cap, inline_large ignored above 100KB)
 
     Encoding of inline content: UTF-8 decode is attempted first; on UnicodeDecodeError,
     content is base64-encoded. The `encoding` field in the returned dict is either
     "utf-8" or "base64" so the caller knows how to interpret `content`.
 
     Large blob `download_url`: absolute URL if `C3PO_COORDINATOR_URL` env var is set;
-    otherwise a relative path `/agent/api/blob/{blob_id}`. Claude.ai and Claude Desktop
-    users without shell access cannot fetch large blobs — the `note` field in the
-    large-blob response explains this and suggests alternatives.
+    otherwise a relative path `/agent/api/blob/{blob_id}`. The `note` field in the
+    non-inline response gives an actionable `c3po-download` command with the exact blob_id.
 
     Raises ToolError if `blob_id` is not found.
     Audit logging is the caller's responsibility (done in the MCP tool wrapper).
@@ -2083,8 +2098,13 @@ def _fetch_blob_impl(
     content, metadata = result
     size = len(content)
 
-    if size <= INLINE_BLOB_THRESHOLD:
-        # Small blob: return inline
+    # Determine whether to return inline
+    return_inline = (
+        size <= INLINE_BLOB_THRESHOLD
+        or (inline_large and size <= HARD_BLOB_THRESHOLD)
+    )
+
+    if return_inline:
         try:
             text = content.decode("utf-8")
             return {**metadata, "content": text, "encoding": "utf-8"}
@@ -2093,18 +2113,28 @@ def _fetch_blob_impl(
             b64 = base64.b64encode(content).decode("ascii")
             return {**metadata, "content": b64, "encoding": "base64"}
     else:
-        # Large blob: metadata only with download URL
+        # Redirect to download script with actionable note
         download_url = f"{coordinator_url}/agent/api/blob/{blob_id}" if coordinator_url else f"/agent/api/blob/{blob_id}"
+        size_kb = size // 1024
+        if size > HARD_BLOB_THRESHOLD:
+            reason = f"Blob is {size_kb}KB — exceeds hard cap of {HARD_BLOB_THRESHOLD // 1024}KB (inline_large is ignored above this limit)."
+        else:
+            reason = f"Blob is {size_kb}KB — too large to return inline by default (limit: {INLINE_BLOB_THRESHOLD // 1024}KB)."
+        above_hard_cap = size > HARD_BLOB_THRESHOLD
+        note_lines = [
+            reason,
+            f"Use the download script: c3po-download {blob_id} [output_path]",
+            "Script location: which c3po-download OR ~/.claude/plugins/cache/michaelansel/c3po/*/scripts/c3po-download",
+        ]
+        if not above_hard_cap:
+            note_lines.append(f"To read inline anyway (up to {HARD_BLOB_THRESHOLD // 1024}KB): set inline_large=True on this fetch_blob call.")
+            note_lines.append("If you don't have shell access: set scripts_unavailable=True and inline_large=True.")
+        else:
+            note_lines.append("If you don't have shell access: contact the sender to split content into smaller pieces.")
         return {
             **metadata,
             "download_url": download_url,
-            "note": (
-                "Blob is too large to return inline via MCP. "
-                "If you have shell access, use `scripts/c3po-download` or curl to fetch it. "
-                "If you cannot access the REST API (e.g. Claude.ai or Claude Desktop without shell), "
-                "ask the sender to split the content into smaller pieces under 100KB, "
-                "or to send a summary/excerpt instead."
-            ),
+            "note": "\n".join(note_lines),
         }
 
 
@@ -2151,8 +2181,20 @@ def upload_blob(
     mime_type: str = "application/octet-stream",
     encoding: str = "utf-8",
     agent_id: Optional[str] = None,
+    scripts_unavailable: bool = False,
 ) -> dict:
     """Upload a blob for storage and sharing with other agents.
+
+    PREFER the c3po-upload shell script when you have shell access — it uploads
+    directly via curl without passing file contents through the MCP context window,
+    saving tokens. Only use this MCP tool for small text blobs you've composed
+    in-memory, or when shell scripts are unavailable.
+
+      blob_id=$(c3po-upload /path/to/file)
+      # Script location: which c3po-upload OR ~/.claude/plugins/cache/michaelansel/c3po/*/scripts/c3po-upload
+
+    Set scripts_unavailable=True if you've confirmed you don't have shell access
+    (e.g. Claude Desktop or claude.ai without a terminal).
 
     Args:
         ctx: MCP context (injected automatically)
@@ -2161,6 +2203,8 @@ def upload_blob(
         mime_type: MIME type (default: application/octet-stream)
         encoding: Content encoding - "utf-8" for text, "base64" for binary (default: utf-8)
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
+        scripts_unavailable: Set True if you've confirmed shell scripts are not accessible
+            (suppresses the script tip in the response).
 
     Returns:
         Blob metadata including blob_id, filename, size, expires_in
@@ -2187,6 +2231,13 @@ def upload_blob(
 
     meta = _upload_blob_impl(blob_manager, raw_content, filename, mime_type, effective_id)
     audit_logger.blob_upload(meta["blob_id"], filename, len(raw_content), effective_id, source="mcp")
+
+    if not scripts_unavailable:
+        meta["_scripts_tip"] = (
+            "Prefer `c3po-upload /path/to/file` — it avoids passing file contents through MCP "
+            "(token-efficient). Set scripts_unavailable=True if you genuinely don't have shell access."
+        )
+
     return meta
 
 
@@ -2195,20 +2246,30 @@ def fetch_blob(
     ctx: Context,
     blob_id: str,
     agent_id: Optional[str] = None,
+    scripts_unavailable: bool = False,
+    inline_large: bool = False,
 ) -> dict:
     """Fetch a blob by its ID.
 
-    For small blobs (<=100KB), returns the content inline.
-    For large blobs (>100KB), returns metadata and a download_url
-    to fetch via scripts/c3po-download or curl.
+    For small blobs (<=10KB), content is returned inline.
+    For larger blobs (10KB–100KB), use the download script — or set inline_large=True to read inline anyway.
+    For blobs >100KB, use the download script (hard cap, inline_large is ignored).
+
+      c3po-download <blob_id> [output_path]
+      # Script location: which c3po-download OR ~/.claude/plugins/cache/michaelansel/c3po/*/scripts/c3po-download
+
+    Set scripts_unavailable=True if you don't have shell access (suppresses script tip in responses).
 
     Args:
         ctx: MCP context (injected automatically)
         blob_id: The blob ID to fetch
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
+        scripts_unavailable: Set True if shell scripts are not accessible (suppresses script tip).
+        inline_large: Set True to return blobs between 10KB–100KB inline instead of redirecting
+            to the download script. Ignored for blobs >100KB (hard cap).
 
     Returns:
-        Blob metadata with content (small blobs) or download_url (large blobs)
+        Blob metadata with content (small blobs or inline_large) or download_url (large blobs)
     """
     effective_id = _resolve_agent_id(ctx, agent_id)
     _enforce_agent_pattern(ctx, effective_id)
@@ -2222,7 +2283,7 @@ def fetch_blob(
     # Determine coordinator URL for download_url
     coordinator_url = os.environ.get("C3PO_COORDINATOR_URL", "")
 
-    result = _fetch_blob_impl(blob_manager, blob_id, coordinator_url)
+    result = _fetch_blob_impl(blob_manager, blob_id, coordinator_url, inline_large=inline_large)
     audit_logger.blob_download(blob_id, effective_id, source="mcp")
     return result
 

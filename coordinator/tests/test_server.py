@@ -10,7 +10,7 @@ import pytest
 
 import fakeredis
 
-from coordinator.server import _ping_impl, _list_agents_impl, _register_agent_impl, _set_description_impl, _get_messages_impl, _wait_for_message_impl, _upload_blob_impl, _fetch_blob_impl, _register_webhook_impl, _unregister_webhook_impl, _fire_webhook, INLINE_BLOB_THRESHOLD
+from coordinator.server import _ping_impl, _list_agents_impl, _register_agent_impl, _set_description_impl, _get_messages_impl, _wait_for_message_impl, _upload_blob_impl, _fetch_blob_impl, _register_webhook_impl, _unregister_webhook_impl, _fire_webhook, INLINE_BLOB_THRESHOLD, HARD_BLOB_THRESHOLD
 from coordinator.agents import AgentManager
 from coordinator.blobs import BlobManager
 from coordinator.messaging import MessageManager
@@ -301,12 +301,43 @@ class TestFetchBlobImpl:
         with pytest.raises(ToolError, match="not found"):
             _fetch_blob_impl(blob_manager, "blob-doesnotexist")
 
-    def test_large_blob_note_mentions_alternatives(self, blob_manager):
-        """Large blob note should mention alternatives for clients without shell access."""
+    def test_large_blob_note_mentions_c3po_download(self, blob_manager):
+        """Large blob note should include actionable c3po-download command with blob_id."""
         data = b"x" * (INLINE_BLOB_THRESHOLD + 1)
         meta = blob_manager.store_blob(data, "large.bin")
         result = _fetch_blob_impl(blob_manager, meta["blob_id"])
-        assert "smaller pieces" in result["note"] or "split" in result["note"]
+        assert "c3po-download" in result["note"]
+        assert meta["blob_id"] in result["note"]
+
+    def test_medium_blob_without_inline_large_redirects(self, blob_manager):
+        """Blobs between 10KB and 100KB should redirect to download script by default."""
+        data = b"x" * (INLINE_BLOB_THRESHOLD + 1)  # just over 10KB
+        assert len(data) <= HARD_BLOB_THRESHOLD, "test data must be <=100KB"
+        meta = blob_manager.store_blob(data, "medium.bin")
+        result = _fetch_blob_impl(blob_manager, meta["blob_id"])
+        assert "content" not in result
+        assert "download_url" in result
+        assert "c3po-download" in result["note"]
+        assert "inline_large=True" in result["note"]
+
+    def test_medium_blob_with_inline_large_returns_content(self, blob_manager):
+        """Blobs between 10KB and 100KB with inline_large=True should return content inline."""
+        data = b"x" * (INLINE_BLOB_THRESHOLD + 1)  # just over 10KB
+        assert len(data) <= HARD_BLOB_THRESHOLD, "test data must be <=100KB"
+        meta = blob_manager.store_blob(data, "medium.bin")
+        result = _fetch_blob_impl(blob_manager, meta["blob_id"], inline_large=True)
+        assert "content" in result
+        assert "download_url" not in result
+
+    def test_hard_cap_blob_with_inline_large_still_redirects(self, blob_manager):
+        """Blobs >100KB should redirect even with inline_large=True (hard cap)."""
+        data = b"x" * (HARD_BLOB_THRESHOLD + 1)
+        meta = blob_manager.store_blob(data, "huge.bin")
+        result = _fetch_blob_impl(blob_manager, meta["blob_id"], inline_large=True)
+        assert "content" not in result
+        assert "download_url" in result
+        # Note should NOT suggest setting inline_large=True (it's above the hard cap)
+        assert "set inline_large=True" not in result["note"]
 
 
 class MockContext:
