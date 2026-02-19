@@ -582,6 +582,7 @@ async def api_wait(request):
     Returns:
         {"count": N, "messages": [...], "status": "received"} when messages arrive
         {"count": 0, "status": "timeout"} on timeout
+        {"count": 0, "status": "retry"} with Retry-After: 15 header on server shutdown
     """
     auth_result = _authenticate_rest_request(request)
     if not auth_result.get("valid"):
@@ -625,6 +626,8 @@ async def api_wait(request):
         timeout = 30
     timeout = min(3600, max(1, timeout))
 
+    with _active_waiters_lock:
+        _active_waiters.add(agent_id)
     try:
         # Run blocking wait in thread pool — no heartbeat_fn passed (intentional)
         result = await asyncio.get_running_loop().run_in_executor(
@@ -638,8 +641,16 @@ async def api_wait(request):
         )
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+    finally:
+        with _active_waiters_lock:
+            _active_waiters.discard(agent_id)
 
-    if result is None or result == "shutdown":
+    if result == "shutdown":
+        return JSONResponse(
+            {"count": 0, "status": "retry"},
+            headers={"Retry-After": "15"},
+        )
+    if result is None:
         return JSONResponse({"count": 0, "status": "timeout"})
     return JSONResponse({"count": len(result), "messages": result, "status": "received"})
 

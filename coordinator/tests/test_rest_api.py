@@ -429,6 +429,45 @@ class TestUnregisterEndpoint:
         # last_seen should be unchanged (heartbeat not touched)
         assert after_last_seen == before_last_seen
 
+    @pytest.mark.asyncio
+    async def test_api_wait_returns_retry_on_shutdown(self, client, agent_manager):
+        """GET /agent/api/wait returns status=retry with Retry-After header on server shutdown."""
+        import asyncio
+        import coordinator.server as server_module
+        import threading
+
+        agent_manager.register_agent("machine/shutdown-waiter")
+        shutdown_event = threading.Event()
+        original = server_module._shutdown_event
+        server_module._shutdown_event = shutdown_event
+
+        async def _trigger_shutdown():
+            await asyncio.sleep(0.1)
+            shutdown_event.set()
+            try:
+                server_module.redis_client.rpush(
+                    "c3po:notify:machine/shutdown-waiter", "shutdown"
+                )
+            except Exception:
+                pass
+
+        try:
+            trigger_task = asyncio.create_task(_trigger_shutdown())
+            response = await client.get(
+                "/agent/api/wait?timeout=10",
+                headers={"X-Machine-Name": "machine/shutdown-waiter"},
+                timeout=5.0,
+            )
+            await trigger_task
+        finally:
+            server_module._shutdown_event = original
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "retry"
+        assert data["count"] == 0
+        assert response.headers.get("retry-after") == "15"
+
 
 class TestRegisterEndpoint:
     """Tests for /agent/api/register endpoint."""
