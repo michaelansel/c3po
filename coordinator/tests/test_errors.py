@@ -215,15 +215,20 @@ class TestValidation:
         )
         assert result["status"] == "timeout"
 
-    def test_wait_for_message_timeout_too_large(self, message_manager):
-        """wait_for_message rejects timeout greater than MAX_WAIT_TIMEOUT."""
-        with pytest.raises(ToolError) as exc_info:
-            _wait_for_message_impl(
+    def test_wait_for_message_timeout_clamped_to_max(self, message_manager):
+        """wait_for_message clamps timeout greater than MAX_WAIT_TIMEOUT (does not raise)."""
+        from unittest.mock import patch
+        # Patch wait_for_message to return None immediately so we don't actually wait 3600s
+        with patch.object(message_manager, "wait_for_message", return_value=None) as mock_wait:
+            result = _wait_for_message_impl(
                 message_manager,
                 "test-agent",
-                timeout=MAX_WAIT_TIMEOUT + 1
+                timeout=MAX_WAIT_TIMEOUT + 1,
             )
-        assert str(MAX_WAIT_TIMEOUT) in str(exc_info.value)
+        # Should clamp to MAX_WAIT_TIMEOUT, not raise
+        assert result["status"] == "timeout"
+        called_timeout = mock_wait.call_args[0][1]  # second positional arg is timeout
+        assert called_timeout == MAX_WAIT_TIMEOUT
 
     def test_ack_messages_single_invalid_id(self, message_manager):
         """ack_messages rejects single invalid ID."""

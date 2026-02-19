@@ -3,7 +3,7 @@
 import fnmatch
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import redis
@@ -232,19 +232,62 @@ class AgentManager:
 
         return self._add_status(agent_data)
 
-    def remove_agent(self, agent_id: str) -> bool:
+    def ensure_placeholder(self, agent_id: str) -> bool:
+        """Create an offline placeholder entry if agent is not registered.
+
+        Returns True if a placeholder was created, False if already existed.
+        last_seen is set far in the past so the real agent can re-register
+        without triggering collision detection.
+        """
+        if self._get_agent_raw(agent_id) is not None:
+            return False
+        now = datetime.now(timezone.utc)
+        old_time = (now - timedelta(seconds=self.AGENT_TIMEOUT_SECONDS + 1)).isoformat()
+        agent_data = {
+            "id": agent_id, "session_id": None, "capabilities": [],
+            "description": "", "webhook_url": "", "webhook_secret": "",
+            "registered_at": now.isoformat(), "last_seen": old_time,
+        }
+        self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(agent_data))
+        logger.info("agent_placeholder_created agent=%s", agent_id)
+        return True
+
+    def mark_offline(self, agent_id: str) -> bool:
+        """Mark an agent as immediately offline without removing from registry.
+
+        Used on graceful exit when the entry must be kept (watcher pattern or
+        pending messages). Prevents collision detection on fast reconnect.
+        """
+        existing = self._get_agent_raw(agent_id)
+        if existing is None:
+            return False
+        old_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=self.AGENT_TIMEOUT_SECONDS + 1)
+        ).isoformat()
+        existing["last_seen"] = old_time
+        self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(existing))
+        logger.info("agent_marked_offline agent=%s", agent_id)
+        return True
+
+    def remove_agent(self, agent_id: str, cleanup_keys: bool = False) -> bool:
         """Remove an agent from the registry.
 
         Args:
             agent_id: The agent ID to remove
+            cleanup_keys: If True, also delete associated Redis keys
+                (inbox, notify, responses, acked) for the removed agent
 
         Returns:
             True if agent was removed, False if not found
         """
         result = self.redis.hdel(self.AGENTS_KEY, agent_id)
-        removed = result > 0
-        logger.info("agent_removed agent=%s", agent_id)
-        return removed
+        if result > 0 and cleanup_keys:
+            self.redis.delete(
+                f"c3po:inbox:{agent_id}", f"c3po:notify:{agent_id}",
+                f"c3po:acked:{agent_id}", f"c3po:responses:{agent_id}",
+            )
+        logger.info("agent_removed agent=%s cleanup_keys=%s", agent_id, cleanup_keys)
+        return result > 0
 
     def set_description(self, agent_id: str, description: str) -> dict:
         """Set the description for an agent.

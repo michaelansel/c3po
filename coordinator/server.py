@@ -563,13 +563,102 @@ async def api_pending(request):
         )
 
 
+@mcp.custom_route("/agent/api/wait", methods=["GET"])
+async def api_wait(request):
+    """Long-poll for pending messages. Blocks until messages arrive or timeout.
+
+    Serves external watcher processes (e.g. wait-for-trigger.py) that monitor an
+    offline agent's inbox and wake the agent when messages arrive.
+
+    **Does NOT update agent heartbeat** — callers are external watchers, not the
+    agent itself. The agent correctly shows as offline while the watcher runs.
+    Use the MCP wait_for_message tool if you need heartbeat updates.
+
+    Auth: Bearer token + X-Machine-Name header (same as all /agent/* endpoints).
+
+    Query params:
+        timeout: seconds to wait (1-3600, default 30)
+
+    Returns:
+        {"count": N, "messages": [...], "status": "received"} when messages arrive
+        {"count": 0, "status": "timeout"} on timeout
+    """
+    auth_result = _authenticate_rest_request(request)
+    if not auth_result.get("valid"):
+        return JSONResponse(
+            {"error": auth_result.get("error", "Authentication required")},
+            status_code=401,
+        )
+
+    # Rate limit by client IP
+    client_ip = _get_client_ip(request)
+    rate_resp = _check_rest_rate_limit(request, "rest_wait", client_ip)
+    if rate_resp:
+        return rate_resp
+
+    base_id = request.headers.get("x-machine-name")
+    project_name = request.headers.get("x-project-name")
+
+    if not base_id:
+        return JSONResponse(
+            {"error": "Missing X-Machine-Name header"},
+            status_code=400,
+        )
+
+    # Construct full agent_id from components
+    try:
+        agent_id = _construct_agent_id(base_id, project_name)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    # Validate agent_id format (same rules as MCP tools)
+    if not AGENT_ID_PATTERN.match(agent_id):
+        return JSONResponse(
+            {"error": "Invalid agent ID format"},
+            status_code=400,
+        )
+
+    # Clamp timeout: 1–3600
+    try:
+        timeout = int(request.query_params.get("timeout", "30"))
+    except (ValueError, TypeError):
+        timeout = 30
+    timeout = min(3600, max(1, timeout))
+
+    try:
+        # Run blocking wait in thread pool — no heartbeat_fn passed (intentional)
+        result = await asyncio.get_running_loop().run_in_executor(
+            _wait_pool,
+            functools.partial(
+                message_manager.wait_for_message,
+                agent_id, timeout,
+                heartbeat_fn=None,       # explicitly no heartbeat
+                shutdown_event=_shutdown_event,
+            ),
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    if result is None or result == "shutdown":
+        return JSONResponse({"count": 0, "status": "timeout"})
+    return JSONResponse({"count": len(result), "messages": result, "status": "received"})
+
+
 @mcp.custom_route("/agent/api/unregister", methods=["POST"])
 async def api_unregister(request):
     """Unregister an agent when it disconnects gracefully.
 
     Requires X-Machine-Name header (with optional X-Project-Name).
     Called by SessionEnd hook.
-    Removes the agent from the registry so list_agents doesn't show stale entries.
+
+    Behavior:
+    - If ?keep=true is passed (or C3PO_KEEP_REGISTERED=1 env var is set in the hook),
+      the agent entry is kept in registry but marked immediately offline. This supports
+      the watcher pattern where an external process polls for messages on behalf of an
+      offline agent.
+    - If pending messages exist in the inbox, the agent is also kept and marked offline
+      (even without ?keep=true). This preserves queued messages.
+    - Otherwise, the agent is fully removed and all associated Redis keys are cleaned up.
     """
     auth_result = _authenticate_rest_request(request)
     if not auth_result.get("valid"):
@@ -607,18 +696,34 @@ async def api_unregister(request):
         )
 
     try:
-        removed = agent_manager.remove_agent(agent_id)
-        logger.info("rest_unregister agent_id=%s removed=%s", agent_id, removed)
-        if removed:
+        keep = request.query_params.get("keep", "").lower() in ("1", "true", "yes")
+        has_messages = message_manager.has_pending_messages(agent_id)
+
+        if keep or has_messages:
+            marked = agent_manager.mark_offline(agent_id)
+            logger.info(
+                "rest_unregister agent_id=%s kept=True has_messages=%s keep_param=%s marked=%s",
+                agent_id, has_messages, keep, marked,
+            )
             return JSONResponse({
                 "status": "ok",
-                "message": f"Agent '{agent_id}' unregistered",
+                "message": f"Agent '{agent_id}' marked offline and kept in registry",
+                "pending_messages": has_messages,
+                "kept": True,
             })
         else:
-            return JSONResponse({
-                "status": "ok",
-                "message": f"Agent '{agent_id}' was not registered",
-            })
+            removed = agent_manager.remove_agent(agent_id, cleanup_keys=True)
+            logger.info("rest_unregister agent_id=%s removed=%s", agent_id, removed)
+            if removed:
+                return JSONResponse({
+                    "status": "ok",
+                    "message": f"Agent '{agent_id}' unregistered",
+                })
+            else:
+                return JSONResponse({
+                    "status": "ok",
+                    "message": f"Agent '{agent_id}' was not registered",
+                })
     except Exception as e:
         return JSONResponse(
             {"error": str(e)},
@@ -1227,8 +1332,14 @@ def _send_message_impl(
     to: str,
     message: str,
     context: Optional[str] = None,
+    deliver_offline: bool = False,
 ) -> dict:
-    """Send a message to another agent."""
+    """Send a message to another agent.
+
+    If the target agent is registered (online or offline), queue unconditionally.
+    If not registered and deliver_offline=True, create a placeholder and queue.
+    If not registered and deliver_offline=False, raise ToolError with hint.
+    """
     # Validate inputs
     _validate_agent_id(to, "to")
     _validate_message(message)
@@ -1251,15 +1362,29 @@ def _send_message_impl(
     # Check if target agent exists
     resolved_target = agent_manager.get_agent(to)
     if resolved_target is None:
-        # Get list of available agents for helpful error
-        available = agent_manager.list_agents()
-        agent_ids = [a["id"] for a in available]
-        err = agent_not_found(to, agent_ids)
-        logger.warning("send_rejected from=%s to=%s reason=agent_not_found", from_agent, to)
-        raise ToolError(f"{err.message} {err.suggestion}")
+        if not deliver_offline:
+            # Get list of available agents for helpful error
+            available = agent_manager.list_agents()
+            agent_ids = [a["id"] for a in available]
+            err = agent_not_found(to, agent_ids)
+            logger.warning("send_rejected from=%s to=%s reason=agent_not_found", from_agent, to)
+            raise ToolError(
+                f"{err.message} {err.suggestion} "
+                f"Pass deliver_offline=True to queue for an unregistered agent."
+            )
+        # deliver_offline=True: create placeholder entry and queue message
+        agent_manager.ensure_placeholder(to)
+        resolved_target = agent_manager.get_agent(to)
+        logger.info("send_offline_delivery from=%s to=%s (placeholder created)", from_agent, to)
 
     # Send message to Redis inbox
     result = msg_manager.send_message(from_agent, to, message, context)
+
+    # Indicate offline delivery in result if target is offline
+    is_offline = resolved_target.get("status") == "offline"
+    if is_offline:
+        result["offline_delivery"] = True
+        result["note"] = f"Agent '{to}' is offline. Message queued for delivery when they reconnect."
 
     # Fire webhook if recipient has one registered
     webhook_url = resolved_target.get("webhook_url")
@@ -1588,6 +1713,7 @@ def send_message(
     message: str,
     context: Optional[str] = None,
     agent_id: Optional[str] = None,
+    deliver_offline: bool = False,
 ) -> dict:
     """Send a message to another agent.
 
@@ -1597,14 +1723,18 @@ def send_message(
         message: The message content
         context: Optional context or background for the message
         agent_id: Your agent ID (from session start output). If not provided, uses header-based ID.
+        deliver_offline: If True, queue message even if target agent is not registered.
+            A placeholder entry will be created so the agent can find its messages on reconnect.
 
     Returns:
-        Message data including id, status, and timestamp
+        Message data including id, status, and timestamp.
+        If offline delivery, includes offline_delivery=True and a note.
     """
     from_agent = _resolve_agent_id(ctx, agent_id)
     _enforce_agent_pattern(ctx, from_agent)
     return _send_message_impl(
-        message_manager, agent_manager, from_agent, to=to, message=message, context=context
+        message_manager, agent_manager, from_agent, to=to, message=message,
+        context=context, deliver_offline=deliver_offline,
     )
 
 

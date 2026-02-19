@@ -205,6 +205,75 @@ curl http://localhost:8420/api/health
 
 ---
 
+---
+
+### Scenario 7: Watcher Pattern
+
+**Objective**: Verify that an external watcher process can monitor an offline agent's inbox and that the agent reconnects with the same ID and finds queued messages.
+
+**Setup**:
+```bash
+./scripts/test-local.sh start
+```
+
+**Test Steps**:
+
+1. **Set the keep-registered flag and start Claude Code**:
+   ```bash
+   export C3PO_KEEP_REGISTERED=1
+   claude --dangerously-skip-permissions
+   ```
+   - In Claude Code, run `list_agents` and note your agent ID (e.g. `macbook/myproject`)
+
+2. **Exit Claude Code** (Ctrl+D or type `/exit`).
+
+3. **Verify the agent is offline but still registered**:
+   ```bash
+   curl -s http://localhost:8420/api/health
+   # agents_online should be 0
+   curl -s http://localhost:8420/admin/api/agents \
+     -H "Authorization: Bearer <admin_token>" | python3 -m json.tool
+   # Should show macbook/myproject with status=offline
+   ```
+
+4. **Send a message with deliver_offline=True** from another agent (or use the MCP tool directly):
+   ```bash
+   # In a second Claude Code session (different project):
+   # send_message(to="macbook/myproject", message="Wake up!", deliver_offline=True)
+   ```
+
+5. **Poll the wait endpoint** (simulating the watcher):
+   ```bash
+   AGENT_ID="macbook/myproject"
+   curl -s "http://localhost:8420/agent/api/wait?timeout=5" \
+     -H "X-Machine-Name: $AGENT_ID" \
+     -H "Authorization: Bearer <api_token>"
+   # Should return {"count": 1, "messages": [...], "status": "received"}
+   ```
+
+6. **Relaunch Claude Code with the same project** (simulating watcher wake):
+   ```bash
+   export C3PO_KEEP_REGISTERED=1
+   claude --dangerously-skip-permissions
+   ```
+   - Verify your agent ID is the same (`macbook/myproject`, no `-2` suffix)
+   - Run `get_messages` — the queued message should be waiting
+   - Run `ack_messages` with the message ID to clear it
+
+7. **Exit normally**:
+   - With no pending messages and `C3PO_KEEP_REGISTERED=1`, the unregister will keep the entry but mark it offline
+   - To do a full cleanup: unset `C3PO_KEEP_REGISTERED` and exit again, or call unregister directly
+
+**Expected Results**:
+- After step 2: agent appears offline in registry (not removed)
+- Step 4: message queued without error (agent is in registry, even if offline)
+- Step 5: watcher receives the message within 1 second
+- Step 6: same agent_id returned on reconnect (no suffix collision)
+- Messages from step 4 are waiting in the inbox
+- `/api/wait` endpoint does NOT update the agent's `last_seen`
+
+---
+
 ## Automated Tests
 
 ### Containerized Acceptance Tests (recommended)

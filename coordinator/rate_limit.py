@@ -34,6 +34,7 @@ RATE_LIMITS = {
     "rest_validate": (10, 60),
     "register_webhook": (5, 60),
     "unregister_webhook": (5, 60),
+    "rest_wait": (10, 60),
 }
 
 

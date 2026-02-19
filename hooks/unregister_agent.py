@@ -6,11 +6,19 @@ This hook runs when a Claude Code session ends. It notifies the coordinator
 that this agent is disconnecting so it can be removed from the registry
 immediately (rather than waiting for the heartbeat timeout).
 
+When C3PO_KEEP_REGISTERED=1 is set, the hook calls unregister with ?keep=true
+instead of a full removal. The coordinator keeps the registry entry but marks
+the agent immediately offline. This supports the watcher pattern where an
+external process (e.g. wait-for-trigger.py) polls for messages on behalf of
+the offline agent and wakes it when they arrive.
+
 Exit codes:
 - 0: Always (hooks should not block session exit)
 
 Environment variables:
 - C3PO_COORDINATOR_URL: Coordinator URL (default: http://localhost:8420)
+- C3PO_KEEP_REGISTERED: Set to "1", "true", or "yes" to keep registry entry
+    on exit (marks agent offline instead of removing). Used with watcher pattern.
 """
 
 import json
@@ -44,8 +52,12 @@ def main() -> None:
         try:
             unreg_headers = {"X-Machine-Name": assigned_id}
             unreg_headers.update(auth_headers())
+            url = f"{COORDINATOR_URL}/agent/api/unregister"
+            keep = os.environ.get("C3PO_KEEP_REGISTERED", "").strip().lower() in ("1", "true", "yes")
+            if keep:
+                url += "?keep=true"
             req = urllib.request.Request(
-                f"{COORDINATOR_URL}/agent/api/unregister",
+                url,
                 headers=unreg_headers,
                 method="POST",
             )

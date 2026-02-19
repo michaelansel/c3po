@@ -222,8 +222,8 @@ class TestUnregisterEndpoint:
         assert "Missing X-Machine-Name header" in data["error"]
 
     @pytest.mark.asyncio
-    async def test_unregister_removes_registered_agent(self, client, agent_manager):
-        """Unregister endpoint should remove a registered agent."""
+    async def test_unregister_removes_registered_agent(self, client, agent_manager, redis_client):
+        """Unregister endpoint should remove a registered agent and clean up inbox key."""
         # Register an agent first
         agent_manager.register_agent("machine/to-remove")
         assert agent_manager.get_agent("machine/to-remove") is not None
@@ -241,6 +241,11 @@ class TestUnregisterEndpoint:
 
         # Verify agent is no longer registered
         assert agent_manager.get_agent("machine/to-remove") is None
+
+        # Verify inbox key is also cleaned up
+        inbox_key = "c3po:inbox:machine/to-remove"
+        assert redis_client.llen(inbox_key) == 0
+        assert redis_client.exists(inbox_key) == 0
 
     @pytest.mark.asyncio
     async def test_unregister_unknown_agent_returns_ok(self, client, agent_manager):
@@ -295,6 +300,134 @@ class TestUnregisterEndpoint:
         # Check updated count
         response = await client.get("/api/health")
         assert response.json()["agents_online"] == 1
+
+    @pytest.mark.asyncio
+    async def test_unregister_with_pending_messages_keeps_registry(
+        self, client, agent_manager, message_manager
+    ):
+        """Unregister with pending messages should keep agent in registry as offline."""
+        agent_manager.register_agent("machine/with-messages")
+        # Put a message in the inbox
+        message_manager.send_message("machine/sender", "machine/with-messages", "hello")
+
+        response = await client.post(
+            "/agent/api/unregister",
+            headers={"X-Machine-Name": "machine/with-messages"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["kept"] is True
+        assert data["pending_messages"] is True
+
+        # Agent should still be in registry, but offline
+        agent = agent_manager.get_agent("machine/with-messages")
+        assert agent is not None
+        assert agent["status"] == "offline"
+
+    @pytest.mark.asyncio
+    async def test_unregister_with_keep_param_keeps_empty_registry(
+        self, client, agent_manager
+    ):
+        """Unregister with ?keep=true should keep agent even if inbox is empty."""
+        agent_manager.register_agent("machine/watcher-agent")
+
+        response = await client.post(
+            "/agent/api/unregister?keep=true",
+            headers={"X-Machine-Name": "machine/watcher-agent"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["kept"] is True
+
+        # Agent should still be in registry, but offline
+        agent = agent_manager.get_agent("machine/watcher-agent")
+        assert agent is not None
+        assert agent["status"] == "offline"
+
+    @pytest.mark.asyncio
+    async def test_unregister_with_empty_inbox_deletes_inbox_key(
+        self, client, agent_manager, redis_client, message_manager
+    ):
+        """Normal unregister with empty inbox should remove inbox key from Redis."""
+        agent_manager.register_agent("machine/clean-exit")
+
+        response = await client.post(
+            "/agent/api/unregister",
+            headers={"X-Machine-Name": "machine/clean-exit"},
+        )
+
+        assert response.status_code == 200
+        # Inbox key should be gone
+        inbox_key = "c3po:inbox:machine/clean-exit"
+        assert redis_client.exists(inbox_key) == 0
+
+    @pytest.mark.asyncio
+    async def test_api_wait_returns_immediately_if_messages_exist(
+        self, client, agent_manager, message_manager
+    ):
+        """GET /agent/api/wait should return immediately if messages are in the inbox."""
+        agent_manager.register_agent("machine/waiter")
+        message_manager.send_message("machine/sender", "machine/waiter", "you have mail")
+
+        response = await client.get(
+            "/agent/api/wait?timeout=5",
+            headers={"X-Machine-Name": "machine/waiter"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "received"
+        assert data["count"] == 1
+        assert len(data["messages"]) == 1
+        assert data["messages"][0]["message"] == "you have mail"
+
+    @pytest.mark.asyncio
+    async def test_api_wait_times_out_with_no_messages(self, client, agent_manager):
+        """GET /agent/api/wait with empty inbox should return timeout after ~1s."""
+        agent_manager.register_agent("machine/empty-waiter")
+
+        import time
+        start = time.monotonic()
+        response = await client.get(
+            "/agent/api/wait?timeout=1",
+            headers={"X-Machine-Name": "machine/empty-waiter"},
+            timeout=10.0,  # httpx client timeout (larger than the wait timeout)
+        )
+        elapsed = time.monotonic() - start
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "timeout"
+        assert data["count"] == 0
+        assert elapsed >= 1.0  # Should have waited at least 1 second
+
+    @pytest.mark.asyncio
+    async def test_api_wait_does_not_touch_heartbeat(self, client, agent_manager, redis_client):
+        """GET /agent/api/wait should NOT update last_seen (watcher pattern)."""
+        import json as _json
+        agent_manager.register_agent("machine/watched")
+        # Record last_seen before the wait
+        before_data = _json.loads(redis_client.hget("c3po:agents", "machine/watched"))
+        before_last_seen = before_data["last_seen"]
+
+        # Artificially make it look old so the wait doesn't appear to have touched it
+        import time
+        time.sleep(0.05)
+
+        await client.get(
+            "/agent/api/wait?timeout=1",
+            headers={"X-Machine-Name": "machine/watched"},
+            timeout=10.0,
+        )
+
+        after_data = _json.loads(redis_client.hget("c3po:agents", "machine/watched"))
+        after_last_seen = after_data["last_seen"]
+        # last_seen should be unchanged (heartbeat not touched)
+        assert after_last_seen == before_last_seen
 
 
 class TestRegisterEndpoint:

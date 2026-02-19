@@ -545,6 +545,10 @@ return kept
             str(self.MESSAGE_TTL_SECONDS),
         )
 
+    def has_pending_messages(self, agent_id: str) -> bool:
+        """Return True if the inbox key has at least one item."""
+        return self.redis.llen(f"{self.INBOX_PREFIX}{agent_id}") > 0
+
     def get_messages(
         self,
         agent_id: str,

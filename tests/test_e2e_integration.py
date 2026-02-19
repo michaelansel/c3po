@@ -522,3 +522,178 @@ class TestAckBehavior:
                 else:
                     msg_count = 0
                 assert msg_count == 0, "All messages should be removed after compaction"
+
+
+# ---------------------------------------------------------------------------
+# Watcher pattern tests
+# ---------------------------------------------------------------------------
+
+class TestWatcherPattern:
+    """End-to-end tests for the watcher pattern (offline agent + companion process).
+
+    Tests the lifecycle: agent exits with ?keep=true → immediately offline in registry →
+    watcher polls /api/wait → message arrives → watcher gets it → plain unregister cleans up.
+
+    Run with:
+        C3PO_TEST_LIVE=1 pytest tests/test_e2e_integration.py::TestWatcherPattern -v
+    """
+
+    def _make_rest_headers(self, agent_id: str) -> dict:
+        """Build REST API headers for an agent_id (machine/project format)."""
+        import os
+        parts = agent_id.split("/", 1)
+        creds_file = os.path.expanduser("~/.claude/c3po-credentials.json")
+        api_token = ""
+        coordinator_url = COORDINATOR_URL
+        if os.path.exists(creds_file):
+            try:
+                with open(creds_file) as f:
+                    creds = json.load(f)
+                api_token = creds.get("api_token", "")
+                coordinator_url = creds.get("coordinator_url", coordinator_url)
+            except Exception:
+                pass
+
+        headers = {"X-Machine-Name": parts[0]}
+        if len(parts) > 1:
+            headers["X-Project-Name"] = parts[1]
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token}"
+        return headers, coordinator_url
+
+    @pytest.mark.asyncio
+    async def test_keep_registered_marks_agent_offline(self):
+        """unregister?keep=true should keep agent in registry but mark it offline."""
+        import httpx
+        agent_id = "e2e-watcher/keep-test"
+        headers, base_url = self._make_rest_headers(agent_id)
+
+        # Register via REST
+        resp = httpx.post(f"{base_url}/agent/api/register", headers=headers, timeout=5)
+        assert resp.status_code == 200
+
+        # Unregister with ?keep=true
+        resp = httpx.post(f"{base_url}/agent/api/unregister?keep=true", headers=headers, timeout=5)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("kept") is True
+
+        # Agent should still be listed but offline
+        async with mcp_client_session("e2e-watcher/checker") as session:
+            result = await session.call_tool("list_agents", {})
+            agents_raw = _parse_tool_result(result)
+            if isinstance(agents_raw, list):
+                agents = agents_raw
+            else:
+                agents = agents_raw.get("agents", [])
+            target = next((a for a in agents if a["id"] == agent_id), None)
+            assert target is not None, f"{agent_id} should still be in registry"
+            assert target["status"] == "offline"
+
+        # Cleanup
+        httpx.post(f"{base_url}/agent/api/unregister", headers=headers, timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_api_wait_returns_on_message(self):
+        """GET /api/wait should unblock when a message is sent to the agent."""
+        import httpx
+        import threading
+        agent_id = "e2e-watcher/wait-receiver"
+        headers, base_url = self._make_rest_headers(agent_id)
+
+        # Register the watcher target agent
+        httpx.post(f"{base_url}/agent/api/register", headers=headers, timeout=5)
+
+        wait_result = {}
+        last_seen_before = None
+
+        # Record last_seen before the wait
+        try:
+            agent_resp = httpx.get(f"{base_url}/agent/api/pending", headers=headers, timeout=5)
+            # We can't directly check last_seen from REST, but note the time
+        except Exception:
+            pass
+
+        def do_wait():
+            try:
+                resp = httpx.get(
+                    f"{base_url}/agent/api/wait?timeout=10",
+                    headers=headers,
+                    timeout=15.0,
+                )
+                wait_result["data"] = resp.json()
+                wait_result["status_code"] = resp.status_code
+            except Exception as e:
+                wait_result["error"] = str(e)
+
+        # Start wait in background thread
+        wait_thread = threading.Thread(target=do_wait)
+        wait_thread.start()
+
+        # Give the wait thread a moment to start blocking
+        await asyncio.sleep(1.0)
+
+        # Send a message to the agent (using MCP from a sender session)
+        async with mcp_client_session("e2e-watcher/message-sender") as sender:
+            await sender.call_tool("send_message", {
+                "to": agent_id,
+                "message": "watcher wake-up",
+            })
+
+        # Wait for the REST wait to complete (should be fast)
+        wait_thread.join(timeout=12.0)
+
+        assert "error" not in wait_result, f"Wait failed: {wait_result.get('error')}"
+        assert wait_result.get("status_code") == 200
+        data = wait_result.get("data", {})
+        assert data.get("status") == "received"
+        assert data.get("count", 0) >= 1
+
+        # Cleanup
+        httpx.post(f"{base_url}/agent/api/unregister", headers=headers, timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_watcher_full_cycle(self):
+        """Full watcher cycle: register → keep→offline → send → wait → unregister."""
+        import httpx
+        agent_id = "e2e-watcher/full-cycle"
+        headers, base_url = self._make_rest_headers(agent_id)
+
+        # 1. Register
+        resp = httpx.post(f"{base_url}/agent/api/register", headers=headers, timeout=5)
+        assert resp.status_code == 200
+
+        # 2. Exit with keep=true → immediately offline
+        resp = httpx.post(f"{base_url}/agent/api/unregister?keep=true", headers=headers, timeout=5)
+        assert resp.status_code == 200
+        assert resp.json().get("kept") is True
+
+        # 3. Send a message (agent is offline but in registry — no deliver_offline needed)
+        async with mcp_client_session("e2e-watcher/cycle-sender") as sender:
+            send_result = await sender.call_tool("send_message", {
+                "to": agent_id,
+                "message": "for the watcher",
+            })
+            parsed_send = _parse_tool_result(send_result)
+            # Should succeed and note offline delivery
+            assert parsed_send.get("offline_delivery") is True
+
+        # 4. Watcher polls /api/wait → gets the message
+        resp = httpx.get(
+            f"{base_url}/agent/api/wait?timeout=5",
+            headers=headers,
+            timeout=10.0,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "received"
+        assert data["count"] >= 1
+
+        # 5. Watcher's clean shutdown: plain unregister → full cleanup
+        resp = httpx.post(f"{base_url}/agent/api/unregister", headers=headers, timeout=5)
+        assert resp.status_code == 200
+        # Since the message was not acked (watcher just peeked), it's still in the inbox
+        # so agent should be kept but marked offline (pending_messages=True)
+        data = resp.json()
+        # Either kept (pending messages) or removed if inbox was cleared
+        assert data["status"] == "ok"

@@ -1,9 +1,11 @@
 """Tests for C3PO messaging functionality with single queue architecture."""
 
+import json
 import pytest
 import fakeredis
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 from coordinator.messaging import MessageManager
 from coordinator.agents import AgentManager
@@ -150,7 +152,7 @@ class TestSendMessageTool:
     def test_send_message_to_unknown_agent_returns_error(
         self, message_manager, agent_manager
     ):
-        """send_message to unknown agent should return helpful error."""
+        """send_message to unknown agent should return helpful error with deliver_offline hint."""
         # Register a different agent
         agent_manager.register_agent("agent-c")
 
@@ -167,6 +169,57 @@ class TestSendMessageTool:
         assert "agent-b" in error_msg
         assert "not found" in error_msg.lower()
         assert "agent-c" in error_msg  # Should list available agents
+        assert "deliver_offline" in error_msg  # Should include hint
+
+    def test_send_to_unregistered_with_deliver_offline_flag_succeeds(
+        self, message_manager, agent_manager
+    ):
+        """send_message with deliver_offline=True should succeed for unregistered agents."""
+        result = _send_message_impl(
+            message_manager,
+            agent_manager,
+            from_agent="machine/sender",
+            to="machine/ghost",
+            message="nobody home but queued",
+            deliver_offline=True,
+        )
+
+        assert result["to_agent"] == "machine/ghost"
+        assert result["offline_delivery"] is True
+        # Placeholder should have been created in registry
+        agent = agent_manager.get_agent("machine/ghost")
+        assert agent is not None
+        assert agent["status"] == "offline"
+        # Message should be in inbox
+        msgs = message_manager.get_messages("machine/ghost")
+        assert len(msgs) == 1
+        assert msgs[0]["message"] == "nobody home but queued"
+
+    def test_send_to_registered_offline_agent_sets_offline_delivery(
+        self, message_manager, agent_manager, redis_client
+    ):
+        """send_message to a registered but offline agent should set offline_delivery=True."""
+        import json as _json
+        from datetime import datetime, timezone, timedelta
+        agent_manager.register_agent("machine/sleeper")
+        # Make offline
+        old_time = (
+            datetime.now(timezone.utc) - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + 60)
+        ).isoformat()
+        data = _json.loads(redis_client.hget(agent_manager.AGENTS_KEY, "machine/sleeper"))
+        data["last_seen"] = old_time
+        redis_client.hset(agent_manager.AGENTS_KEY, "machine/sleeper", _json.dumps(data))
+
+        result = _send_message_impl(
+            message_manager,
+            agent_manager,
+            from_agent="machine/sender",
+            to="machine/sleeper",
+            message="wake up",
+        )
+
+        assert result["offline_delivery"] is True
+        assert "machine/sleeper" in result.get("note", "")
 
     def test_send_message_creates_single_queue_message(self, message_manager):
         """send_message should create message in single queue without reply_to."""
@@ -559,3 +612,103 @@ class TestWaitForMessage10sLoopFix:
         assert found
         # Should find within ~10s (one BLPOP cycle), not at the 15s timeout
         assert elapsed < 12
+
+
+class TestOfflineAgentQueueing:
+    """Tests confirming messages are queued for offline agents until they reconnect."""
+
+    def _make_agent_offline(self, redis_client, agent_manager, agent_id):
+        """Helper: set an agent's last_seen far enough in the past to appear offline."""
+        old_time = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + 60)
+        ).isoformat()
+        data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, agent_id))
+        data["last_seen"] = old_time
+        redis_client.hset(agent_manager.AGENTS_KEY, agent_id, json.dumps(data))
+
+    def test_messages_queued_for_offline_agent(
+        self, message_manager, agent_manager, redis_client
+    ):
+        """send_message should queue messages for offline (but registered) agents."""
+        agent_manager.register_agent("machine/receiver")
+        self._make_agent_offline(redis_client, agent_manager, "machine/receiver")
+
+        # Confirm the agent is offline
+        agent = agent_manager.get_agent("machine/receiver")
+        assert agent["status"] == "offline"
+
+        # Send a message — should succeed even though agent is offline
+        result = message_manager.send_message(
+            "machine/sender", "machine/receiver", "queued for you"
+        )
+        assert result["to_agent"] == "machine/receiver"
+
+        # Message should be in the inbox
+        msgs = message_manager.get_messages("machine/receiver")
+        assert len(msgs) == 1
+        assert msgs[0]["message"] == "queued for you"
+
+    def test_multiple_messages_queued_while_offline(
+        self, message_manager, agent_manager, redis_client
+    ):
+        """Multiple messages sent while agent is offline should all be queued."""
+        agent_manager.register_agent("machine/sleeper")
+        self._make_agent_offline(redis_client, agent_manager, "machine/sleeper")
+
+        for i in range(3):
+            message_manager.send_message(
+                "machine/sender", "machine/sleeper", f"message {i}"
+            )
+
+        msgs = message_manager.get_messages("machine/sleeper")
+        assert len(msgs) == 3
+        assert [m["message"] for m in msgs] == ["message 0", "message 1", "message 2"]
+
+    def test_offline_agent_receives_messages_on_reconnect(
+        self, message_manager, agent_manager, redis_client
+    ):
+        """Queued messages should be retrievable after the agent comes back online."""
+        agent_manager.register_agent("machine/returner")
+        self._make_agent_offline(redis_client, agent_manager, "machine/returner")
+
+        # Send messages while offline
+        message_manager.send_message("machine/sender", "machine/returner", "while you were out")
+
+        # Agent reconnects (re-registers updates last_seen)
+        agent_manager.register_agent("machine/returner")
+        agent = agent_manager.get_agent("machine/returner")
+        assert agent["status"] == "online"
+
+        # Messages should still be waiting
+        msgs = message_manager.get_messages("machine/returner")
+        assert len(msgs) == 1
+        assert msgs[0]["message"] == "while you were out"
+
+    def test_message_inbox_ttl_set_to_24_hours(
+        self, message_manager, redis_client
+    ):
+        """Inbox key should have a 24-hour TTL set when a message is sent."""
+        message_manager.send_message("machine/sender", "machine/receiver", "hello")
+
+        inbox_key = f"{message_manager.INBOX_PREFIX}machine/receiver"
+        ttl = redis_client.ttl(inbox_key)
+
+        # TTL should be close to MESSAGE_TTL_SECONDS (86400s). Allow some drift.
+        assert ttl > 0, "inbox key should have a TTL set"
+        assert ttl <= message_manager.MESSAGE_TTL_SECONDS
+        assert ttl > message_manager.MESSAGE_TTL_SECONDS - 5  # within 5 seconds of 24h
+
+    def test_send_message_to_unregistered_agent_raises(
+        self, message_manager, agent_manager
+    ):
+        """send_message should reject messages for agents that were never registered (no flag)."""
+        with pytest.raises(ToolError) as exc_info:
+            _send_message_impl(
+                message_manager,
+                agent_manager,
+                from_agent="machine/sender",
+                to="machine/ghost",
+                message="nobody home",
+            )
+        assert "deliver_offline" in str(exc_info.value)

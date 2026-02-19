@@ -561,3 +561,68 @@ class TestClearWebhook:
         agent_data = json.loads(data)
         assert agent_data["webhook_url"] == ""
         assert agent_data["webhook_secret"] == ""
+
+
+class TestEnsurePlaceholder:
+    """Tests for ensure_placeholder (watcher pattern support)."""
+
+    def test_ensure_placeholder_creates_offline_entry(self, agent_manager):
+        """ensure_placeholder should create an offline entry for an unregistered agent."""
+        created = agent_manager.ensure_placeholder("machine/ghost")
+
+        assert created is True
+        agent = agent_manager.get_agent("machine/ghost")
+        assert agent is not None
+        assert agent["status"] == "offline"
+
+    def test_ensure_placeholder_noop_if_already_registered(self, agent_manager):
+        """ensure_placeholder should not overwrite an existing agent."""
+        agent_manager.register_agent("machine/existing", session_id="session-1")
+        original = agent_manager.get_agent("machine/existing")
+
+        created = agent_manager.ensure_placeholder("machine/existing")
+
+        assert created is False
+        after = agent_manager.get_agent("machine/existing")
+        # Status should not have changed (still online)
+        assert after["status"] == original["status"]
+        assert after["session_id"] == "session-1"
+
+    def test_ensure_placeholder_noop_if_online(self, agent_manager):
+        """ensure_placeholder should not overwrite a live online agent."""
+        agent_manager.register_agent("machine/live", session_id="s1")
+
+        created = agent_manager.ensure_placeholder("machine/live")
+
+        assert created is False
+        agent = agent_manager.get_agent("machine/live")
+        assert agent["status"] == "online"
+
+    def test_reconnect_after_placeholder_takes_same_id(self, agent_manager):
+        """Re-registering after a placeholder should get the same ID (no collision)."""
+        agent_manager.ensure_placeholder("machine/proj")
+
+        result = agent_manager.register_agent("machine/proj", session_id="new-session")
+
+        assert result["id"] == "machine/proj"  # No -2 suffix
+        assert result["status"] == "online"
+
+
+class TestMarkOffline:
+    """Tests for mark_offline."""
+
+    def test_mark_offline_sets_last_seen_to_past(self, agent_manager):
+        """mark_offline should set last_seen far enough in the past to appear offline."""
+        agent_manager.register_agent("machine/agent")
+        assert agent_manager.get_agent("machine/agent")["status"] == "online"
+
+        result = agent_manager.mark_offline("machine/agent")
+
+        assert result is True
+        assert agent_manager.get_agent("machine/agent")["status"] == "offline"
+
+    def test_mark_offline_returns_false_if_not_found(self, agent_manager):
+        """mark_offline should return False if the agent is not registered."""
+        result = agent_manager.mark_offline("machine/nonexistent")
+
+        assert result is False
