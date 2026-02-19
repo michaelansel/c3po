@@ -120,6 +120,8 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 
 **Adding MCP tools**: When adding a new tool to `coordinator/server.py`, also update `hooks/hooks.json` (PreToolUse matcher list) and, if the tool uses `agent_id`, `hooks/ensure_agent_id.py` (TOOLS_NEEDING_AGENT_ID). The matcher must explicitly list all tool names because prefix patterns don't work in plugin hooks. New modules also need to be added to the `Dockerfile` COPY commands.
 
+**Documenting endpoint behavior**: When adding or modifying a REST endpoint or MCP tool, document non-obvious behaviors in the `_impl` function docstring — not just return field shapes but *when* and *why* different responses occur. Examples: what triggers a `retry` vs `timeout` status, what happens on server shutdown, what auth edge cases exist, whether the operation updates heartbeat. The docstring is colocated with the code that changes, making it the most likely place for future maintainers to see and update it. Separate feature docs (like `watcher-pattern.md`) and contract tests (`test_api_contracts.py`) can reference these behaviors, but the docstring is the primary home.
+
 **Version bumping**: When committing a version bump, update `.claude-plugin/plugin.json` in this repo. The marketplace (`michaelansel/c3po`) does not need separate updates.
 
 **Message flow**: Messages go to single queue `c3po:messages:{agent}`. Notifications (separate from messages) go to `c3po:notify:{agent}` to wake blocked `wait_for_message` calls without consuming messages. This separation prevents message loss. Messages have optional `reply_to` field for replies, no `type` field. Each message gets a `message_id` used for replies. Replies also get a unique `reply_id` for individual acknowledgment.
