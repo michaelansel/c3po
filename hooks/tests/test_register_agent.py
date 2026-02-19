@@ -23,6 +23,8 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
     register_response = {"id": "test-agent", "status": "online", "capabilities": []}
     response_code = 200
     response_delay = 0
+    # Sequence of response codes for /agent/api/register (consumed in order, falls back to response_code)
+    register_response_sequence: list = []
 
     def log_message(self, format, *args):
         """Suppress request logging."""
@@ -55,10 +57,15 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
             time.sleep(self.response_delay)
 
         if self.path == "/agent/api/register":
-            self.send_response(self.response_code)
+            # Use sequence if available, fall back to response_code
+            if MockCoordinatorHandler.register_response_sequence:
+                code = MockCoordinatorHandler.register_response_sequence.pop(0)
+            else:
+                code = self.response_code
+            self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            if self.response_code == 200:
+            if code == 200:
                 self.wfile.write(json.dumps(self.register_response).encode())
             else:
                 self.wfile.write(b'{"error": "test error"}')
@@ -75,6 +82,7 @@ def mock_coordinator():
     MockCoordinatorHandler.register_response = {"id": "test-agent", "status": "online", "capabilities": []}
     MockCoordinatorHandler.response_code = 200
     MockCoordinatorHandler.response_delay = 0
+    MockCoordinatorHandler.register_response_sequence = []
 
     server = HTTPServer(("127.0.0.1", 0), MockCoordinatorHandler)
     port = server.server_address[1]
@@ -87,7 +95,7 @@ def mock_coordinator():
     server.shutdown()
 
 
-def run_hook(env: dict = None, stdin_data: dict = None) -> tuple[int, str, str]:
+def run_hook(env: dict = None, stdin_data: dict = None, timeout: int = 10) -> tuple[int, str, str]:
     """Run the hook script and return (exit_code, stdout, stderr)."""
     full_env = os.environ.copy()
     if env:
@@ -101,7 +109,7 @@ def run_hook(env: dict = None, stdin_data: dict = None) -> tuple[int, str, str]:
         capture_output=True,
         text=True,
         env=full_env,
-        timeout=10,
+        timeout=timeout,
     )
     return result.returncode, result.stdout, result.stderr
 
@@ -292,3 +300,56 @@ class TestRegisterAgentHook:
             assert received_headers.get("X-Session-ID") == session_id
         finally:
             MockCoordinatorHandler.do_POST = original_do_post
+
+    def test_retries_on_429_and_succeeds(self, mock_coordinator):
+        """Hook should retry on 429 and succeed if coordinator recovers."""
+        MockCoordinatorHandler.register_response_sequence = [429, 200]
+        MockCoordinatorHandler.health_response = {"status": "ok", "agents_online": 1}
+
+        exit_code, stdout, stderr = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                "C3PO_MACHINE_NAME": "test-agent",
+                "C3PO_RETRY_DELAY": "0",  # No delay in tests
+            },
+            timeout=20,
+        )
+
+        assert exit_code == 0
+        assert "[c3po] Connected to coordinator" in stdout
+        # HTTP status should always appear in stderr (fix 3)
+        assert "429" in stderr
+
+    def test_gives_up_after_max_retries_on_429(self, mock_coordinator):
+        """Hook should give up and show local mode after exhausting retries on 429."""
+        # 3 consecutive 429s exceeds max_retries=2
+        MockCoordinatorHandler.register_response_sequence = [429, 429, 429]
+
+        exit_code, stdout, stderr = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                "C3PO_MACHINE_NAME": "test-agent",
+                "C3PO_RETRY_DELAY": "0",  # No delay in tests
+            },
+            timeout=20,
+        )
+
+        assert exit_code == 0
+        assert "Running in local mode" in stdout or "Could not register" in stdout
+        # HTTP status should always appear in stderr (fix 3)
+        assert "429" in stderr
+
+    def test_always_logs_http_error_code(self, mock_coordinator):
+        """HTTP error codes should appear in stderr without C3PO_DEBUG set."""
+        MockCoordinatorHandler.response_code = 500
+
+        exit_code, stdout, stderr = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                "C3PO_MACHINE_NAME": "test-agent",
+                # C3PO_DEBUG intentionally not set
+            },
+        )
+
+        assert exit_code == 0
+        assert "500" in stderr

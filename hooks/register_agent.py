@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.request
 import urllib.error
 
@@ -111,25 +112,39 @@ def register_with_coordinator(session_id: str) -> dict | None:
         method="POST",
     )
 
-    try:
-        with urlopen_with_ssl(req, timeout=15) as resp:
-            result = json.loads(resp.read())
+    max_retries = 2
+    retry_delay = int(os.environ.get("C3PO_RETRY_DELAY", "2"))
+
+    for attempt in range(max_retries + 1):
+        try:
+            with urlopen_with_ssl(req, timeout=15) as resp:
+                result = json.loads(resp.read())
+                if os.environ.get("C3PO_DEBUG"):
+                    print(f"[c3po:debug] Registration successful: {result}", file=sys.stderr)
+                return result
+        except urllib.error.HTTPError as e:
+            print(f"[c3po:debug] HTTPError registering {attempted_agent_id}: {e.code}", file=sys.stderr)
+            if e.code == 429 and attempt < max_retries:
+                if os.environ.get("C3PO_DEBUG"):
+                    print(f"[c3po:debug] Rate limited (attempt {attempt + 1}), retrying in {retry_delay}s...", file=sys.stderr)
+                time.sleep(retry_delay)
+                continue
             if os.environ.get("C3PO_DEBUG"):
-                print(f"[c3po:debug] Registration successful: {result}", file=sys.stderr)
-            return result
-    except urllib.error.URLError as e:
-        if os.environ.get("C3PO_DEBUG"):
-            print(f"[c3po:debug] URLError registering {attempted_agent_id}: {e.reason}", file=sys.stderr)
-    except urllib.error.HTTPError as e:
-        if os.environ.get("C3PO_DEBUG"):
-            try:
-                error_body = e.read().decode()
-                print(f"[c3po:debug] HTTPError registering {attempted_agent_id}: {e.code} {error_body}", file=sys.stderr)
-            except:
-                print(f"[c3po:debug] HTTPError registering {attempted_agent_id}: {e.code}", file=sys.stderr)
-    except Exception as e:
-        if os.environ.get("C3PO_DEBUG"):
-            print(f"[c3po:debug] Exception registering {attempted_agent_id}: {type(e).__name__}: {e}", file=sys.stderr)
+                try:
+                    error_body = e.read().decode()
+                    print(f"[c3po:debug] Response body: {error_body}", file=sys.stderr)
+                except Exception:
+                    pass
+            break
+        except urllib.error.URLError as e:
+            if os.environ.get("C3PO_DEBUG"):
+                print(f"[c3po:debug] URLError registering {attempted_agent_id}: {e.reason}", file=sys.stderr)
+            break
+        except Exception as e:
+            if os.environ.get("C3PO_DEBUG"):
+                print(f"[c3po:debug] Exception registering {attempted_agent_id}: {type(e).__name__}: {e}", file=sys.stderr)
+            break
+
     return None
 
 
