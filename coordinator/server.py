@@ -1155,7 +1155,16 @@ def _strip_secrets(agent_data: dict) -> dict:
 
 
 def _list_agents_impl(manager: AgentManager) -> list[dict]:
-    """List all registered agents."""
+    """List all registered agents.
+
+    `webhook_secret` is stripped from every agent dict before returning;
+    webhook configuration is not visible to callers.
+
+    Agent `status` ("online"/"offline") is computed dynamically from `last_seen`
+    at call time using a 15-minute threshold — it is not stored in Redis.
+
+    No heartbeat is updated and no rate limit is applied inside this function.
+    """
     return [_strip_secrets(a) for a in manager.list_agents()]
 
 
@@ -1166,7 +1175,21 @@ def _register_agent_impl(
     name: Optional[str] = None,
     capabilities: Optional[list[str]] = None,
 ) -> dict:
-    """Register an agent with optional name and capabilities."""
+    """Register an agent with optional name and capabilities.
+
+    Collision handling: if `agent_id` is already taken by a different, currently-online
+    session (different `session_id` and `last_seen` within 15 minutes), the returned
+    `id` will have a suffix added (`-2`, `-3`, etc.). Callers must inspect the returned
+    `id` — it may differ from the requested `agent_id`.
+
+    Same-session reconnect: if `session_id` matches the existing entry, only `last_seen`
+    (and optionally `capabilities`) is updated; `registered_at` is not changed.
+
+    Offline takeover: if the existing agent's `last_seen` is older than 15 minutes, the
+    entry is fully overwritten (new `registered_at`, new `session_id`).
+
+    `webhook_secret` is stripped from the returned dict.
+    """
     return _strip_secrets(manager.register_agent(agent_id, session_id, capabilities))
 
 
@@ -1290,7 +1313,14 @@ def _set_description_impl(
     agent_id: str,
     description: str,
 ) -> dict:
-    """Set the description for an agent."""
+    """Set the description for an agent.
+
+    Raises ToolError (not KeyError) if agent is not found; the error message
+    includes a list of currently available agent IDs as a suggestion.
+
+    Does not update the agent's heartbeat (`last_seen` is unchanged).
+    `webhook_secret` is stripped from the returned dict.
+    """
     try:
         return _strip_secrets(manager.set_description(agent_id, description))
     except KeyError:
@@ -1306,7 +1336,19 @@ def _register_webhook_impl(
     url: str,
     secret: str,
 ) -> dict:
-    """Register webhook configuration for an agent."""
+    """Register webhook configuration for an agent.
+
+    Validation (raises ToolError before touching Redis):
+    - `url` must start with "http://" or "https://"
+    - `secret` must be at least 16 characters
+
+    Silently overwrites any previously configured webhook — no conflict check.
+    URL reachability is not verified at registration time; the webhook is
+    fire-and-forget with a 5-second HTTP timeout when messages arrive.
+
+    Raises ToolError (with list of known agents) if `agent_id` is not found.
+    `webhook_secret` is stripped from the returned dict.
+    """
     if not url or not url.startswith(("http://", "https://")):
         err = invalid_request("url", "must be a valid HTTP(S) URL")
         raise ToolError(f"{err.message} {err.suggestion}")
@@ -1326,7 +1368,13 @@ def _unregister_webhook_impl(
     manager: AgentManager,
     agent_id: str,
 ) -> dict:
-    """Remove webhook configuration for an agent."""
+    """Remove webhook configuration for an agent.
+
+    Idempotent: clears `webhook_url` and `webhook_secret` to empty strings
+    regardless of whether a webhook was previously registered.
+
+    Raises ToolError (with list of known agents) if `agent_id` is not found.
+    """
     try:
         return _strip_secrets(manager.clear_webhook(agent_id))
     except KeyError:
@@ -1347,9 +1395,22 @@ def _send_message_impl(
 ) -> dict:
     """Send a message to another agent.
 
-    If the target agent is registered (online or offline), queue unconditionally.
-    If not registered and deliver_offline=True, create a placeholder and queue.
-    If not registered and deliver_offline=False, raise ToolError with hint.
+    Delivery behavior:
+    - Target registered (online or offline): queue unconditionally.
+    - Target not registered, deliver_offline=True: create a placeholder and queue.
+    - Target not registered, deliver_offline=False: raise ToolError with hint.
+
+    Rate limiting: sliding-window limit keyed by `from_agent` (see RATE_LIMITS in
+    rate_limit.py). Exceeding it raises ToolError before the message is queued.
+
+    Offline indicator: if the target agent is registered but offline, the returned
+    dict includes `offline_delivery=True` and a `note` string.
+
+    Webhook: if the target agent has a webhook URL registered, a fire-and-forget
+    HTTP POST is dispatched. Webhook failure never raises an exception to the caller.
+
+    Size limits: `message` and `context` each capped at MAX_MESSAGE_LENGTH (50KB).
+    Messages expire from Redis after 24 hours.
     """
     # Validate inputs
     _validate_agent_id(to, "to")
@@ -1414,6 +1475,11 @@ def _get_messages_impl(
 
     Non-destructive: messages remain until acked. Repeated calls may
     return the same messages.
+
+    Already-acked message IDs (from `c3po:acked:{agent_id}`) are filtered
+    out before returning, so messages acked in a previous call won't reappear
+    even before the next compaction. Expired messages (older than 24 hours)
+    are also filtered at the peek layer.
     """
     logger.info("get_messages agent=%s", agent_id)
     return msg_manager.get_messages(agent_id)
@@ -1426,7 +1492,28 @@ def _reply_impl(
     response: str,
     status: str = "success",
 ) -> dict:
-    """Send a reply to a previous message."""
+    """Send a reply to a previous message.
+
+    Authorization: only the original recipient of the message can reply.
+    `from_agent` is compared against the `to_agent` embedded in `message_id`
+    (`from_agent::to_agent::uuid` format). If they don't match, `MessageManager.reply`
+    raises `ValueError`, which propagates as a tool error.
+
+    Routing: the reply is delivered to the original sender's inbox
+    (`c3po:messages:{original_sender}`), not to `from_agent`. A notification
+    signal is also pushed to `c3po:notify:{original_sender}` to wake any
+    blocked `wait_for_message` call on the original sender.
+
+    Return value: the dict contains `id` (the reply's unique ID, used for acking),
+    `reply_to` (the original message ID), `from_agent`, and `to_agent` (original sender).
+
+    Note: webhook notifications for replies are fired in the MCP-level `reply` tool
+    wrapper, not here. REST callers that invoke this function directly do not trigger
+    webhook delivery.
+
+    `response` must be non-empty and under MAX_MESSAGE_LENGTH (50KB).
+    `message_id` format is validated before calling MessageManager.
+    """
     # Validate response
     if not response or not response.strip():
         err = invalid_request("response", "cannot be empty")
@@ -1454,17 +1541,34 @@ def _wait_for_message_impl(
 ) -> dict:
     """Wait for any message (incoming or reply) to arrive.
 
-    Returns the messages directly, not a notification.
+    Returns a dict (not a list) with one of three shapes depending on outcome:
 
-    Args:
-        msg_manager: Message manager instance
-        agent_id: Your agent ID
-        timeout: Maximum seconds to wait (1-3600, default 60)
-        heartbeat_fn: Optional callback to update heartbeat
-        shutdown_event: Optional event to signal shutdown
+    - Messages arrived:
+        {"status": "received", "messages": [...], "elapsed_seconds": N}
+    - Timeout with no messages:
+        {"status": "timeout", "code": ErrorCodes.TIMEOUT, "message": "...",
+         "suggestion": "...", "elapsed_seconds": N}
+    - Server shutdown (SIGTERM received):
+        {"status": "retry", "message": "...", "retry_after": 15, "elapsed_seconds": N}
+        Callers must detect status="retry" and call wait_for_message again after 15s.
 
-    Note:
-        Timeout is clamped to valid range (1-3600 seconds) if out of bounds.
+    Immediate return: if messages are already pending in the inbox, returns them
+    immediately without blocking on BLPOP.
+
+    Heartbeat: `heartbeat_fn` (when provided) is called on each BLPOP cycle (every
+    ≤10s), keeping the agent "online" during a long wait. The REST `/api/wait`
+    endpoint intentionally passes `heartbeat_fn=None` so watchers don't update
+    the heartbeat. The MCP `wait_for_message` tool passes a heartbeat updater.
+
+    Shutdown behavior: when `_shutdown_event` is set by the SIGTERM handler,
+    `MessageManager.wait_for_message` returns the sentinel string "shutdown",
+    which this function translates to status="retry".
+
+    Thread pool: runs in `_wait_pool` (50-thread ThreadPoolExecutor) because BLPOP
+    can block a thread for up to 3600 seconds. Active waiters are tracked in
+    `_active_waiters` so the SIGTERM handler can push shutdown signals to all of them.
+
+    Timeout is clamped to the valid range (1-3600 seconds) if out of bounds.
     """
     # Clamp timeout to valid range
     if timeout < 1:
@@ -1525,6 +1629,12 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
     Special handling for anonymous sessions:
     - Rejects bare "anonymous/chat" (requires UUID suffix)
     - Accepts "anonymous/chat-*" pattern (e.g., "anonymous/chat-a1b2c3d4")
+    - Auto-registers anonymous/chat-* agents on first call (they can't use
+      the SessionStart hook because they lack custom headers).
+
+    Heartbeat side effect: calls `agent_manager.touch_heartbeat(resolved)` on every
+    successful resolution. This keeps the agent "online" across all tool calls, not
+    just `wait_for_message` (which has its own internal heartbeat loop).
 
     Args:
         ctx: MCP context with state from middleware
@@ -1881,7 +1991,21 @@ def _ack_messages_impl(
     agent_id: str,
     message_ids: list[str],
 ) -> dict:
-    """Acknowledge messages so they no longer appear in get_messages/wait_for_message."""
+    """Acknowledge messages so they no longer appear in get_messages/wait_for_message.
+
+    Empty list is a no-op: returns {"acked": 0, "compacted": False} immediately.
+
+    All-or-nothing validation: all `message_ids` are format-validated before any
+    Redis writes. If any are invalid, a ToolError is raised listing the first five
+    invalid IDs, and no messages are acked.
+
+    Compaction: when the agent's acked set (`c3po:acked:{agent_id}`) exceeds 20
+    entries (COMPACT_THRESHOLD), the acked entries are atomically removed from the
+    underlying Redis list via a Lua script, and the acked set is cleared. The
+    returned `compacted` field indicates whether this occurred.
+
+    The acked set TTL is reset to 24 hours on each call.
+    """
     if not message_ids:
         return {"acked": 0, "compacted": False}
 
@@ -1913,7 +2037,15 @@ def _upload_blob_impl(
     mime_type: str = "application/octet-stream",
     uploader: str = "",
 ) -> dict:
-    """Store a blob and return metadata."""
+    """Store a blob and return metadata.
+
+    Raises ToolError if `content` exceeds MAX_BLOB_SIZE (defined in blobs.py).
+    The returned metadata does not include the content itself; callers retrieve
+    it separately via `_fetch_blob_impl`.
+
+    Audit logging is the caller's responsibility (done in the MCP tool wrapper,
+    not here).
+    """
     if len(content) > MAX_BLOB_SIZE:
         err = blob_too_large(len(content), MAX_BLOB_SIZE)
         raise ToolError(f"{err.message} {err.suggestion}")
@@ -1926,7 +2058,23 @@ def _fetch_blob_impl(
     blob_id: str,
     coordinator_url: str = "",
 ) -> dict:
-    """Fetch a blob by ID. Returns inline content for small blobs, metadata for large."""
+    """Fetch a blob by ID. Returns inline content for small blobs, metadata for large.
+
+    Size threshold: blobs at or below INLINE_BLOB_THRESHOLD (100KB) are returned inline
+    in the `content` field. Larger blobs return only metadata plus a `download_url`.
+
+    Encoding of inline content: UTF-8 decode is attempted first; on UnicodeDecodeError,
+    content is base64-encoded. The `encoding` field in the returned dict is either
+    "utf-8" or "base64" so the caller knows how to interpret `content`.
+
+    Large blob `download_url`: absolute URL if `C3PO_COORDINATOR_URL` env var is set;
+    otherwise a relative path `/agent/api/blob/{blob_id}`. Claude.ai and Claude Desktop
+    users without shell access cannot fetch large blobs — the `note` field in the
+    large-blob response explains this and suggests alternatives.
+
+    Raises ToolError if `blob_id` is not found.
+    Audit logging is the caller's responsibility (done in the MCP tool wrapper).
+    """
     result = blob_mgr.get_blob(blob_id)
     if result is None:
         err = blob_not_found(blob_id)
