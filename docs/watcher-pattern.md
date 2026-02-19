@@ -84,6 +84,27 @@ Response on timeout:
 {"count": 0, "status": "timeout"}
 ```
 
+Response on server shutdown/restart (with `Retry-After: 15` HTTP header):
+```json
+{"count": 0, "status": "retry"}
+```
+
+Your polling loop should handle all three cases:
+
+```python
+response = requests.get(url, headers=headers, timeout=timeout + 5)
+data = response.json()
+
+if data["status"] == "received":
+    wake_agent(data["messages"])
+elif data["status"] == "retry":
+    retry_after = int(response.headers.get("Retry-After", "15"))
+    time.sleep(retry_after)   # server is restarting; reconnect shortly
+    # then loop
+elif data["status"] == "timeout":
+    pass  # loop immediately
+```
+
 ### POST /agent/api/unregister?keep=true
 
 Marks agent offline without removing registry entry. Inbox remains intact.
