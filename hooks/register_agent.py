@@ -12,6 +12,7 @@ Exit codes:
 Environment variables:
 - C3PO_COORDINATOR_URL: Coordinator URL (default: http://localhost:8420)
 - C3PO_MACHINE_NAME: Machine name identifier (default: from MCP config or hostname)
+- C3PO_AGENT_ID_FILE: If set, write the assigned agent ID to this path after successful registration
 """
 
 from __future__ import annotations
@@ -168,6 +169,16 @@ def main() -> None:
 
             # Save assigned agent_id keyed by session_id for other hooks to read
             save_agent_id(session_id, assigned_id)
+
+            # Write to watcher-provided file if configured
+            agent_id_out = os.environ.get("C3PO_AGENT_ID_FILE")
+            if agent_id_out:
+                try:
+                    fd = os.open(agent_id_out, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "w") as f:
+                        f.write(assigned_id)
+                except OSError:
+                    pass  # Best effort
 
             # Get agent count from health endpoint (no auth required for health)
             req = urllib.request.Request(

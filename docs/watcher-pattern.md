@@ -49,8 +49,24 @@ export C3PO_KEEP_REGISTERED=1
 claude  # Start Claude Code — on exit, agent will be kept + marked offline
 ```
 
-The session file (`/tmp/c3po-agent-id-<session>`) is always deleted regardless
-of this setting.
+When `C3PO_AGENT_ID_FILE` is set, the SessionStart hook writes the assigned
+agent ID to that path on successful registration. The watcher owns this file
+and is responsible for choosing a unique, stable path.
+
+### C3PO_AGENT_ID_FILE
+
+Set this to an absolute path before launching Claude Code. The SessionStart hook
+writes the assigned agent ID to this file after successful registration. Use it
+when your entrypoint needs to discover the agent ID after the session exits:
+
+```bash
+export C3PO_AGENT_ID_FILE=/run/my-watcher/agent-id
+claude  # On exit, agent ID will be in that file
+agent_id=$(cat /run/my-watcher/agent-id)
+```
+
+The watcher chooses the path and ensures it's unique (e.g. per-rig or per-crew).
+The file is not managed by any hook — create, read, and clean it up yourself.
 
 ## API Reference
 
@@ -165,6 +181,11 @@ the agent online. Use REST endpoints from external watcher processes.
 **Not acking messages after processing**: The REST `/api/wait` endpoint uses
 peek+ack semantics — messages stay in the inbox until explicitly acked. The agent
 should call `ack_messages` after processing.
+
+**Not using `C3PO_AGENT_ID_FILE` with the watcher**: Without it, there's no
+reliable way for the entrypoint to discover the assigned agent ID after Claude
+exits (the session file is named by Claude's internal session UUID). Set
+`C3PO_AGENT_ID_FILE` to a stable path your entrypoint controls.
 
 ## Canonical Example
 

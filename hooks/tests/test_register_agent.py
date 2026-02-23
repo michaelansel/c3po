@@ -353,3 +353,23 @@ class TestRegisterAgentHook:
 
         assert exit_code == 0
         assert "500" in stderr
+
+    def test_writes_agent_id_file_when_env_var_set(self, mock_coordinator, tmp_path):
+        """Hook should write assigned agent ID to C3PO_AGENT_ID_FILE when set."""
+        agent_id_file = tmp_path / "agent-id"
+        MockCoordinatorHandler.register_response = {
+            "id": "machine/project-assigned", "status": "online", "capabilities": []
+        }
+        MockCoordinatorHandler.health_response = {"status": "ok", "agents_online": 0}
+
+        exit_code, stdout, stderr = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                "C3PO_MACHINE_NAME": "test-agent",
+                "C3PO_AGENT_ID_FILE": str(agent_id_file),
+            },
+        )
+
+        assert exit_code == 0
+        assert agent_id_file.exists()
+        assert agent_id_file.read_text() == "machine/project-assigned"
