@@ -22,18 +22,11 @@ def get_plugin_root() -> str:
 
 
 def get_tools_from_hooks() -> list[str]:
-    """Parse the canonical tool list from hooks.json PreToolUse matcher."""
-    hooks_path = os.path.join(get_plugin_root(), "hooks", "hooks.json")
-    with open(hooks_path) as f:
-        hooks = json.load(f)
-
-    # Find the ensure_agent_id PreToolUse matcher — it lists all MCP tools
-    for entry in hooks.get("hooks", {}).get("PreToolUse", []):
-        matcher = entry.get("matcher", "")
-        if "mcp__c3po__" in matcher and "|" in matcher:
-            return matcher.split("|")
-
-    raise RuntimeError("Could not find c3po tool list in hooks.json PreToolUse matcher")
+    """Read the canonical tool list from .claude-plugin/tools.json."""
+    tools_path = os.path.join(get_plugin_root(), ".claude-plugin", "tools.json")
+    with open(tools_path) as f:
+        tools = json.load(f)["tools"]
+    return [f"mcp__c3po__{t['name']}" for t in tools]
 
 
 def add_permissions(project_dir: str) -> None:

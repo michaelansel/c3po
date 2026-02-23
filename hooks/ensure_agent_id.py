@@ -23,20 +23,16 @@ from c3po_common import get_agent_id_file, get_session_id, read_agent_id
 # Tool name prefix for the OAuth (Claude.ai) MCP connection — hooks don't work here.
 OAUTH_TOOL_PREFIX = "mcp__claude_ai_c3po__"
 
-# Tools that need agent_id injection.
-# NOTE: Also update the PreToolUse matcher in hooks.json when adding tools.
-TOOLS_NEEDING_AGENT_ID = {
-    "mcp__c3po__set_description",
-    "mcp__c3po__register_webhook",
-    "mcp__c3po__unregister_webhook",
-    "mcp__c3po__send_message",
-    "mcp__c3po__get_messages",
-    "mcp__c3po__reply",
-    "mcp__c3po__wait_for_message",
-    "mcp__c3po__ack_messages",
-    "mcp__c3po__upload_blob",
-    "mcp__c3po__fetch_blob",
-}
+
+def _load_tools_needing_agent_id() -> set:
+    tools_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".claude-plugin", "tools.json")
+    with open(tools_path) as f:
+        tools = json.load(f)["tools"]
+    return {f"mcp__c3po__{t['name']}" for t in tools if t["needs_agent_id"]}
+
+
+# Tools that need agent_id injection — loaded from .claude-plugin/tools.json.
+TOOLS_NEEDING_AGENT_ID = _load_tools_needing_agent_id()
 
 
 def _debug(msg: str) -> None:

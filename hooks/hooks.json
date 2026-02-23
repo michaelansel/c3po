@@ -35,7 +35,7 @@
         ]
       },
       {
-        "matcher": "mcp__(claude_ai_)?c3po__(ping|list_agents|register_agent|set_description|register_webhook|unregister_webhook|send_message|get_messages|reply|wait_for_message|ack_messages|upload_blob|fetch_blob)",
+        "matcher": "mcp__(claude_ai_)?c3po__",
         "hooks": [
           {
             "type": "command",

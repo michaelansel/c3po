@@ -166,17 +166,14 @@ class TestEnsureAgentIdHook:
 
     def test_all_tools_needing_agent_id(self):
         """Hook should block all tools in TOOLS_NEEDING_AGENT_ID when no agent_id file."""
+        tools_json_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            ".claude-plugin", "tools.json",
+        )
+        with open(tools_json_path) as f:
+            tools_data = json.load(f)["tools"]
         tools_needing_agent_id = [
-            "mcp__c3po__set_description",
-            "mcp__c3po__register_webhook",
-            "mcp__c3po__unregister_webhook",
-            "mcp__c3po__send_message",
-            "mcp__c3po__get_messages",
-            "mcp__c3po__reply",
-            "mcp__c3po__wait_for_message",
-            "mcp__c3po__ack_messages",
-            "mcp__c3po__upload_blob",
-            "mcp__c3po__fetch_blob",
+            f"mcp__c3po__{t['name']}" for t in tools_data if t["needs_agent_id"]
         ]
 
         for tool_name in tools_needing_agent_id:

@@ -1,0 +1,17 @@
+{
+  "tools": [
+    {"name": "ping",               "needs_agent_id": false},
+    {"name": "list_agents",        "needs_agent_id": false},
+    {"name": "register_agent",     "needs_agent_id": false},
+    {"name": "set_description",    "needs_agent_id": true},
+    {"name": "register_webhook",   "needs_agent_id": true},
+    {"name": "unregister_webhook", "needs_agent_id": true},
+    {"name": "send_message",       "needs_agent_id": true},
+    {"name": "get_messages",       "needs_agent_id": true},
+    {"name": "reply",              "needs_agent_id": true},
+    {"name": "wait_for_message",   "needs_agent_id": true},
+    {"name": "ack_messages",       "needs_agent_id": true},
+    {"name": "upload_blob",        "needs_agent_id": true},
+    {"name": "fetch_blob",         "needs_agent_id": true}
+  ]
+}
