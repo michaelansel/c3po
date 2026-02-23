@@ -280,27 +280,25 @@ class TestBulkRemove:
         agent_manager.register_agent("stress/test")
 
         # Simulate Redis keys that would exist for this agent
-        redis_client.rpush("c3po:inbox:stress/test", "msg1")
+        redis_client.rpush("c3po:messages:stress/test", "msg1")
         redis_client.rpush("c3po:notify:stress/test", "notify1")
-        redis_client.rpush("c3po:responses:stress/test", "resp1")
         redis_client.sadd("c3po:acked:stress/test", "acked1")
 
         agent_manager.remove_agents_by_pattern("stress/*")
 
-        assert redis_client.llen("c3po:inbox:stress/test") == 0
+        assert redis_client.llen("c3po:messages:stress/test") == 0
         assert redis_client.llen("c3po:notify:stress/test") == 0
-        assert redis_client.llen("c3po:responses:stress/test") == 0
         assert redis_client.scard("c3po:acked:stress/test") == 0
 
     def test_preserves_redis_keys_when_cleanup_disabled(self, agent_manager, redis_client):
         """Should preserve Redis keys when cleanup_keys=False."""
         agent_manager.register_agent("stress/test")
-        redis_client.rpush("c3po:inbox:stress/test", "msg1")
+        redis_client.rpush("c3po:messages:stress/test", "msg1")
 
         agent_manager.remove_agents_by_pattern("stress/*", cleanup_keys=False)
 
         assert agent_manager.get_agent("stress/test") is None
-        assert redis_client.llen("c3po:inbox:stress/test") == 1
+        assert redis_client.llen("c3po:messages:stress/test") == 1
 
     def test_sub_pattern_matching(self, agent_manager):
         """Should support sub-patterns like stress/sender-*."""
@@ -392,27 +390,25 @@ class TestRemoveByIds:
         agent_manager.register_agent("cleanup/test")
 
         # Simulate Redis keys
-        redis_client.rpush("c3po:inbox:cleanup/test", "msg1")
+        redis_client.rpush("c3po:messages:cleanup/test", "msg1")
         redis_client.rpush("c3po:notify:cleanup/test", "notify1")
-        redis_client.rpush("c3po:responses:cleanup/test", "resp1")
         redis_client.sadd("c3po:acked:cleanup/test", "acked1")
 
         agent_manager.remove_agents_by_ids(["cleanup/test"])
 
-        assert redis_client.llen("c3po:inbox:cleanup/test") == 0
+        assert redis_client.llen("c3po:messages:cleanup/test") == 0
         assert redis_client.llen("c3po:notify:cleanup/test") == 0
-        assert redis_client.llen("c3po:responses:cleanup/test") == 0
         assert redis_client.scard("c3po:acked:cleanup/test") == 0
 
     def test_preserves_redis_keys_when_cleanup_disabled(self, agent_manager, redis_client):
         """Should preserve Redis keys when cleanup_keys=False."""
         agent_manager.register_agent("cleanup/test")
-        redis_client.rpush("c3po:inbox:cleanup/test", "msg1")
+        redis_client.rpush("c3po:messages:cleanup/test", "msg1")
 
         agent_manager.remove_agents_by_ids(["cleanup/test"], cleanup_keys=False)
 
         assert agent_manager.get_agent("cleanup/test") is None
-        assert redis_client.llen("c3po:inbox:cleanup/test") == 1
+        assert redis_client.llen("c3po:messages:cleanup/test") == 1
 
     def test_all_nonexistent_returns_empty(self, agent_manager):
         """Should return empty list when all IDs are nonexistent."""

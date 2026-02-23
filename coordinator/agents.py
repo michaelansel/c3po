@@ -275,7 +275,7 @@ class AgentManager:
         Args:
             agent_id: The agent ID to remove
             cleanup_keys: If True, also delete associated Redis keys
-                (inbox, notify, responses, acked) for the removed agent
+                (messages, notify, acked) for the removed agent
 
         Returns:
             True if agent was removed, False if not found
@@ -283,8 +283,8 @@ class AgentManager:
         result = self.redis.hdel(self.AGENTS_KEY, agent_id)
         if result > 0 and cleanup_keys:
             self.redis.delete(
-                f"c3po:inbox:{agent_id}", f"c3po:notify:{agent_id}",
-                f"c3po:acked:{agent_id}", f"c3po:responses:{agent_id}",
+                f"c3po:messages:{agent_id}", f"c3po:notify:{agent_id}",
+                f"c3po:acked:{agent_id}",
             )
         logger.info("agent_removed agent=%s cleanup_keys=%s", agent_id, cleanup_keys)
         return result > 0
@@ -363,7 +363,7 @@ class AgentManager:
         Args:
             pattern: fnmatch glob pattern (e.g. "stress/*")
             cleanup_keys: If True, also delete associated Redis keys
-                (inbox, notify, responses, acked) for each removed agent
+                (messages, notify, acked) for each removed agent
 
         Returns:
             List of removed agent IDs
@@ -387,9 +387,8 @@ class AgentManager:
             keys_to_delete = []
             for agent_id in removed:
                 keys_to_delete.extend([
-                    f"c3po:inbox:{agent_id}",
+                    f"c3po:messages:{agent_id}",
                     f"c3po:notify:{agent_id}",
-                    f"c3po:responses:{agent_id}",
                     f"c3po:acked:{agent_id}",
                 ])
             if keys_to_delete:
@@ -404,7 +403,7 @@ class AgentManager:
         Args:
             agent_ids: List of agent IDs to remove
             cleanup_keys: If True, also delete associated Redis keys
-                (inbox, notify, responses, acked) for each removed agent
+                (messages, notify, acked) for each removed agent
 
         Returns:
             List of actually removed agent IDs (excludes non-existent ones)
@@ -429,9 +428,8 @@ class AgentManager:
             keys_to_delete = []
             for agent_id in existing:
                 keys_to_delete.extend([
-                    f"c3po:inbox:{agent_id}",
+                    f"c3po:messages:{agent_id}",
                     f"c3po:notify:{agent_id}",
-                    f"c3po:responses:{agent_id}",
                     f"c3po:acked:{agent_id}",
                 ])
             if keys_to_delete:
