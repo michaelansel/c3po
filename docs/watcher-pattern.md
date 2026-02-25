@@ -68,6 +68,73 @@ agent_id=$(cat /run/my-watcher/agent-id)
 The watcher chooses the path and ensures it's unique (e.g. per-rig or per-crew).
 The file is not managed by any hook — create, read, and clean it up yourself.
 
+## Cold Start — Pre-Claiming an Agent Name (wait_first Pattern)
+
+Some trigger-based agents have no internal work queue to drain on startup — they
+should only launch when a message is waiting. A `wait_first` watcher must claim
+the agent name *before* the first container run so that other agents can send
+messages to it and the `/agent/api/wait` poll can begin.
+
+On the very **first** cold start (no prior registry entry), use this sequence:
+
+```
+1. POST /agent/api/register   (X-Machine-Name: machine/project, no X-Session-ID)
+       └─ Creates an offline-ready registry entry
+          Returns the actual assigned agent_id (confirms no collision suffix)
+
+2. POST /agent/api/unregister?keep=true   (X-Machine-Name: assigned_id)
+       └─ Immediately marks the entry offline
+          Leaves inbox intact — same state as ensure_placeholder
+          Safe for the real agent's SessionStart hook to re-register (Case 3)
+
+3. GET /agent/api/wait   (normal polling begins)
+```
+
+**Why step 2 is required:** Registering without an `X-Session-ID` creates an
+entry with `session_id=null`. If the real agent's SessionStart hook arrives while
+that entry is still in a newly-registered state, collision detection will fire
+and the agent gets a `-2` suffix. Calling `unregister?keep=true` immediately
+transitions the entry to the same offline state as a post-session keep, which
+the coordinator recognises as safe to update in-place (Case 3 collision logic).
+
+**After the first run:** With `C3PO_KEEP_REGISTERED=1`, the SessionEnd hook calls
+`unregister?keep=true` and the entry persists across restarts. The watcher can
+skip steps 1–2 and go straight to step 3.
+
+Use the `c3po-claim-name` script (in `scripts/`) to do this in one step:
+
+```bash
+agent_id=$(c3po-claim-name myproject)
+# agent_id is now e.g. "machine/myproject" — ready to pass to the watcher
+```
+
+The script derives the machine name using the same priority logic as the hook
+scripts (`C3PO_MACHINE_NAME` → `~/.claude.json` header → hostname), sanitizes
+both components, and performs the register+unregister?keep=true sequence.
+Diagnostic messages go to stderr; only the agent_id is written to stdout.
+
+Or manually:
+
+```python
+# Cold-start pre-claim (run once on first launch)
+resp = requests.post(f"{url}/agent/api/register",
+                     headers={**auth_headers, "X-Machine-Name": "machine/project"})
+agent_id = resp.json()["id"]   # e.g. "machine/project" (no suffix = good)
+
+requests.post(f"{url}/agent/api/unregister?keep=true",
+              headers={**auth_headers, "X-Machine-Name": agent_id})
+
+# Now begin normal watcher polling
+while True:
+    resp = requests.get(f"{url}/agent/api/wait", headers=auth_headers)
+    ...
+```
+
+**Key guarantee:** `register` (no session) + `unregister?keep=true` leaves the
+registry entry in an offline state that is semantically identical to
+`ensure_placeholder`. Future coordinator changes must preserve this invariant
+so that cold-start watchers continue to work correctly.
+
 ## API Reference
 
 All watcher-facing endpoints use the same auth as `/agent/*` endpoints:
@@ -75,9 +142,10 @@ All watcher-facing endpoints use the same auth as `/agent/*` endpoints:
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
+| `POST /agent/api/register` | POST | Pre-claim agent name on cold start (wait_first) |
 | `GET /agent/api/wait` | GET | Long-poll until message arrives |
 | `GET /agent/api/pending` | GET | Non-blocking peek (polling fallback) |
-| `POST /agent/api/unregister?keep=true` | POST | Called by hook with `C3PO_KEEP_REGISTERED=1` |
+| `POST /agent/api/unregister?keep=true` | POST | Called by hook with `C3PO_KEEP_REGISTERED=1` or after pre-claim |
 | `POST /agent/api/unregister` | POST | Called by watcher on clean shutdown |
 
 ### GET /agent/api/wait
