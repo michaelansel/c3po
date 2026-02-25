@@ -622,3 +622,40 @@ class TestMarkOffline:
         result = agent_manager.mark_offline("machine/nonexistent")
 
         assert result is False
+
+    def test_cold_start_claim_leaves_same_state_as_ensure_placeholder(self, agent_manager):
+        """register(no session) + mark_offline must leave entry in the same state as
+        ensure_placeholder — offline with no session — so that a real agent's
+        SessionStart can re-register without triggering collision detection.
+
+        This is the invariant that c3po-claim-name relies on (watcher cold-start pattern).
+        """
+        # Cold-start sequence: register to claim name, then mark offline immediately
+        result = agent_manager.register_agent("machine/watcher", session_id=None)
+        assert result["id"] == "machine/watcher"
+        agent_manager.mark_offline("machine/watcher")
+
+        cold_start_entry = agent_manager.get_agent("machine/watcher")
+
+        # Baseline: what ensure_placeholder produces
+        agent_manager.ensure_placeholder("machine/baseline")
+        placeholder_entry = agent_manager.get_agent("machine/baseline")
+
+        # Both entries must be offline with no session (the safe re-registration state)
+        assert cold_start_entry["status"] == "offline"
+        assert placeholder_entry["status"] == "offline"
+        assert cold_start_entry["session_id"] == placeholder_entry["session_id"]
+
+    def test_cold_start_claim_allows_real_agent_to_register_without_collision(self, agent_manager):
+        """After the cold-start claim sequence, a real agent must get the same ID
+        (no -2 suffix) when its SessionStart hook fires.
+        """
+        agent_manager.register_agent("machine/watcher", session_id=None)
+        agent_manager.mark_offline("machine/watcher")
+
+        # Real agent's SessionStart hook re-registers with the same name
+        result = agent_manager.register_agent("machine/watcher", session_id="real-session-1")
+
+        assert result["id"] == "machine/watcher"  # No collision suffix
+        assert result["status"] == "online"
+        assert result["session_id"] == "real-session-1"
