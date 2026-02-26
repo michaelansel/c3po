@@ -72,13 +72,14 @@ def main() -> None:
     else:
         print("[c3po] Warning: no agent ID file found, skipping heartbeat", file=sys.stderr)
 
-    # Check if stop hook is already active (prevent infinite loops)
-    if stdin_data.get("stop_hook_active"):
-        sys.exit(0)
-
     if not assigned_id:
         print("[c3po] Warning: no agent ID file found, skipping pending check", file=sys.stderr)
         sys.exit(0)
+
+    # Whether this is a second stop attempt (after a block). We still check
+    # messages — if they're gone, we allow stop naturally. If they're still
+    # present, we warn via stderr but don't block (prevents infinite loops).
+    stop_hook_active = stdin_data.get("stop_hook_active", False)
 
     try:
         pending_headers = {"X-Machine-Name": assigned_id}
@@ -126,18 +127,27 @@ def main() -> None:
 
             summary = "\n".join(message_summary)
 
-            # Output JSON to block Claude from stopping
-            output = {
-                "decision": "block",
-                "reason": (
-                    f"You have {count} pending coordination message(s) from other agents:\n\n"
-                    f"{summary}\n\n"
-                    "Use the get_messages tool to retrieve the full message(s), "
-                    "then use reply to send your response. "
-                    "After responding to all messages, you may stop."
-                ),
-            }
-            print(json.dumps(output))
+            if stop_hook_active:
+                # Second stop attempt — don't block to prevent infinite loops,
+                # but warn so the user/agent knows messages remain unprocessed.
+                print(
+                    f"[c3po] Warning: {count} message(s) still pending but allowing stop "
+                    f"(stop_hook_active=True prevents infinite loop).",
+                    file=sys.stderr,
+                )
+            else:
+                # First stop attempt — block until messages are processed.
+                output = {
+                    "decision": "block",
+                    "reason": (
+                        f"You have {count} pending coordination message(s) from other agents:\n\n"
+                        f"{summary}\n\n"
+                        "Use the get_messages tool to retrieve the full message(s), "
+                        "then use reply to send your response. "
+                        "After responding to all messages, you may stop."
+                    ),
+                }
+                print(json.dumps(output))
 
     except urllib.error.URLError:
         pass

@@ -116,8 +116,8 @@ class TestPeekAsyncHook:
         assert exit_code == 0
         assert stdout.strip() == ""
 
-    def test_outputs_system_message_when_messages_pending(self, mock_coordinator, agent_id_file):
-        """Hook should output systemMessage JSON when messages are pending."""
+    def test_outputs_additional_context_when_messages_pending(self, mock_coordinator, agent_id_file):
+        """Hook should output additionalContext JSON when messages are pending."""
         MockCoordinatorHandler.pending_response = {
             "count": 1,
             "messages": [
@@ -139,10 +139,10 @@ class TestPeekAsyncHook:
 
         assert exit_code == 0
         output = json.loads(stdout)
-        assert "systemMessage" in output
-        assert "sender-agent" in output["systemMessage"]
-        assert "Please help with this task" in output["systemMessage"]
-        assert "1 total" in output["systemMessage"]
+        assert "hookSpecificOutput" in output
+        ctx = output["hookSpecificOutput"]["additionalContext"]
+        assert "sender-agent" in ctx
+        assert "Please help with this task" in ctx
 
     def test_prioritizes_urgent_messages(self, mock_coordinator, agent_id_file):
         """Hook should show urgent messages first with marker."""
@@ -172,7 +172,7 @@ class TestPeekAsyncHook:
 
         assert exit_code == 0
         output = json.loads(stdout)
-        msg = output["systemMessage"]
+        msg = output["hookSpecificOutput"]["additionalContext"]
         # Urgent message should appear before normal
         urgent_pos = msg.find("urgent-agent")
         normal_pos = msg.find("normal-agent")
@@ -267,7 +267,7 @@ class TestPeekAsyncHook:
         # First call should produce output
         exit_code, stdout, stderr = run_hook({"tool_name": "Read"}, env=env)
         assert exit_code == 0
-        assert "systemMessage" in stdout
+        assert "additionalContext" in stdout
 
         # Second call with same messages should be rate-limited (silent)
         exit_code, stdout, stderr = run_hook({"tool_name": "Read"}, env=env)
@@ -289,7 +289,7 @@ class TestPeekAsyncHook:
             ],
         }
         exit_code, stdout, _ = run_hook({"tool_name": "Read"}, env=env)
-        assert "systemMessage" in stdout
+        assert "additionalContext" in stdout
 
         # Second call with a new message
         MockCoordinatorHandler.pending_response = {
@@ -300,8 +300,8 @@ class TestPeekAsyncHook:
             ],
         }
         exit_code, stdout, _ = run_hook({"tool_name": "Read"}, env=env)
-        assert "systemMessage" in stdout
-        assert "2 total" in stdout
+        assert "additionalContext" in stdout
+        assert "2 pending" in stdout
 
     def test_truncates_long_messages(self, mock_coordinator, agent_id_file):
         """Hook should truncate long message previews."""
@@ -323,8 +323,9 @@ class TestPeekAsyncHook:
 
         assert exit_code == 0
         output = json.loads(stdout)
-        assert "..." in output["systemMessage"]
-        assert long_message not in output["systemMessage"]
+        ctx = output["hookSpecificOutput"]["additionalContext"]
+        assert "..." in ctx
+        assert long_message not in ctx
 
     def test_shows_remaining_count_for_many_messages(self, mock_coordinator, agent_id_file):
         """Hook should show '... and N more' when there are many messages."""
@@ -346,8 +347,9 @@ class TestPeekAsyncHook:
 
         assert exit_code == 0
         output = json.loads(stdout)
-        assert "and" in output["systemMessage"]
-        assert "more" in output["systemMessage"]
+        ctx = output["hookSpecificOutput"]["additionalContext"]
+        assert "and" in ctx
+        assert "more" in ctx
 
     def test_always_exits_zero(self, mock_coordinator, agent_id_file):
         """Hook should always exit with code 0 regardless of errors."""

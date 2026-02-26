@@ -207,19 +207,28 @@ def main() -> None:
 
         summary = "\n".join(summary_lines)
 
-        # Output systemMessage (PostToolUse hook pattern)
+        # Output additionalContext (PostToolUse sync hook pattern)
         output = {
-            "systemMessage": (
-                f"🔔 New coordination message(s) ({count} total):\n\n"
-                f"{summary}\n\n"
-                "Use get_messages to retrieve full messages when convenient."
-            )
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": (
+                    f"🔔 C3PO: {count} pending coordination message(s):\n\n"
+                    f"{summary}\n\n"
+                    "Use get_messages to retrieve full messages when convenient."
+                ),
+            }
         }
         print(json.dumps(output))
-        _log(f"INJECTED: systemMessage for {count} message(s)")
+        _log(f"INJECTED: additionalContext for {count} message(s)")
 
-        # Update rate-limit state
-        _update_rate_limit_state(session_id, message_ids)
+        # Update rate-limit state only for native tool calls.
+        # MCP tool calls (mcp__*) silently drop additionalContext due to a known
+        # Claude Code limitation, so we don't count them as a successful injection.
+        # This ensures the next native tool call (Bash, Read, etc.) will inject.
+        if not tool_name.startswith("mcp__"):
+            _update_rate_limit_state(session_id, message_ids)
+        else:
+            _log("SKIP rate-limit update: MCP tool call, additionalContext not surfaced to Claude")
 
     except urllib.error.URLError:
         _log("SKIP: coordinator unreachable (URLError)")
