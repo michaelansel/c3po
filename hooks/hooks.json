@@ -50,9 +50,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/peek_c3po_async.py\"",
-            "async": true,
-            "timeout": 5
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/peek_c3po.py\"",
+            "timeout": 3
           }
         ]
       }

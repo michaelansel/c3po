@@ -10,7 +10,7 @@ import os
 import pytest
 
 
-HOOK_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "peek_c3po_async.py")
+HOOK_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "peek_c3po.py")
 
 TEST_SESSION_ID = "test-session-peek-1234"
 

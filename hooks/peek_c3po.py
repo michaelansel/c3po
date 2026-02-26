@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-C3PO Async Peek Hook - Check for new coordination messages with low latency.
+C3PO Peek Hook - Check for new coordination messages after each tool call.
 
-
-This hook runs asynchronously after every tool call (PostToolUse event).
+This hook runs synchronously after every tool call (PostToolUse event).
 It peeks at the C-3PO inbox and surfaces new messages via systemMessage
-on the next conversation turn, providing <10s interrupt latency.
+on the current conversation turn, providing real-time interrupt latency.
 
 Rate limiting: Uses a temp file to track the last injection time and
 message IDs, ensuring we don't spam the same messages repeatedly.
@@ -16,6 +15,7 @@ Exit codes:
 
 Environment variables:
 - C3PO_COORDINATOR_URL: Coordinator URL (default: http://localhost:8420)
+- C3PO_DEBUG: If set, write debug logs to $TMPDIR/c3po-peek-debug.log
 - TMPDIR: Temp directory for rate-limit tracking (default: /tmp)
 """
 
@@ -36,6 +36,20 @@ from c3po_common import auth_headers, get_coordinator_url, get_session_id, read_
 COORDINATOR_URL = get_coordinator_url()
 RATE_LIMIT_SECONDS = 60  # Max 1 injection per minute
 TMPDIR = os.environ.get("TMPDIR", "/tmp")
+
+LOG_FILE = os.path.join(TMPDIR, "c3po-peek-debug.log")
+
+
+def _log(msg: str) -> None:
+    """Write debug info to log file when C3PO_DEBUG is set."""
+    if not os.environ.get("C3PO_DEBUG"):
+        return
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(f"{msg}\n")
+    except Exception:
+        pass
+    print(f"[c3po:peek] {msg}", file=sys.stderr)
 
 
 def _get_rate_limit_file(session_id: str) -> Path:
@@ -69,11 +83,17 @@ def _should_inject(session_id: str, message_ids: list[str]) -> bool:
         # If there are new messages not seen before, inject regardless of rate limit
         new_messages = current_message_ids - last_message_ids
         if new_messages:
+            _log(f"INJECT: {len(new_messages)} new message(s) — bypassing rate limit")
             return True
 
         # Otherwise, respect rate limit for same messages
         elapsed = time.time() - last_injection
-        return elapsed >= RATE_LIMIT_SECONDS
+        if elapsed >= RATE_LIMIT_SECONDS:
+            _log(f"INJECT: rate limit elapsed ({elapsed:.0f}s >= {RATE_LIMIT_SECONDS}s)")
+            return True
+
+        _log(f"SKIP: rate-limited, same messages, {elapsed:.0f}s < {RATE_LIMIT_SECONDS}s")
+        return False
 
     except (json.JSONDecodeError, IOError):
         return True
@@ -114,11 +134,17 @@ def main() -> None:
         # No session_id, exit silently
         sys.exit(0)
 
+    tool_name = stdin_data.get("tool_name", "unknown")
+    _log(f"HOOK CALLED: tool_name={tool_name!r} session_id={session_id!r}")
+
     # Read agent ID using session_id
     assigned_id = read_agent_id(session_id)
     if not assigned_id:
         # No agent ID, exit silently
+        _log("SKIP: no agent ID file found")
         sys.exit(0)
+
+    _log(f"AGENT ID: {assigned_id!r}")
 
     # Check for pending messages via REST API
     try:
@@ -128,10 +154,11 @@ def main() -> None:
             f"{COORDINATOR_URL}/agent/api/pending",
             headers=pending_headers,
         )
-        with urlopen_with_ssl(req, timeout=3) as resp:
+        with urlopen_with_ssl(req, timeout=1) as resp:
             data = json.loads(resp.read())
 
         messages = data.get("messages", [])
+        _log(f"PENDING: {len(messages)} message(s)")
         if not messages:
             sys.exit(0)
 
@@ -180,7 +207,7 @@ def main() -> None:
 
         summary = "\n".join(summary_lines)
 
-        # Output systemMessage (async hook pattern)
+        # Output systemMessage (PostToolUse hook pattern)
         output = {
             "systemMessage": (
                 f"🔔 New coordination message(s) ({count} total):\n\n"
@@ -189,18 +216,19 @@ def main() -> None:
             )
         }
         print(json.dumps(output))
+        _log(f"INJECTED: systemMessage for {count} message(s)")
 
         # Update rate-limit state
         _update_rate_limit_state(session_id, message_ids)
 
     except urllib.error.URLError:
-        pass
-    except urllib.error.HTTPError:
-        pass
+        _log("SKIP: coordinator unreachable (URLError)")
+    except urllib.error.HTTPError as e:
+        _log(f"SKIP: coordinator HTTP error {e.code}")
     except json.JSONDecodeError:
-        pass
-    except Exception:
-        pass
+        _log("SKIP: JSON decode error from coordinator")
+    except Exception as e:
+        _log(f"SKIP: unexpected error {type(e).__name__}: {e}")
 
     sys.exit(0)
 
