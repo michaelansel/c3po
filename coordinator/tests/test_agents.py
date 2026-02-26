@@ -659,3 +659,45 @@ class TestMarkOffline:
         assert result["id"] == "machine/watcher"  # No collision suffix
         assert result["status"] == "online"
         assert result["session_id"] == "real-session-1"
+
+
+class TestWatchingStatus:
+    """Tests for 'watching' agent status (offline + webhook or active REST waiter)."""
+
+    def test_status_watching_with_webhook(self, agent_manager):
+        """Offline agent with webhook_url set should show 'watching' status."""
+        agent_manager.register_agent("machine/watcher", session_id="s1")
+        agent_manager.set_webhook("machine/watcher", "https://example.com/hook", "secret")
+        agent_manager.mark_offline("machine/watcher")
+
+        result = agent_manager.get_agent("machine/watcher")
+        assert result["status"] == "watching"
+
+    def test_status_online_overrides_webhook(self, agent_manager):
+        """Online agent with webhook_url should still show 'online', not 'watching'."""
+        agent_manager.register_agent("machine/agent", session_id="s1")
+        agent_manager.set_webhook("machine/agent", "https://example.com/hook", "secret")
+
+        result = agent_manager.get_agent("machine/agent")
+        assert result["status"] == "online"
+
+    def test_list_agents_watching(self, agent_manager):
+        """list_agents should return 'watching' for offline+webhook agents."""
+        agent_manager.register_agent("machine/watcher", session_id="s1")
+        agent_manager.set_webhook("machine/watcher", "https://example.com/hook", "secret")
+        agent_manager.mark_offline("machine/watcher")
+
+        agents = agent_manager.list_agents()
+        assert len(agents) == 1
+        assert agents[0]["status"] == "watching"
+
+    def test_count_online_excludes_watching(self, agent_manager):
+        """count_online_agents should not count 'watching' agents."""
+        # One online, one watching
+        agent_manager.register_agent("machine/online", session_id="s1")
+        agent_manager.register_agent("machine/watcher", session_id="s2")
+        agent_manager.set_webhook("machine/watcher", "https://example.com/hook", "secret")
+        agent_manager.mark_offline("machine/watcher")
+
+        count = agent_manager.count_online_agents()
+        assert count == 1

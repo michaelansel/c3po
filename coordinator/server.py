@@ -1041,14 +1041,14 @@ async def admin_list_agents(request):
     if rate_resp:
         return rate_resp
 
-    agents = agent_manager.list_agents()
+    agents = _apply_watching_overlay(agent_manager.list_agents())
 
     # Filter by status
     status_filter = request.query_params.get("status", "").strip().lower()
     if status_filter:
-        if status_filter not in ("online", "offline"):
+        if status_filter not in ("online", "offline", "watching"):
             return JSONResponse(
-                {"error": "Invalid status filter. Must be 'online' or 'offline'."},
+                {"error": "Invalid status filter. Must be 'online', 'offline', or 'watching'."},
                 status_code=400,
             )
         agents = [a for a in agents if a.get("status") == status_filter]
@@ -1088,9 +1088,9 @@ async def admin_bulk_remove_agents(request):
     pattern = request.query_params.get("pattern", "").strip()
     status_filter = request.query_params.get("status", "").strip().lower()
 
-    if status_filter and status_filter not in ("online", "offline"):
+    if status_filter and status_filter not in ("online", "offline", "watching"):
         return JSONResponse(
-            {"error": "Invalid status filter. Must be 'online' or 'offline'."},
+            {"error": "Invalid status filter. Must be 'online', 'offline', or 'watching'."},
             status_code=400,
         )
 
@@ -1103,7 +1103,7 @@ async def admin_bulk_remove_agents(request):
     # When status filter is provided, use list_agents + filter approach
     if status_filter:
         import fnmatch as fnmatch_mod
-        agents = agent_manager.list_agents()
+        agents = _apply_watching_overlay(agent_manager.list_agents())
         # Filter by status
         agents = [a for a in agents if a.get("status") == status_filter]
         # Filter by pattern (default to * if not provided)
@@ -1164,18 +1164,37 @@ def _strip_secrets(agent_data: dict) -> dict:
     return agent_data
 
 
+def _apply_watching_overlay(agents: list[dict]) -> list[dict]:
+    """Upgrade 'offline' agents to 'watching' if they have an active REST waiter.
+
+    Takes a snapshot of _active_waiters under the lock, then upgrades any agent
+    whose status is 'offline' and whose ID appears in the waiters set to 'watching'.
+    This captures agents using the REST /agent/api/wait long-poll pattern (in-memory
+    signal, lost on coordinator restart). Webhook-based watching is handled in
+    agents.py _add_status() (persisted in Redis).
+    """
+    with _active_waiters_lock:
+        waiters_snapshot = set(_active_waiters)
+    for a in agents:
+        if a.get("status") == "offline" and a.get("id") in waiters_snapshot:
+            a["status"] = "watching"
+    return agents
+
+
 def _list_agents_impl(manager: AgentManager) -> list[dict]:
     """List all registered agents.
 
     `webhook_secret` is stripped from every agent dict before returning;
     webhook configuration is not visible to callers.
 
-    Agent `status` ("online"/"offline") is computed dynamically from `last_seen`
-    at call time using a 15-minute threshold — it is not stored in Redis.
+    Agent `status` ("online"/"watching"/"offline") is computed dynamically from
+    `last_seen` at call time using a 15-minute threshold — it is not stored in
+    Redis. Agents with a registered webhook or an active REST /agent/api/wait
+    poller show "watching" instead of "offline".
 
     No heartbeat is updated and no rate limit is applied inside this function.
     """
-    return [_strip_secrets(a) for a in manager.list_agents()]
+    return [_strip_secrets(a) for a in _apply_watching_overlay(manager.list_agents())]
 
 
 def _register_agent_impl(
@@ -1462,11 +1481,19 @@ def _send_message_impl(
     # Send message to Redis inbox
     result = msg_manager.send_message(from_agent, to, message, context)
 
-    # Indicate offline delivery in result if target is offline
-    is_offline = resolved_target.get("status") == "offline"
-    if is_offline:
+    # Overlay active-waiter watching status before checking delivery mode
+    with _active_waiters_lock:
+        has_active_waiter = to in _active_waiters
+    target_status = resolved_target.get("status")
+    if target_status == "offline" and has_active_waiter:
+        target_status = "watching"
+
+    # Indicate delivery status in result
+    if target_status == "offline":
         result["offline_delivery"] = True
         result["note"] = f"Agent '{to}' is offline. Message queued for delivery when they reconnect."
+    elif target_status == "watching":
+        result["note"] = f"Agent '{to}' is being watched and will be notified of your message."
 
     # Fire webhook if recipient has one registered
     webhook_url = resolved_target.get("webhook_url")
@@ -1722,7 +1749,7 @@ def ping() -> dict:
 
 @mcp.tool()
 def list_agents(ctx: Context) -> list[dict]:
-    """List all registered agents with their status (online/offline)."""
+    """List all registered agents with their status (online/watching/offline)."""
     # Rate limit by agent_id (or machine_name as fallback)
     identity = ctx.get_state("agent_id") or ctx.get_state("machine_name") or "unknown"
     allowed, _ = rate_limiter.check_and_record("list_agents", identity)

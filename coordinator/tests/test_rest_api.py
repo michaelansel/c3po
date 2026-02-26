@@ -834,6 +834,30 @@ class TestAdminListAgentsEndpoint:
         assert response.status_code == 400
         assert "Invalid status" in response.json()["error"]
 
+    @pytest.mark.asyncio
+    async def test_filter_by_status_watching(self, client, agent_manager):
+        """Should filter to only watching agents (offline + webhook)."""
+        # One online, one offline, one watching (offline + webhook)
+        agent_manager.register_agent("machine/online-agent")
+        agent_manager.register_agent("machine/watching-agent", session_id="s1")
+        agent_manager.set_webhook("machine/watching-agent", "https://example.com/hook", "secret")
+        agent_manager.mark_offline("machine/watching-agent")
+        agent_manager.register_agent("machine/offline-agent")
+        agent_manager.mark_offline("machine/offline-agent")
+
+        response = await client.get("/admin/api/agents?status=watching")
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["count"] == 1
+        assert result["agents"][0]["id"] == "machine/watching-agent"
+
+    @pytest.mark.asyncio
+    async def test_status_filter_accepts_watching(self, client, agent_manager):
+        """?status=watching should not return 400."""
+        response = await client.get("/admin/api/agents?status=watching")
+        assert response.status_code == 200
+
 
 class TestAdminBulkRemoveEndpoint:
     """Tests for DELETE /admin/api/agents endpoint."""

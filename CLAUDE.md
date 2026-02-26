@@ -132,7 +132,7 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 
 **Rate limiting**: Per-operation sliding window rate limits using Redis sorted sets. Different limits for different operations (e.g., `send_message`: 10/60s, `list_agents`: 30/60s, `rest_register`: 5/60s). Per-agent for MCP tools, per-IP for REST endpoints.
 
-**Agent liveness**: Heartbeat updated on every MCP tool call. Agents go offline after 15 minutes of inactivity. Messages expire after 24 hours.
+**Agent liveness**: Heartbeat updated on every MCP tool call. Agents go offline after 15 minutes of inactivity. Messages expire after 24 hours. Three status values: `"online"` (active session, last_seen within 15 min), `"watching"` (offline but being monitored — either `webhook_url` is set in Redis, or an active REST `/agent/api/wait` poller exists), `"offline"` (unreachable). Watching agents do not get `offline_delivery: true` on send — they receive a `note` instead. Collision detection uses raw `last_seen` threshold only, so "watching" agents are treated as offline for re-registration purposes.
 
 ### Redis Key Structure
 

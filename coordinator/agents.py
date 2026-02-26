@@ -150,6 +150,8 @@ class AgentManager:
 
         if seconds_since < self.AGENT_TIMEOUT_SECONDS:
             agent_data["status"] = "online"
+        elif agent_data.get("webhook_url"):
+            agent_data["status"] = "watching"
         else:
             agent_data["status"] = "offline"
 
@@ -210,6 +212,8 @@ class AgentManager:
 
             if seconds_since < self.AGENT_TIMEOUT_SECONDS:
                 agent_data["status"] = "online"
+            elif agent_data.get("webhook_url"):
+                agent_data["status"] = "watching"
             else:
                 agent_data["status"] = "offline"
 

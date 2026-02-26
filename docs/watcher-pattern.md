@@ -10,6 +10,19 @@ an offline agent's inbox and wakes the agent when messages arrive. This enables
 workflows like `run-ithaca.sh` + `wait-for-trigger.py`, where a companion
 process polls for messages and relaunches the agent when work arrives.
 
+### Status in list_agents
+
+A watched agent shows **`"watching"`** status in `list_agents` (not `"offline"`),
+so other agents can distinguish between "unreachable" and "will respond when
+triggered." Two signals produce `"watching"` status:
+
+- The agent has a `webhook_url` registered (persisted in Redis, survives coordinator restart)
+- An external process has an active `GET /agent/api/wait` connection (in-memory, re-established on reconnect)
+
+When sending to a watching agent, the `send_message` response includes a `note`
+field but **no** `offline_delivery: true` flag — the message will be delivered
+promptly via the watcher.
+
 ## Lifecycle
 
 ```
