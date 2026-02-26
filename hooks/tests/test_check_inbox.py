@@ -168,12 +168,17 @@ class TestCheckInboxHook:
         assert "get_messages" in output["reason"]
         assert "reply" in output["reason"]
 
-    def test_respects_stop_hook_active_flag(self, mock_coordinator, agent_id_file):
-        """Hook should allow stop when stop_hook_active is True to prevent loops."""
+    def test_stop_hook_active_same_messages_fails_open(self, mock_coordinator, agent_id_file):
+        """Hook should allow stop when stop_hook_active=True and same messages as last block."""
         MockCoordinatorHandler.pending_response = {
             "count": 1,
-            "messages": [{"from_agent": "sender", "message": "Test"}],
+            "messages": [{"id": "sender::agent::abc123", "from_agent": "sender", "message": "Test"}],
         }
+
+        # Write blocked-IDs file with the same message ID
+        blocked_file = os.path.join(agent_id_file, f"c3po-stop-blocked-{TEST_SESSION_ID}.json")
+        with open(blocked_file, "w") as f:
+            json.dump({"blocked_ids": ["sender::agent::abc123"]}, f)
 
         exit_code, stdout, stderr = run_hook(
             {"stop_hook_active": True},
@@ -184,8 +189,34 @@ class TestCheckInboxHook:
         )
 
         assert exit_code == 0
-        # Should not block even though there are pending requests
+        # Should not block — same messages, prevent infinite loop
         assert stdout.strip() == "" or "block" not in stdout
+        assert "Warning" in stderr
+
+    def test_stop_hook_active_new_messages_blocks_again(self, mock_coordinator, agent_id_file):
+        """Hook should block again when stop_hook_active=True but new messages have arrived."""
+        MockCoordinatorHandler.pending_response = {
+            "count": 1,
+            "messages": [{"id": "sender::agent::newmsg", "from_agent": "sender", "message": "New message"}],
+        }
+
+        # Write blocked-IDs file with a different (old) message ID
+        blocked_file = os.path.join(agent_id_file, f"c3po-stop-blocked-{TEST_SESSION_ID}.json")
+        with open(blocked_file, "w") as f:
+            json.dump({"blocked_ids": ["sender::agent::oldmsg"]}, f)
+
+        exit_code, stdout, stderr = run_hook(
+            {"stop_hook_active": True},
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                "TMPDIR": agent_id_file,
+            },
+        )
+
+        assert exit_code == 0
+        # Should block — new message arrived since last block
+        output = json.loads(stdout)
+        assert output["decision"] == "block"
 
     def test_fails_open_when_coordinator_unavailable(self, agent_id_file):
         """Hook should allow stop when coordinator is not reachable."""

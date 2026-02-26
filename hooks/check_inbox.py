@@ -19,12 +19,34 @@ import os
 import sys
 import urllib.request
 import urllib.error
+from pathlib import Path
 
 from c3po_common import auth_headers, get_coordinator_url, get_session_id, read_agent_id, urlopen_with_ssl
 
 
 # Configuration
 COORDINATOR_URL = get_coordinator_url()
+TMPDIR = os.environ.get("TMPDIR", "/tmp")
+
+
+def _get_blocked_ids_file(session_id: str) -> Path:
+    return Path(TMPDIR) / f"c3po-stop-blocked-{session_id}.json"
+
+
+def _read_blocked_ids(session_id: str) -> set[str]:
+    try:
+        with open(_get_blocked_ids_file(session_id)) as f:
+            return set(json.load(f).get("blocked_ids", []))
+    except (json.JSONDecodeError, IOError, OSError):
+        return set()
+
+
+def _write_blocked_ids(session_id: str, message_ids: list[str]) -> None:
+    try:
+        with open(_get_blocked_ids_file(session_id), "w") as f:
+            json.dump({"blocked_ids": message_ids}, f)
+    except (IOError, OSError):
+        pass  # Best effort
 
 
 def _heartbeat(assigned_id: str) -> None:
@@ -127,26 +149,34 @@ def main() -> None:
 
             summary = "\n".join(message_summary)
 
+            current_ids = [m.get("id") for m in messages]
+            block_reason = (
+                f"You have {count} pending coordination message(s) from other agents:\n\n"
+                f"{summary}\n\n"
+                "Use the get_messages tool to retrieve the full message(s), "
+                "then use reply to send your response. "
+                "After responding to all messages, you may stop."
+            )
+
             if stop_hook_active:
-                # Second stop attempt — don't block to prevent infinite loops,
-                # but warn so the user/agent knows messages remain unprocessed.
-                print(
-                    f"[c3po] Warning: {count} message(s) still pending but allowing stop "
-                    f"(stop_hook_active=True prevents infinite loop).",
-                    file=sys.stderr,
-                )
+                previously_blocked = _read_blocked_ids(session_id)
+                new_ids = set(current_ids) - previously_blocked
+                if not new_ids:
+                    # Same messages as last block — fail open to prevent infinite loop
+                    print(
+                        f"[c3po] Warning: {count} message(s) still pending but allowing stop "
+                        "(same messages as last block — preventing infinite loop).",
+                        file=sys.stderr,
+                    )
+                else:
+                    # New messages arrived since last block — block again
+                    _write_blocked_ids(session_id, current_ids)
+                    output = {"decision": "block", "reason": block_reason}
+                    print(json.dumps(output))
             else:
                 # First stop attempt — block until messages are processed.
-                output = {
-                    "decision": "block",
-                    "reason": (
-                        f"You have {count} pending coordination message(s) from other agents:\n\n"
-                        f"{summary}\n\n"
-                        "Use the get_messages tool to retrieve the full message(s), "
-                        "then use reply to send your response. "
-                        "After responding to all messages, you may stop."
-                    ),
-                }
+                _write_blocked_ids(session_id, current_ids)
+                output = {"decision": "block", "reason": block_reason}
                 print(json.dumps(output))
 
     except urllib.error.URLError:
