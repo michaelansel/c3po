@@ -221,14 +221,8 @@ def main() -> None:
         print(json.dumps(output))
         _log(f"INJECTED: additionalContext for {count} message(s)")
 
-        # Update rate-limit state only for native tool calls.
-        # MCP tool calls (mcp__*) silently drop additionalContext due to a known
-        # Claude Code limitation, so we don't count them as a successful injection.
-        # This ensures the next native tool call (Bash, Read, etc.) will inject.
-        if not tool_name.startswith("mcp__"):
-            _update_rate_limit_state(session_id, message_ids)
-        else:
-            _log("SKIP rate-limit update: MCP tool call, additionalContext not surfaced to Claude")
+        # Update rate-limit state after injection.
+        _update_rate_limit_state(session_id, message_ids)
 
     except urllib.error.URLError:
         _log("SKIP: coordinator unreachable (URLError)")
