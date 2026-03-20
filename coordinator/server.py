@@ -35,6 +35,7 @@ from coordinator.errors import (
     blob_not_found,
     blob_too_large,
     invalid_request,
+    message_not_found,
     rate_limited,
     RedisConnectionError,
     ErrorCodes,
@@ -2198,6 +2199,142 @@ def ack_messages(
         raise ToolError(f"{err.message} {err.suggestion}")
 
     return _ack_messages_impl(message_manager, effective_id, message_ids)
+
+
+def _get_message_impl(
+    msg_manager: MessageManager,
+    agent_id: str,
+    message_id: str,
+) -> dict:
+    """Retrieve a single archived message by ID.
+
+    Authorization: caller must be either the sender (from_agent) or recipient (to_agent)
+    of the message. Third parties get a not_found error (same as missing, to avoid leaking
+    message existence).
+
+    Returns the message dict as archived at send/reply time.
+    Returns ToolError if not found, expired, or unauthorized.
+    """
+    msg = msg_manager.get_archived_message(message_id)
+    if msg is None:
+        err = message_not_found(message_id)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    # Authorization: caller must be participant
+    if agent_id not in (msg.get("from_agent"), msg.get("to_agent")):
+        err = message_not_found(message_id)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    return msg
+
+
+def _get_thread_impl(
+    msg_manager: MessageManager,
+    agent_id: str,
+    message_id: str,
+) -> dict:
+    """Walk reply_to chain from message_id and return the full thread.
+
+    Authorization: caller must appear as from_agent or to_agent in at least
+    one message in the thread. If the caller is not a participant in any
+    accessible message, raises ToolError.
+
+    Returns:
+        Dict with thread (list), count, root_message_id, latest_message_id.
+        Partial thread is returned if some archive entries have expired.
+    """
+    thread = msg_manager.get_thread(message_id)
+
+    # Authorization: caller must be a participant in at least one message
+    is_participant = any(
+        agent_id in (msg.get("from_agent"), msg.get("to_agent"))
+        for msg in thread
+    )
+    if not thread or not is_participant:
+        err = message_not_found(message_id)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    root_message_id = thread[0].get("id") or thread[0].get("reply_id") if thread else None
+    latest_message_id = thread[-1].get("id") or thread[-1].get("reply_id") if thread else None
+
+    return {
+        "thread": thread,
+        "count": len(thread),
+        "root_message_id": root_message_id,
+        "latest_message_id": latest_message_id,
+    }
+
+
+@mcp.tool()
+def get_message(
+    ctx: Context,
+    message_id: str,
+    agent_id: Optional[str] = None,
+) -> dict:
+    """Retrieve a single archived message by its ID.
+
+    Messages are archived at send time with a 7-day TTL. Both the sender and
+    recipient can look up any message they participated in.
+
+    Args:
+        ctx: MCP context (injected automatically)
+        message_id: The message ID to retrieve (format: from_agent::to_agent::uuid)
+        agent_id: Your agent ID. If not provided, uses header-based ID.
+
+    Returns:
+        The message dict as stored at send time
+
+    Raises:
+        ToolError: If message_id is invalid, not found/expired, or caller is not a participant
+    """
+    effective_id = _resolve_agent_id(ctx, agent_id)
+    _enforce_agent_pattern(ctx, effective_id)
+
+    _validate_message_id(message_id)
+
+    allowed, _ = rate_limiter.check_and_record("get_message", effective_id)
+    if not allowed:
+        err = rate_limited(effective_id, 60, 60)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    return _get_message_impl(message_manager, effective_id, message_id)
+
+
+@mcp.tool()
+def get_thread(
+    ctx: Context,
+    message_id: str,
+    agent_id: Optional[str] = None,
+) -> dict:
+    """Retrieve the full conversation thread containing a message.
+
+    Walks the reply_to chain from the given message back to the root, then
+    returns messages in chronological order (root first). Both sender and
+    recipient of any message in the thread can retrieve it.
+
+    Args:
+        ctx: MCP context (injected automatically)
+        message_id: Any message ID in the thread (format: from_agent::to_agent::uuid)
+        agent_id: Your agent ID. If not provided, uses header-based ID.
+
+    Returns:
+        Dict with thread (list of messages, root first), count, root_message_id,
+        latest_message_id. May be partial if some archive entries have expired.
+
+    Raises:
+        ToolError: If message_id is invalid, not found/expired, or caller is not a participant
+    """
+    effective_id = _resolve_agent_id(ctx, agent_id)
+    _enforce_agent_pattern(ctx, effective_id)
+
+    _validate_message_id(message_id)
+
+    allowed, _ = rate_limiter.check_and_record("get_thread", effective_id)
+    if not allowed:
+        err = rate_limited(effective_id, 30, 60)
+        raise ToolError(f"{err.message} {err.suggestion}")
+
+    return _get_thread_impl(message_manager, effective_id, message_id)
 
 
 @mcp.tool()

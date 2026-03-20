@@ -18,11 +18,13 @@ class MessageManager:
     NOTIFY_PREFIX = "c3po:notify:"
     RATE_LIMIT_PREFIX = "c3po:rate:"
     ACKED_PREFIX = "c3po:acked:"
+    ARCHIVE_PREFIX = "c3po:msg:"
 
     # Configuration
     RATE_LIMIT_REQUESTS = 10  # Max requests per window
     RATE_LIMIT_WINDOW_SECONDS = 60  # Window size in seconds
-    MESSAGE_TTL_SECONDS = 24 * 60 * 60  # 24 hours
+    MESSAGE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
+    NOTIFY_TTL_SECONDS = 24 * 60 * 60  # 24 hours (ephemeral wake signals)
 
     # Lua script for atomic list compaction.
     # Removes acked entries from a Redis list without a race window.
@@ -175,13 +177,16 @@ return kept
         inbox_key = f"{self.INBOX_PREFIX}{to_agent}"
         self.redis.rpush(inbox_key, json.dumps(message_data))
 
-        # Set TTL on inbox key (24h default) - prevents stale messages accumulating
+        # Set TTL on inbox key - prevents stale messages accumulating
         self.redis.expire(inbox_key, self.MESSAGE_TTL_SECONDS)
+
+        # Archive a copy keyed by message_id for later lookup
+        self.redis.set(f"{self.ARCHIVE_PREFIX}{message_id}", json.dumps(message_data), ex=self.MESSAGE_TTL_SECONDS)
 
         # Push a lightweight notification signal so wait_for_message wakes up
         notify_key = f"{self.NOTIFY_PREFIX}{to_agent}"
         self.redis.rpush(notify_key, "1")
-        self.redis.expire(notify_key, self.MESSAGE_TTL_SECONDS)
+        self.redis.expire(notify_key, self.NOTIFY_TTL_SECONDS)
 
         logger.info("message_sent message_id=%s from=%s to=%s inbox_key=%s", message_id, from_agent, to_agent, inbox_key)
 
@@ -366,10 +371,13 @@ return kept
         self.redis.rpush(messages_key, json.dumps(reply_data))
         self.redis.expire(messages_key, self.MESSAGE_TTL_SECONDS)
 
+        # Archive a copy keyed by reply_id for later lookup
+        self.redis.set(f"{self.ARCHIVE_PREFIX}{reply_id}", json.dumps(reply_data), ex=self.MESSAGE_TTL_SECONDS)
+
         # Push notification so wait_for_message wakes on replies too
         notify_key = f"{self.NOTIFY_PREFIX}{original_sender}"
         self.redis.rpush(notify_key, "1")
-        self.redis.expire(notify_key, self.MESSAGE_TTL_SECONDS)
+        self.redis.expire(notify_key, self.NOTIFY_TTL_SECONDS)
 
         logger.info("reply_sent message_id=%s from=%s to=%s status=%s", message_id, from_agent, original_sender, status)
 
@@ -637,3 +645,56 @@ return kept
                 logger.info("wait_for_message_received agent=%s count=%d notified=%s cycles=%d",
                            agent_id, len(messages), result is not None, cycle)
                 return messages
+
+    def get_archived_message(self, message_id: str) -> Optional[dict]:
+        """Retrieve a single archived message by ID.
+
+        Args:
+            message_id: The message or reply ID to look up
+
+        Returns:
+            Message dict if found, None if not found or expired
+        """
+        raw = self.redis.get(f"{self.ARCHIVE_PREFIX}{message_id}")
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        return json.loads(raw)
+
+    def get_thread(self, message_id: str, max_depth: int = 50) -> list[dict]:
+        """Walk the reply chain for a message and return it in chronological order.
+
+        Traverses backwards through reply_to links, collecting each message.
+        Stops at max_depth or when a message has no reply_to (root found).
+        Returns messages in chronological order (root first).
+
+        Args:
+            message_id: Starting message or reply ID
+            max_depth: Maximum number of messages to return (default 50)
+
+        Returns:
+            List of message dicts in chronological order (root first).
+            Partial list if some archive entries have expired.
+        """
+        thread = []
+        visited = set()
+        current_id = message_id
+
+        while current_id and len(thread) < max_depth:
+            if current_id in visited:
+                # Cycle detected, stop
+                break
+            visited.add(current_id)
+
+            msg = self.get_archived_message(current_id)
+            if msg is None:
+                # Archive entry expired or never existed; stop here
+                break
+
+            thread.append(msg)
+            current_id = msg.get("reply_to")
+
+        # Reverse to get chronological order (root first)
+        thread.reverse()
+        return thread

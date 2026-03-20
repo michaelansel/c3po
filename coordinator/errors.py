@@ -35,6 +35,7 @@ class ErrorCodes:
     BLOB_NOT_FOUND = "BLOB_NOT_FOUND"
     BLOB_TOO_LARGE = "BLOB_TOO_LARGE"
     ANONYMOUS_ONBOARDING_REQUIRED = "ANONYMOUS_ONBOARDING_REQUIRED"
+    MESSAGE_NOT_FOUND = "MESSAGE_NOT_FOUND"
 
 
 def agent_not_found(target: str, available: list[str]) -> C3POError:
@@ -111,6 +112,15 @@ def redis_unavailable(redis_url: str, original_error: str = "") -> C3POError:
         code=ErrorCodes.REDIS_UNAVAILABLE,
         message=message,
         suggestion="Ensure Redis is running and accessible. Check REDIS_URL environment variable.",
+    )
+
+
+def message_not_found(message_id: str) -> C3POError:
+    """Create error for message not found (or not accessible)."""
+    return C3POError(
+        code=ErrorCodes.MESSAGE_NOT_FOUND,
+        message=f"Message '{message_id}' not found or has expired.",
+        suggestion="Messages are archived for 7 days. Check the message_id and ensure you are a participant.",
     )
 
 

@@ -705,6 +705,140 @@ async def phase_10():
 
 
 # ---------------------------------------------------------------------------
+# Phase 11: Message Archive (get_message / get_thread)
+# ---------------------------------------------------------------------------
+async def phase_11():
+    """Verify get_message and get_thread work end-to-end."""
+    global _current_phase
+    _current_phase = 11
+    log("Message Archive - get_message / get_thread")
+
+    from mcp.client.streamable_http import streamablehttp_client
+    from mcp import ClientSession
+
+    url = f"{_config['coordinator_url']}/agent/mcp"
+    agent_a_base = f"archive-a-{uuid.uuid4().hex[:8]}"
+    agent_b_base = f"archive-b-{uuid.uuid4().hex[:8]}"
+    agent_a_full = f"{agent_a_base}/acceptance-test"
+    agent_b_full = f"{agent_b_base}/acceptance-test"
+
+    headers_a = {
+        "X-Machine-Name": agent_a_base,
+        "X-Project-Name": "acceptance-test",
+        "X-Session-ID": str(uuid.uuid4()),
+    }
+    headers_b = {
+        "X-Machine-Name": agent_b_base,
+        "X-Project-Name": "acceptance-test",
+        "X-Session-ID": str(uuid.uuid4()),
+    }
+
+    passed = True
+
+    async with streamablehttp_client(url, headers=headers_a) as (ra, wa, _):
+        async with ClientSession(ra, wa) as sess_a:
+            await sess_a.initialize()
+            await sess_a.call_tool("ping", {})
+
+            async with streamablehttp_client(url, headers=headers_b) as (rb, wb, _):
+                async with ClientSession(rb, wb) as sess_b:
+                    await sess_b.initialize()
+                    await sess_b.call_tool("ping", {})
+
+                    # Step 1: A sends to B
+                    log("Step 1: Agent A sends message to Agent B")
+                    result = await sess_a.call_tool("send_message", {
+                        "to": agent_b_full,
+                        "message": "archive test message",
+                    })
+                    result_text = str(result)
+                    match = re.search(r'"id":\s*"([^"]+)"', result_text)
+                    if not match:
+                        fail(f"send_message did not return message ID: {result_text}")
+                        return False
+                    message_id = match.group(1)
+                    ok(f"send_message returned ID: {message_id}")
+
+                    # Step 2: A retrieves its own message via get_message
+                    log("Step 2: Agent A retrieves message via get_message")
+                    result = await sess_a.call_tool("get_message", {
+                        "message_id": message_id,
+                    })
+                    result_text = str(result)
+                    passed = assert_true(
+                        "archive test message" in result_text,
+                        "get_message returns the sent message (sender can retrieve)",
+                        f"Message content not found: {result_text}",
+                    ) and passed
+
+                    # Step 3: B also retrieves the message
+                    log("Step 3: Agent B retrieves message via get_message")
+                    result = await sess_b.call_tool("get_message", {
+                        "message_id": message_id,
+                    })
+                    result_text = str(result)
+                    passed = assert_true(
+                        "archive test message" in result_text,
+                        "get_message returns the sent message (recipient can retrieve)",
+                        f"Message content not found: {result_text}",
+                    ) and passed
+
+                    # Step 4: B replies
+                    log("Step 4: Agent B replies")
+                    result = await sess_b.call_tool("reply", {
+                        "message_id": message_id,
+                        "response": "archive reply",
+                    })
+                    result_text = str(result)
+                    reply_match = re.search(r'"id":\s*"([^"]+)"', result_text)
+                    if not reply_match:
+                        fail(f"reply did not return ID: {result_text}")
+                        return False
+                    reply_id = reply_match.group(1)
+                    ok(f"reply returned ID: {reply_id}")
+
+                    # Step 5: get_thread from reply ID returns both messages
+                    log("Step 5: Agent A calls get_thread on reply ID")
+                    result = await sess_a.call_tool("get_thread", {
+                        "message_id": reply_id,
+                    })
+                    result_text = str(result)
+                    passed = assert_true(
+                        "archive test message" in result_text and "archive reply" in result_text,
+                        "get_thread returns both messages in the thread",
+                        f"Thread incomplete: {result_text}",
+                    ) and passed
+                    passed = assert_true(
+                        '"count": 2' in result_text or "'count': 2" in result_text,
+                        "get_thread count is 2",
+                        f"Thread count wrong: {result_text}",
+                    ) and passed
+
+                    # Step 6: Third party rejected
+                    log("Step 6: Verify third-party rejection")
+                    third_base = f"archive-c-{uuid.uuid4().hex[:8]}"
+                    headers_c = {
+                        "X-Machine-Name": third_base,
+                        "X-Project-Name": "acceptance-test",
+                        "X-Session-ID": str(uuid.uuid4()),
+                    }
+                    async with streamablehttp_client(url, headers=headers_c) as (rc, wc, _):
+                        async with ClientSession(rc, wc) as sess_c:
+                            await sess_c.initialize()
+                            result = await sess_c.call_tool("get_message", {
+                                "message_id": message_id,
+                            })
+                            result_text = str(result)
+                            passed = assert_true(
+                                "not found" in result_text.lower() or "error" in result_text.lower(),
+                                "get_message rejects third-party access",
+                                f"Third party should be rejected: {result_text}",
+                            ) and passed
+
+    return passed
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def print_summary():
@@ -738,6 +872,7 @@ async def run_all(phases=None):
         7: ("Concurrent Access During Blocking Wait", phase_6b),
         9: ("Error Cases", phase_9),
         10: ("Teardown", phase_10),
+        11: ("Message Archive (get_message / get_thread)", phase_11),
     }
 
     if phases is None:

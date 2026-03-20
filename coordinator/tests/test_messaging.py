@@ -6,15 +6,19 @@ import fakeredis
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from coordinator.messaging import MessageManager
 from coordinator.agents import AgentManager
+from coordinator.rate_limit import RateLimiter
 from coordinator.server import (
     _send_message_impl,
     _get_messages_impl,
     _reply_impl,
     _wait_for_message_impl,
     _ack_messages_impl,
+    _get_message_impl,
+    _get_thread_impl,
 )
 from fastmcp.exceptions import ToolError
 
@@ -35,6 +39,14 @@ def message_manager(redis_client):
 def agent_manager(redis_client):
     """Create AgentManager with fakeredis."""
     return AgentManager(redis_client)
+
+
+@pytest.fixture(autouse=False)
+def patch_rate_limiter(redis_client):
+    """Patch server.rate_limiter to use fakeredis so tests don't need real Redis."""
+    fake_limiter = RateLimiter(redis_client)
+    with patch("coordinator.server.rate_limiter", fake_limiter):
+        yield fake_limiter
 
 
 class TestMessageManager:
@@ -130,6 +142,10 @@ class TestMessageManager:
 
 class TestSendMessageTool:
     """Tests for the send_message tool implementation."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_rl(self, patch_rate_limiter):
+        """Patch rate_limiter so these tests don't need a real Redis."""
 
     def test_send_message_to_existing_agent(self, message_manager, agent_manager):
         """send_message should work when target agent exists."""
@@ -617,6 +633,10 @@ class TestWaitForMessage10sLoopFix:
 class TestOfflineAgentQueueing:
     """Tests confirming messages are queued for offline agents until they reconnect."""
 
+    @pytest.fixture(autouse=True)
+    def _patch_rl(self, patch_rate_limiter):
+        """Patch rate_limiter so these tests don't need a real Redis."""
+
     def _make_agent_offline(self, redis_client, agent_manager, agent_id):
         """Helper: set an agent's last_seen far enough in the past to appear offline."""
         old_time = (
@@ -685,19 +705,19 @@ class TestOfflineAgentQueueing:
         assert len(msgs) == 1
         assert msgs[0]["message"] == "while you were out"
 
-    def test_message_inbox_ttl_set_to_24_hours(
+    def test_message_inbox_ttl_set_to_7_days(
         self, message_manager, redis_client
     ):
-        """Inbox key should have a 24-hour TTL set when a message is sent."""
+        """Inbox key should have a 7-day TTL set when a message is sent."""
         message_manager.send_message("machine/sender", "machine/receiver", "hello")
 
         inbox_key = f"{message_manager.INBOX_PREFIX}machine/receiver"
         ttl = redis_client.ttl(inbox_key)
 
-        # TTL should be close to MESSAGE_TTL_SECONDS (86400s). Allow some drift.
+        # TTL should be close to MESSAGE_TTL_SECONDS (604800s = 7 days). Allow some drift.
         assert ttl > 0, "inbox key should have a TTL set"
         assert ttl <= message_manager.MESSAGE_TTL_SECONDS
-        assert ttl > message_manager.MESSAGE_TTL_SECONDS - 5  # within 5 seconds of 24h
+        assert ttl > message_manager.MESSAGE_TTL_SECONDS - 5  # within 5 seconds of 7 days
 
     def test_send_message_to_unregistered_agent_raises(
         self, message_manager, agent_manager
@@ -712,3 +732,214 @@ class TestOfflineAgentQueueing:
                 message="nobody home",
             )
         assert "deliver_offline" in str(exc_info.value)
+
+
+class TestMessageArchive:
+    """Tests for message archive (c3po:msg:{id}) written at send/reply time."""
+
+    def test_send_creates_archive_entry(self, message_manager):
+        """send_message should write an archive entry at c3po:msg:{id}."""
+        result = message_manager.send_message("machine/a", "machine/b", "hello")
+        message_id = result["id"]
+        raw = message_manager.redis.get(f"c3po:msg:{message_id}")
+        assert raw is not None
+        archived = json.loads(raw)
+        assert archived["id"] == message_id
+        assert archived["from_agent"] == "machine/a"
+        assert archived["to_agent"] == "machine/b"
+        assert archived["message"] == "hello"
+
+    def test_reply_creates_archive_entry(self, message_manager):
+        """reply() should write an archive entry for the reply."""
+        msg = message_manager.send_message("machine/a", "machine/b", "hello")
+        reply = message_manager.reply(msg["id"], "machine/b", "world")
+        reply_id = reply["id"]
+        raw = message_manager.redis.get(f"c3po:msg:{reply_id}")
+        assert raw is not None
+        archived = json.loads(raw)
+        assert archived["id"] == reply_id
+        assert archived["reply_to"] == msg["id"]
+        assert archived["from_agent"] == "machine/b"
+        assert archived["to_agent"] == "machine/a"
+
+    def test_archive_has_7d_ttl(self, message_manager):
+        """Archive entries should have 7-day TTL."""
+        result = message_manager.send_message("machine/a", "machine/b", "hello")
+        message_id = result["id"]
+        ttl = message_manager.redis.ttl(f"c3po:msg:{message_id}")
+        expected = 7 * 24 * 60 * 60  # 604800
+        assert ttl > expected - 10  # within 10 seconds of 7 days
+        assert ttl <= expected
+
+    def test_get_archived_message_found(self, message_manager):
+        """get_archived_message should return the message dict."""
+        result = message_manager.send_message("machine/a", "machine/b", "hi")
+        archived = message_manager.get_archived_message(result["id"])
+        assert archived is not None
+        assert archived["id"] == result["id"]
+        assert archived["message"] == "hi"
+
+    def test_get_archived_message_missing(self, message_manager):
+        """get_archived_message returns None for unknown IDs."""
+        result = message_manager.get_archived_message("machine/a::machine/b::00000000")
+        assert result is None
+
+    def test_get_thread_linear_chain(self, message_manager):
+        """get_thread should return messages in chronological order."""
+        # A→B
+        msg1 = message_manager.send_message("machine/a", "machine/b", "msg1")
+        # B replies to A
+        rep1 = message_manager.reply(msg1["id"], "machine/b", "rep1")
+        # A replies to B's reply
+        rep2 = message_manager.reply(rep1["id"], "machine/a", "rep2")
+
+        thread = message_manager.get_thread(rep2["id"])
+        assert len(thread) == 3
+        assert thread[0]["id"] == msg1["id"]
+        assert thread[1]["id"] == rep1["id"]
+        assert thread[2]["id"] == rep2["id"]
+
+    def test_get_thread_single_root(self, message_manager):
+        """get_thread on a root message (no reply_to) returns just that message."""
+        msg = message_manager.send_message("machine/a", "machine/b", "solo")
+        thread = message_manager.get_thread(msg["id"])
+        assert len(thread) == 1
+        assert thread[0]["id"] == msg["id"]
+
+    def test_get_thread_partial_expired(self, message_manager):
+        """get_thread stops at expired archive entries, returns partial thread."""
+        msg1 = message_manager.send_message("machine/a", "machine/b", "root")
+        rep1 = message_manager.reply(msg1["id"], "machine/b", "reply")
+
+        # Delete the root archive entry to simulate expiry
+        message_manager.redis.delete(f"c3po:msg:{msg1['id']}")
+
+        thread = message_manager.get_thread(rep1["id"])
+        # Only rep1 should be returned (root expired)
+        assert len(thread) == 1
+        assert thread[0]["id"] == rep1["id"]
+
+    def test_get_thread_max_depth(self, message_manager):
+        """get_thread caps at max_depth messages."""
+        # Build a chain of 10 messages
+        msg = message_manager.send_message("machine/a", "machine/b", "start")
+        last = msg
+        for i in range(9):
+            # Alternate who replies
+            sender = "machine/b" if i % 2 == 0 else "machine/a"
+            last = message_manager.reply(last["id"], sender, f"msg{i}")
+
+        thread = message_manager.get_thread(last["id"], max_depth=5)
+        assert len(thread) == 5
+
+    def test_get_thread_cycle_protection(self, message_manager):
+        """get_thread should not loop infinitely if a cycle exists in reply_to."""
+        # Craft a fake cycle by directly writing to Redis
+        id_a = "machine/a::machine/b::aaaaaaaa"
+        id_b = "machine/b::machine/a::bbbbbbbb"
+        msg_a = {"id": id_a, "from_agent": "machine/a", "to_agent": "machine/b",
+                 "message": "a", "reply_to": id_b, "timestamp": "2026-01-01T00:00:00+00:00"}
+        msg_b = {"id": id_b, "from_agent": "machine/b", "to_agent": "machine/a",
+                 "message": "b", "reply_to": id_a, "timestamp": "2026-01-01T00:00:01+00:00"}
+        message_manager.redis.set(f"c3po:msg:{id_a}", json.dumps(msg_a))
+        message_manager.redis.set(f"c3po:msg:{id_b}", json.dumps(msg_b))
+
+        # Should terminate without infinite loop
+        thread = message_manager.get_thread(id_a)
+        assert len(thread) <= 2
+
+
+class TestGetMessageTool:
+    """Tests for _get_message_impl authorization and lookup."""
+
+    def test_sender_can_retrieve(self, message_manager):
+        """Sender (from_agent) should be able to retrieve their own message."""
+        msg = message_manager.send_message("machine/a", "machine/b", "hello")
+        result = _get_message_impl(message_manager, "machine/a", msg["id"])
+        assert result["id"] == msg["id"]
+
+    def test_recipient_can_retrieve(self, message_manager):
+        """Recipient (to_agent) should be able to retrieve a message."""
+        msg = message_manager.send_message("machine/a", "machine/b", "hello")
+        result = _get_message_impl(message_manager, "machine/b", msg["id"])
+        assert result["id"] == msg["id"]
+
+    def test_third_party_rejected(self, message_manager):
+        """Third parties should get not-found error (not unauthorized) to avoid leaking existence."""
+        msg = message_manager.send_message("machine/a", "machine/b", "hello")
+        with pytest.raises(ToolError) as exc_info:
+            _get_message_impl(message_manager, "machine/c", msg["id"])
+        assert "not found" in str(exc_info.value).lower()
+
+    def test_not_found_raises(self, message_manager):
+        """Non-existent message_id raises ToolError."""
+        with pytest.raises(ToolError) as exc_info:
+            _get_message_impl(message_manager, "machine/a", "machine/a::machine/b::00000000")
+        assert "not found" in str(exc_info.value).lower()
+
+
+class TestGetThreadTool:
+    """Tests for _get_thread_impl authorization and response shape."""
+
+    def test_participant_can_retrieve_thread(self, message_manager):
+        """A participant in any message can retrieve the thread."""
+        msg = message_manager.send_message("machine/a", "machine/b", "hi")
+        rep = message_manager.reply(msg["id"], "machine/b", "yo")
+
+        result = _get_thread_impl(message_manager, "machine/a", rep["id"])
+        assert result["count"] == 2
+        assert result["root_message_id"] == msg["id"]
+        assert result["latest_message_id"] == rep["id"]
+        assert len(result["thread"]) == 2
+
+    def test_non_participant_rejected(self, message_manager):
+        """Non-participant should get not-found error."""
+        msg = message_manager.send_message("machine/a", "machine/b", "hi")
+        with pytest.raises(ToolError) as exc_info:
+            _get_thread_impl(message_manager, "machine/c", msg["id"])
+        assert "not found" in str(exc_info.value).lower()
+
+    def test_response_shape(self, message_manager):
+        """Response should include thread, count, root_message_id, latest_message_id."""
+        msg = message_manager.send_message("machine/a", "machine/b", "first")
+        result = _get_thread_impl(message_manager, "machine/a", msg["id"])
+        assert "thread" in result
+        assert "count" in result
+        assert "root_message_id" in result
+        assert "latest_message_id" in result
+        assert result["count"] == 1
+        assert result["root_message_id"] == msg["id"]
+        assert result["latest_message_id"] == msg["id"]
+
+
+class TestNotifyTTL:
+    """Tests for TTL behavior: notify keys use 24h, inbox keys use 7d."""
+
+    def test_send_inbox_uses_7d_ttl(self, message_manager):
+        """Inbox key TTL should be 7 days after send_message."""
+        message_manager.send_message("machine/a", "machine/b", "hello")
+        inbox_key = f"c3po:inbox:machine/b"
+        ttl = message_manager.redis.ttl(inbox_key)
+        expected = 7 * 24 * 60 * 60
+        assert ttl > expected - 10
+
+    def test_send_notify_uses_24h_ttl(self, message_manager):
+        """Notify key TTL should be 24 hours after send_message."""
+        message_manager.send_message("machine/a", "machine/b", "hello")
+        notify_key = f"c3po:notify:machine/b"
+        ttl = message_manager.redis.ttl(notify_key)
+        expected_24h = 24 * 60 * 60
+        expected_7d = 7 * 24 * 60 * 60
+        assert ttl > expected_24h - 10
+        assert ttl <= expected_7d  # Must be ≤ 7 days (not equal to 7d TTL)
+
+    def test_reply_notify_uses_24h_ttl(self, message_manager):
+        """Notify key TTL should be 24 hours after reply()."""
+        msg = message_manager.send_message("machine/a", "machine/b", "hello")
+        message_manager.reply(msg["id"], "machine/b", "world")
+        notify_key = f"c3po:notify:machine/a"
+        ttl = message_manager.redis.ttl(notify_key)
+        expected_24h = 24 * 60 * 60
+        expected_7d = 7 * 24 * 60 * 60
+        assert ttl > expected_24h - 10
+        assert ttl <= expected_7d

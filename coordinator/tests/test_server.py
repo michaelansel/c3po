@@ -352,6 +352,12 @@ class MockContext:
 class TestResolveAgentId:
     """Tests for _resolve_agent_id function."""
 
+    @pytest.fixture(autouse=True)
+    def _patch_agent_manager(self, agent_manager):
+        """Patch server.agent_manager with fakeredis-backed instance."""
+        with patch("coordinator.server.agent_manager", agent_manager):
+            yield
+
     def test_explicit_agent_id_accepted(self, agent_manager):
         """Should accept explicit agent_id parameter."""
         from coordinator.server import _resolve_agent_id

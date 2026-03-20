@@ -12,6 +12,8 @@
     {"name": "wait_for_message",   "needs_agent_id": true},
     {"name": "ack_messages",       "needs_agent_id": true},
     {"name": "upload_blob",        "needs_agent_id": true},
-    {"name": "fetch_blob",         "needs_agent_id": true}
+    {"name": "fetch_blob",         "needs_agent_id": true},
+    {"name": "get_message",        "needs_agent_id": true},
+    {"name": "get_thread",         "needs_agent_id": true}
   ]
 }

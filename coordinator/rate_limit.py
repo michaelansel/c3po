@@ -35,6 +35,8 @@ RATE_LIMITS = {
     "register_webhook": (5, 60),
     "unregister_webhook": (5, 60),
     "rest_wait": (10, 60),
+    "get_message": (60, 60),
+    "get_thread": (30, 60),
 }
 
 
