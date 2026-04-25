@@ -1,3 +1,10 @@
+# C3PO systemd service (system-level, for exe.dev VM)
+# Install:
+#   sudo cp c3po.service /etc/systemd/system/c3po.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now c3po
+# Logs:   sudo journalctl -u c3po -f
+# Restart: sudo systemctl restart c3po
+
 [Unit]
 Description=C3PO Multi-Agent Coordinator
 After=network-online.target docker.service

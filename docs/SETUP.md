@@ -60,33 +60,60 @@ After setup, restart Claude Code to connect.
 
 ## Coordinator Setup
 
-### Option 1: Docker (Recommended)
+### Option 1: Docker Compose Production (Recommended)
 
-The simplest way to run the coordinator:
+The production deployment uses Docker Compose with nginx, coordinator, mcp-auth-proxy, and Redis:
 
 ```bash
-cd coordinator
-docker-compose up -d
+# 1. Clone the repo and create secrets
+git clone <repo-url> c3po && cd c3po
+cp .env.example .env
+# Edit .env — fill in all values (see .env.example for descriptions)
+# Generate secrets: openssl rand -base64 32
+
+# 2. Start the stack
+docker compose -f docker-compose.prod.yml up -d --build
+
+# 3. Verify
+curl http://localhost:8000/api/health
 ```
 
-This starts:
-- **c3po-coordinator** on port 8420
-- **Redis** for message queuing
+This starts 4 containers:
+- **nginx** on port 8000 — routing, rate limiting, auth header injection
+- **coordinator** — FastMCP server (internal port 8420)
+- **auth-proxy** — GitHub OAuth proxy (internal port 8421)
+- **Redis** — message queue with AOF persistence
 
-To check status:
+To manage:
 ```bash
-docker-compose ps
-docker-compose logs coordinator
+docker compose -f docker-compose.prod.yml ps       # status
+docker compose -f docker-compose.prod.yml logs -f coordinator  # logs
+docker compose -f docker-compose.prod.yml down      # stop
 ```
 
-To stop:
+#### Systemd (auto-restart on boot)
+
 ```bash
-docker-compose down
+# Install the service unit
+sudo cp c3po.service /etc/systemd/system/c3po.service
+sudo systemctl daemon-reload && sudo systemctl enable --now c3po
+
+# Manage
+sudo systemctl status c3po
+sudo journalctl -u c3po -f
+sudo systemctl restart c3po
 ```
+
+#### TLS / External Access
+
+The compose stack listens on port 8000 (HTTP). For TLS, terminate upstream:
+
+- **exe.dev VM**: The exe.dev HTTPS proxy handles TLS automatically. Port 8000 is externally accessible.
+- **Own server**: Use nginx/certbot on the host, or a CDN/reverse proxy. The `nginx.conf.template` inside the stack already handles `server_name`; add TLS in a fronting proxy.
 
 ### Option 2: Local Development
 
-For development without Docker:
+For development without the full stack:
 
 ```bash
 # Start Redis
@@ -102,27 +129,22 @@ pip install -r requirements.txt
 python server.py
 ```
 
-### Option 3: Remote Server
+Or use the dev compose file (coordinator + Redis only):
 
-Deploy to a remote server (builds Docker image on the server, sets up systemd service, generates nginx config):
+```bash
+cd coordinator
+docker-compose up -d
+```
+
+### Option 3: Legacy Remote Deploy
+
+Deploy to a remote server via SSH (builds Docker image on the server, sets up systemd, generates nginx config):
 
 ```bash
 bash scripts/deploy.sh
 ```
 
-The script:
-1. Copies coordinator source to the server and builds the Docker image
-2. Creates/migrates secrets (generates `C3PO_SERVER_SECRET`, `C3PO_ADMIN_KEY`, etc.)
-3. Writes `docker-compose.yml` with coordinator, auth-proxy, and Redis
-4. Creates a systemd user service for automatic startup
-5. Generates nginx config with server_secret Bearer prefix validation
-6. Prints sudo commands for installing the nginx config
-
-After running, follow the printed instructions to install the nginx config on the server.
-
-Configure by editing `scripts/deploy.sh`:
-- `REMOTE` - SSH target (default: `mansel@pubpop3.datadrop.biz`)
-- `REMOTE_DIR` - Remote working directory (default: `/home/mansel/c3po`)
+This targets `ubuntu@a10.lambda.qerk.be` by default. Configure by editing `scripts/deploy.sh`.
 
 ## Headless Mode Configuration
 
@@ -279,16 +301,13 @@ export C3PO_COORDINATOR_URL=http://nas.local:8420
 
 **Production (systemd):**
 ```bash
-# On the server (or via: bash scripts/deploy.sh)
-systemctl --user restart c3po
-journalctl --user -u c3po -f   # watch logs
+sudo systemctl restart c3po
+sudo journalctl -u c3po -f   # watch logs
 ```
 
-**Local development:**
+**Docker Compose (manual):**
 ```bash
-cd coordinator
-docker-compose pull
-docker-compose up -d
+docker compose -f docker-compose.prod.yml up -d --build
 ```
 
 ### Plugin
@@ -310,13 +329,12 @@ rm -rf ~/.claude/plugins/c3po
 
 **Production (systemd):**
 ```bash
-systemctl --user stop c3po
+sudo systemctl stop c3po
 ```
 
-**Local development:**
+**Docker Compose (manual):**
 ```bash
-cd coordinator
-docker-compose down -v  # -v removes data volumes
+docker compose -f docker-compose.prod.yml down -v  # -v removes data volumes
 ```
 
 ### Clean Environment

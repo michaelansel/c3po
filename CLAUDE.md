@@ -52,9 +52,9 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 # Enroll via: python3 setup.py --enroll https://mcp.qerk.be '<admin_token>'
 
 # Service management on the server:
-#   systemctl --user status c3po     # Check service status
-#   journalctl --user -u c3po -f     # Tail logs
-#   systemctl --user restart c3po    # Restart
+#   sudo systemctl status c3po       # Check service status
+#   sudo journalctl -u c3po -f       # Tail logs
+#   sudo systemctl restart c3po      # Restart
 ```
 
 ## Architecture
