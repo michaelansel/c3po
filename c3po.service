@@ -1,0 +1,25 @@
+[Unit]
+Description=C3PO Multi-Agent Coordinator
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/exedev/c3po
+EnvironmentFile=/home/exedev/c3po/.env
+ExecStartPre=/usr/bin/docker compose -f docker-compose.prod.yml pull redis auth-proxy nginx
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml up --build --remove-orphans
+ExecStop=/usr/bin/docker compose -f docker-compose.prod.yml down
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=180
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=c3po
+User=exedev
+Group=exedev
+
+[Install]
+WantedBy=multi-user.target

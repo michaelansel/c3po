@@ -26,6 +26,9 @@ Thumbs.db
 .ralph/
 .agent/
 
+# Secrets
+.env
+
 # Temporary
 *.tmp
 *.log
