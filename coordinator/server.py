@@ -1569,7 +1569,7 @@ def _reply_impl(
     raises `ValueError`, which propagates as a tool error.
 
     Routing: the reply is delivered to the original sender's inbox
-    (`c3po:messages:{original_sender}`), not to `from_agent`. A notification
+    (`c3po:inbox:{original_sender}`), not to `from_agent`. A notification
     signal is also pushed to `c3po:notify:{original_sender}` to wake any
     blocked `wait_for_message` call on the original sender.
 

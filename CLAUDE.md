@@ -124,7 +124,7 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 
 **Version bumping**: When committing a version bump, update `.claude-plugin/plugin.json` in this repo. The marketplace (`michaelansel/c3po`) does not need separate updates.
 
-**Message flow**: Messages go to single queue `c3po:messages:{agent}`. Notifications (separate from messages) go to `c3po:notify:{agent}` to wake blocked `wait_for_message` calls without consuming messages. This separation prevents message loss. Messages have optional `reply_to` field for replies, no `type` field. Each message gets a `message_id` used for replies. Replies also get a unique `reply_id` for individual acknowledgment.
+**Message flow**: Messages go to single queue `c3po:inbox:{agent}`. Notifications (separate from messages) go to `c3po:notify:{agent}` to wake blocked `wait_for_message` calls without consuming messages. This separation prevents message loss. Messages have optional `reply_to` field for replies, no `type` field. Each message gets a `message_id` used for replies. Replies also get a unique `reply_id` for individual acknowledgment.
 
 **Peek+Ack semantics**: `get_messages` and `wait_for_message` are non-destructive (peek). Messages stay in Redis lists until explicitly acknowledged via `ack_messages`. Acked IDs are stored in `c3po:acked:{agent}` (Redis SET, 24h TTL). When the acked set exceeds 20 entries, compaction removes acked entries from the underlying lists and clears the set. This prevents message loss when MCP tool calls are interrupted client-side.
 
@@ -137,7 +137,7 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 ### Redis Key Structure
 
 - `c3po:agents` — Hash of all registered agents
-- `c3po:messages:{agent_id}` — Single message queue (FIFO list) containing both messages and replies
+- `c3po:inbox:{agent_id}` — Single message queue (FIFO list) containing both messages and replies
 - `c3po:notify:{agent_id}` — Notification signals for wait_for_message
 - `c3po:rate:{operation}:{identity}` — Rate limit tracking (sorted set)
 - `c3po:audit` — List of recent audit entries (JSON, newest first)
