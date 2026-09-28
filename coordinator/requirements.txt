@@ -1,6 +1,11 @@
 fastmcp>=2.0.0,<3.0.0
-starlette>=1.0.1
-redis>=5.0.0
+# starlette: >=1.0.1 for the request.scope["path"] auth fix (CVE-2026-48710);
+# <2.0.0 to avoid an unvetted major bump (only 1.x is validated).
+starlette>=1.0.1,<2.0.0
+# redis: <8.0.0 — redis-py 8.x imposes a ~5s blocking-read socket timeout that
+# aborts BLPOP long-polls (wait_for_message) with "Timeout reading from socket".
+# 5.x–7.x return cleanly at the command timeout. Pin the major to keep long-polls working.
+redis>=5.0.0,<8.0.0
 uvicorn>=0.27.0
 bcrypt>=4.0.0
 
