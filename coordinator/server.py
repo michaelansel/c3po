@@ -265,6 +265,13 @@ class AgentIdentityMiddleware(Middleware):
         # Format: machine/project (e.g., "macbook/myproject")
         if project_name and project_name.strip():
             agent_id = f"{machine_name}/{project_name.strip()}"
+            # Validate format before registering — a header-derived id containing
+            # '::' would become an un-ackable message id that wedges an inbox.
+            if not AGENT_ID_PATTERN.match(agent_id):
+                raise ToolError(
+                    f"Invalid agent ID '{agent_id}': must be 1-64 chars, "
+                    "alphanumeric with _ . - (no leading special chars)"
+                )
             # Enforce agent_pattern from API key before registration
             agent_pattern = context.fastmcp_context.get_state("auth_agent_pattern") or "*"
             if agent_pattern != "*" and not AuthManager.validate_agent_pattern(agent_id, agent_pattern):
@@ -413,9 +420,12 @@ async def api_health(request):
             "status": "ok",
             "agents_online": online_count,
         })
-    except Exception as e:
+    except Exception:
+        # /api/health is unauthenticated; never leak internal error detail
+        # (e.g. the Redis connection string) to anonymous callers.
+        logger.exception("api_health failed")
         return JSONResponse(
-            {"status": "error", "error": str(e)},
+            {"status": "error", "error": "internal error", "code": "health_check_failed"},
             status_code=500,
         )
 
@@ -898,7 +908,7 @@ async def api_blob_download(request):
         content=content,
         media_type=metadata.get("mime_type", "application/octet-stream"),
     )
-    filename = metadata.get("filename", "download")
+    filename = _safe_download_filename(metadata.get("filename", "download"))
     resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
     for k, v in SECURITY_HEADERS.items():
         if k != "Cache-Control":
@@ -1225,6 +1235,10 @@ def _register_agent_impl(
 
 # Validation patterns
 AGENT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,63}$")
+# Anonymous chat IDs (Claude Desktop/.ai) carry a documented "any suffix"
+# (SETUP.md), which may exceed the 64-char cap. Exempt them from the length
+# limit but keep the same safe character set (no '::', no control chars).
+ANON_CHAT_ID_PATTERN = re.compile(r"^anonymous/chat-[a-zA-Z0-9_.-]+$")
 MAX_MESSAGE_LENGTH = 50000  # 50KB max message size
 MAX_WAIT_TIMEOUT = 3600  # 1 hour max
 
@@ -1249,6 +1263,23 @@ def _validate_agent_id(agent_id: str, field_name: str = "agent_id") -> None:
             "must be 1-64 characters, alphanumeric with _ . - (no leading special chars)"
         )
         raise ToolError(f"{err.message} {err.suggestion}")
+
+
+def _safe_download_filename(filename: str) -> str:
+    """Reduce an uploader-supplied filename to a value safe for Content-Disposition.
+
+    The filename is attacker-controlled at upload time and is reflected to download
+    clients (e.g. c3po-download does `mv tmp ./$FILENAME`). Strip path components,
+    quotes, backslashes, and control chars so a value like '../../.bashrc' cannot
+    drive a write outside the download directory or break out of the quoted string.
+    """
+    name = os.path.basename(filename or "")
+    # Remove quotes, backslashes, and any control chars / stray separators.
+    name = name.replace('"', "").replace("\\", "")
+    name = re.sub(r"[\x00-\x1f\x7f/]", "", name)
+    if name in ("", ".", ".."):
+        return "download"
+    return name
 
 
 def _validate_message(message: str) -> None:
@@ -1692,6 +1723,20 @@ def _resolve_agent_id(ctx: Context, explicit_agent_id: Optional[str] = None) -> 
             err = anonymous_onboarding_required()
             logger.warning("anonymous_onboarding_required session_id=%s", ctx.get_state("session_id"))
             raise ToolError(f"{err.message}\n\n{err.suggestion}")
+
+        # Validate format BEFORE any side effect (registration/heartbeat).
+        # An unvalidated id containing '::' becomes an un-ackable message id
+        # that wedges a recipient's inbox; control chars can reach admin
+        # terminals. Anonymous chat ids are validated without the length cap.
+        if resolved.startswith("anonymous/chat-"):
+            if not ANON_CHAT_ID_PATTERN.match(resolved):
+                err = invalid_request(
+                    "agent_id",
+                    "anonymous id must be 'anonymous/chat-<suffix>' using letters, digits, _ . -"
+                )
+                raise ToolError(f"{err.message} {err.suggestion}")
+        else:
+            _validate_agent_id(resolved)
 
         # Register anonymous/chat-* agents on first use
         # (they can't use the SessionStart hook because they lack headers)

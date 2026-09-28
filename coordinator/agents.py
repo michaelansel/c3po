@@ -8,6 +8,8 @@ from typing import Optional
 
 import redis
 
+from coordinator.messaging import MessageManager
+
 logger = logging.getLogger("c3po.agents")
 
 
@@ -287,8 +289,9 @@ class AgentManager:
         result = self.redis.hdel(self.AGENTS_KEY, agent_id)
         if result > 0 and cleanup_keys:
             self.redis.delete(
-                f"c3po:messages:{agent_id}", f"c3po:notify:{agent_id}",
-                f"c3po:acked:{agent_id}",
+                f"{MessageManager.INBOX_PREFIX}{agent_id}",
+                f"{MessageManager.NOTIFY_PREFIX}{agent_id}",
+                f"{MessageManager.ACKED_PREFIX}{agent_id}",
             )
         logger.info("agent_removed agent=%s cleanup_keys=%s", agent_id, cleanup_keys)
         return result > 0
@@ -391,9 +394,9 @@ class AgentManager:
             keys_to_delete = []
             for agent_id in removed:
                 keys_to_delete.extend([
-                    f"c3po:messages:{agent_id}",
-                    f"c3po:notify:{agent_id}",
-                    f"c3po:acked:{agent_id}",
+                    f"{MessageManager.INBOX_PREFIX}{agent_id}",
+                    f"{MessageManager.NOTIFY_PREFIX}{agent_id}",
+                    f"{MessageManager.ACKED_PREFIX}{agent_id}",
                 ])
             if keys_to_delete:
                 self.redis.delete(*keys_to_delete)
@@ -432,9 +435,9 @@ class AgentManager:
             keys_to_delete = []
             for agent_id in existing:
                 keys_to_delete.extend([
-                    f"c3po:messages:{agent_id}",
-                    f"c3po:notify:{agent_id}",
-                    f"c3po:acked:{agent_id}",
+                    f"{MessageManager.INBOX_PREFIX}{agent_id}",
+                    f"{MessageManager.NOTIFY_PREFIX}{agent_id}",
+                    f"{MessageManager.ACKED_PREFIX}{agent_id}",
                 ])
             if keys_to_delete:
                 self.redis.delete(*keys_to_delete)

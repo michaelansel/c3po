@@ -564,3 +564,45 @@ class TestSecretStripping:
         agent_manager.set_webhook("agent-a", "https://example.com", "topsecretvalue!!")
         result = _set_description_impl(agent_manager, "agent-a", "desc")
         assert "webhook_secret" not in result
+
+
+class TestResolveAgentIdValidation:
+    """_resolve_agent_id must reject malformed identities before any side effect.
+
+    An id containing '::' would become an un-ackable message id that wedges the
+    recipient's inbox; control chars can reach admin terminals. Anonymous chat
+    ids are exempt from the length cap (SETUP.md documents "any suffix") but must
+    still use the safe character set.
+    """
+
+    def _ctx(self, agent_id_state=None, session_id="sess-1"):
+        state = {"session_id": session_id, "agent_id": agent_id_state}
+        ctx = Mock()
+        ctx.get_state.side_effect = lambda k: state.get(k)
+        return ctx
+
+    def test_rejects_delimiter_injection(self):
+        from coordinator.server import _resolve_agent_id
+        with pytest.raises(ToolError):
+            _resolve_agent_id(self._ctx(), "evil::x")
+
+    def test_rejects_control_chars(self):
+        from coordinator.server import _resolve_agent_id
+        with pytest.raises(ToolError):
+            _resolve_agent_id(self._ctx(), "evil\x1b[31m/x")
+
+    def test_rejects_anonymous_with_bad_chars(self):
+        from coordinator.server import _resolve_agent_id
+        with pytest.raises(ToolError):
+            _resolve_agent_id(self._ctx(), "anonymous/chat-evil::x")
+
+    def test_accepts_normal_id(self, redis_client):
+        from coordinator import server as srv
+        with patch.object(srv, "agent_manager", AgentManager(redis_client)):
+            assert srv._resolve_agent_id(self._ctx(), "macbook/proj") == "macbook/proj"
+
+    def test_accepts_long_anonymous_suffix(self, redis_client):
+        from coordinator import server as srv
+        long_id = "anonymous/chat-" + "a" * 100  # exceeds the 64-char cap by design
+        with patch.object(srv, "agent_manager", AgentManager(redis_client)):
+            assert srv._resolve_agent_id(self._ctx(), long_id) == long_id

@@ -89,6 +89,25 @@ class TestHealthEndpoint:
         data = response.json()
         assert data["agents_online"] == 2
 
+    @pytest.mark.asyncio
+    async def test_health_error_does_not_leak_internal_detail(self, client, agent_manager):
+        """A backend failure on the unauthenticated health endpoint must not leak
+        internal error text (e.g. the Redis connection string) to anonymous callers."""
+        def boom():
+            raise RuntimeError("Error 111 connecting to redis:6379. Connection refused.")
+
+        agent_manager.count_online_agents = boom
+
+        response = await client.get("/api/health")
+
+        assert response.status_code == 500
+        data = response.json()
+        assert data["status"] == "error"
+        assert data["error"] == "internal error"
+        # The internal detail must not appear anywhere in the response body.
+        assert "redis" not in response.text.lower()
+        assert "6379" not in response.text
+
 
 class TestPendingEndpoint:
     """Tests for /agent/api/pending endpoint."""
@@ -678,6 +697,28 @@ class TestBlobDownloadEndpoint:
         assert response.content == b"test content"
         assert "text/plain" in response.headers["content-type"]
         assert "test.txt" in response.headers["content-disposition"]
+
+    @pytest.mark.asyncio
+    async def test_download_sanitizes_traversal_filename(self, client):
+        """A path-traversal filename supplied at upload must be reduced to a safe
+        basename in Content-Disposition (no path components, no quote breakout)."""
+        upload_resp = await client.post(
+            "/agent/api/blob",
+            content=b"payload",
+            headers={
+                "Content-Type": "application/octet-stream",
+                "X-Filename": '../../.bashrc',
+                "X-Machine-Name": "test/proj",
+            },
+        )
+        blob_id = upload_resp.json()["blob_id"]
+
+        response = await client.get(f"/agent/api/blob/{blob_id}")
+
+        assert response.status_code == 200
+        cd = response.headers["content-disposition"]
+        assert "../" not in cd
+        assert cd == 'attachment; filename=".bashrc"'
 
     @pytest.mark.asyncio
     async def test_download_not_found(self, client):
