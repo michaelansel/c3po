@@ -163,7 +163,7 @@ def _authenticate_rest_request(request) -> dict:
     Returns auth_result dict from AuthManager.validate_request().
     """
     auth_header = request.headers.get("authorization", "")
-    path_prefix = _determine_path_prefix(request.url.path)
+    path_prefix = _determine_path_prefix(request.scope["path"])
     result = auth_manager.validate_request(auth_header, path_prefix)
     if result.get("valid"):
         audit_logger.auth_success(result.get("key_id", result.get("source", "")), result.get("agent_pattern", ""), source="rest")

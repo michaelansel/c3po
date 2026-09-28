@@ -375,3 +375,48 @@ class TestValidatePatternCheck:
         )
         assert response.status_code == 403
         assert "does not authorize" in response.json()["error"]
+
+
+class TestBadHostBypass:
+    """CVE-2026-48710: forging Host to make request.url.path return /api/health must not bypass auth.
+
+    The exploit sends a real request to a protected endpoint but includes a
+    Host header containing a path component (e.g. `Host: x/api/health?z=`).
+    On Starlette < 1.0.1, request.url.path would return `/api/health`, tricking
+    path-prefix-based auth into treating the request as public.  The fix uses
+    request.scope["path"] (derived from the request target line, not Host).
+    """
+
+    @pytest.mark.asyncio
+    async def test_forged_host_cannot_bypass_admin_auth(self, client):
+        """GET /admin/api/agents with a forged Host must still return 401."""
+        response = await client.get(
+            "/admin/api/agents",
+            headers={"Host": "x/api/health?z="},
+        )
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_forged_host_cannot_bypass_agent_auth(self, client):
+        """GET /agent/api/pending with a forged Host must still return 401."""
+        response = await client.get(
+            "/agent/api/pending",
+            headers={"Host": "x/api/health?z=", "X-Machine-Name": "machine/proj"},
+        )
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_normal_host_still_rejects_unauthenticated(self, client):
+        """Sanity: normal Host with no auth still returns 401."""
+        response = await client.get("/admin/api/agents")
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_normal_host_with_valid_admin_auth_succeeds(self, client):
+        """Sanity: valid admin auth still works after the fix."""
+        response = await client.get(
+            "/admin/api/agents",
+            headers={"Authorization": _admin_auth()},
+        )
+        assert response.status_code == 200
+        assert "agents" in response.json()
