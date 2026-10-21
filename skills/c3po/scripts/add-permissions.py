@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Add c3po MCP tool permissions to the current project's .claude/settings.local.json.
+"""Add c3po permissions to the current project's .claude/settings.local.json.
 
-Reads the canonical tool list from hooks/hooks.json (PreToolUse matcher)
-and ensures all tools are in the project's permission allow list.
+Reads the canonical tool list from .claude-plugin/tools.json and ensures all
+MCP tools are in the project's permission allow list, plus a Bash rule for
+the /c3po auto background watcher (scripts/c3po-watch) so re-arming it
+doesn't prompt.
 
 Usage:
     python3 add-permissions.py [project_dir]
@@ -29,6 +31,11 @@ def get_tools_from_hooks() -> list[str]:
     return [f"mcp__c3po__{t['name']}" for t in tools]
 
 
+def get_watcher_permission() -> str:
+    """Bash permission rule for the background watcher at its installed path."""
+    return f"Bash(python3 {os.path.join(get_plugin_root(), 'scripts', 'c3po-watch')}:*)"
+
+
 def add_permissions(project_dir: str) -> None:
     """Add c3po MCP tool permissions to the project's settings.local.json."""
     settings_dir = os.path.join(project_dir, ".claude")
@@ -44,8 +51,8 @@ def add_permissions(project_dir: str) -> None:
     permissions = settings.setdefault("permissions", {})
     allow = permissions.setdefault("allow", [])
 
-    # Get canonical tool list
-    tools = get_tools_from_hooks()
+    # Get canonical tool list plus the watcher rule
+    tools = get_tools_from_hooks() + [get_watcher_permission()]
 
     # Add any missing tools
     added = []
@@ -55,7 +62,7 @@ def add_permissions(project_dir: str) -> None:
             added.append(tool)
 
     if not added:
-        print(f"[c3po] All {len(tools)} MCP tools already in {settings_path}")
+        print(f"[c3po] All {len(tools)} permissions already in {settings_path}")
         return
 
     # Write back
@@ -64,7 +71,7 @@ def add_permissions(project_dir: str) -> None:
         json.dump(settings, f, indent=2)
         f.write("\n")
 
-    print(f"[c3po] Added {len(added)} MCP tool permission(s) to {settings_path}")
+    print(f"[c3po] Added {len(added)} permission(s) to {settings_path}")
     for tool in added:
         print(f"  + {tool}")
 

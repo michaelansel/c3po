@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import re
+import subprocess
 import sys
 
 import pytest
@@ -18,10 +19,13 @@ from c3po_common import (
     get_machine_name,
     get_coordinator_url,
     get_session_id,
+    get_watcher_pid_file,
     read_agent_id,
+    read_watcher_pid,
     sanitize_name,
     save_agent_id,
     save_credentials,
+    stop_watcher,
     delete_agent_id_file,
 )
 
@@ -75,6 +79,47 @@ class TestDeleteAgentIdFile:
         monkeypatch.setenv("TMPDIR", str(tmp_path))
         # Should not raise
         delete_agent_id_file("never-existed")
+
+
+class TestWatcherPidFile:
+    def test_path_sanitizes_agent_id(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        path = get_watcher_pid_file("machine/proj-2")
+        assert path == os.path.join(str(tmp_path), "c3po-watch-machine_proj-2.pid")
+
+    def test_read_missing_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        assert read_watcher_pid("machine/project") is None
+
+    def test_read_live_pid(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        with open(get_watcher_pid_file("machine/project"), "w") as f:
+            f.write(str(os.getpid()))
+        assert read_watcher_pid("machine/project") == os.getpid()
+
+    def test_stale_pid_is_removed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        path = get_watcher_pid_file("machine/project")
+        with open(path, "w") as f:
+            f.write(str(proc.pid))
+        assert read_watcher_pid("machine/project") is None
+        assert not os.path.exists(path)
+
+    def test_stop_watcher_kills_process(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        path = get_watcher_pid_file("machine/project")
+        with open(path, "w") as f:
+            f.write(str(proc.pid))
+        assert stop_watcher("machine/project") == proc.pid
+        assert proc.wait(timeout=5) != 0
+        assert not os.path.exists(path)
+
+    def test_stop_watcher_none_running(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        assert stop_watcher("machine/project") is None
 
 
 class TestGetCoordinatorUrl:

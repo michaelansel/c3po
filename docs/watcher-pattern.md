@@ -249,6 +249,32 @@ Watcher endpoints intentionally do **not** touch the heartbeat (`last_seen`).
 The agent appears offline while the watcher runs, which is correct — the watcher
 is not the agent. Only the agent's own MCP tool calls refresh the heartbeat.
 
+## In-session background watcher (`/c3po auto`)
+
+`/c3po auto` uses a variant of this pattern where the Claude Code session stays
+alive. Instead of an external process relaunching Claude, the session itself
+starts `scripts/c3po-watch` as a background Bash task (`run_in_background`).
+The script long-polls `GET /agent/api/wait` and exits as soon as a message is
+pending; Claude Code wakes the session when the background task exits. No
+tokens are spent while idle, and the user can keep working in the session.
+
+The cycle is one-shot: wake → `get_messages` → handle → `ack_messages` →
+re-arm a new watcher. Because `/api/wait` returns any unacked message, acking
+before re-arming is what prevents the new watcher from firing again
+immediately.
+
+- **Status**: `"online"` while the user is active (the Stop hook refreshes the
+  heartbeat), `"watching"` while idle with the watcher armed.
+- **One watcher per agent**: a pidfile (`$TMPDIR/c3po-watch-<agent>.pid`)
+  makes a second instance exit 1. `c3po-watch --stop --agent-id <id>` kills
+  the running one, and the SessionEnd hook does the same on exit.
+- **Orphan protection**: the watcher polls with a 600s server timeout and exits
+  if its parent process goes away.
+- **Fallback**: hosts without background tasks, or a watcher that fails locally
+  (exit 3), fall back to the `wait_for_message` loop.
+
+See the `scripts/c3po-watch` docstring for exit codes.
+
 ## Common Pitfalls
 
 **Forgetting `C3PO_KEEP_REGISTERED=1`**: Without it, the SessionEnd hook calls

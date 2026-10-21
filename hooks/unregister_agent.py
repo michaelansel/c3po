@@ -27,7 +27,7 @@ import sys
 import urllib.request
 import urllib.error
 
-from c3po_common import auth_headers, get_coordinator_url, get_session_id, parse_hook_input, read_agent_id, delete_agent_id_file, urlopen_with_ssl
+from c3po_common import auth_headers, get_coordinator_url, get_session_id, parse_hook_input, read_agent_id, delete_agent_id_file, stop_watcher, urlopen_with_ssl
 
 
 # Configuration
@@ -49,6 +49,12 @@ def main() -> None:
     if not assigned_id:
         print("[c3po] Warning: no agent ID file found, skipping unregister", file=sys.stderr)
     else:
+        # Stop the /c3po auto background watcher so it doesn't outlive the
+        # session and keep the agent looking "watching"
+        try:
+            stop_watcher(assigned_id)
+        except Exception:
+            pass
         try:
             unreg_headers = {"X-Machine-Name": assigned_id}
             unreg_headers.update(auth_headers())

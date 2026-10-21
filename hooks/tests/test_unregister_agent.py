@@ -157,3 +157,31 @@ class TestUnregisterAgentHook:
         """Hook should always exit 0 to not block session exit."""
         exit_code, stdout, stderr = run_hook(mock_coordinator)
         assert exit_code == 0
+
+    def test_kills_background_watcher(self, mock_coordinator):
+        """SessionEnd should stop the /c3po auto watcher for this agent."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_id = "watcher-kill-session"
+            with open(os.path.join(tmpdir, f"c3po-agent-id-{session_id}"), "w") as f:
+                f.write("machine/project")
+            watcher = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            pid_file = os.path.join(tmpdir, "c3po-watch-machine_project.pid")
+            with open(pid_file, "w") as f:
+                f.write(str(watcher.pid))
+
+            full_env = os.environ.copy()
+            full_env.update({"C3PO_COORDINATOR_URL": mock_coordinator, "TMPDIR": tmpdir})
+            full_env.pop("C3PO_SERVER_SECRET", None)
+            full_env.pop("XDG_RUNTIME_DIR", None)
+
+            subprocess.run(
+                [sys.executable, HOOK_SCRIPT],
+                input=json.dumps({"session_id": session_id}),
+                capture_output=True,
+                text=True,
+                env=full_env,
+                timeout=10,
+            )
+
+            assert watcher.wait(timeout=5) != 0
+            assert not os.path.exists(pid_file)

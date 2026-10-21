@@ -13,7 +13,8 @@ Multi-agent coordination for Claude Code instances.
 - `/c3po status` - Check connection and list online agents
 - `/c3po agents` - List all agents with their status
 - `/c3po send <agent> <message>` - Send a quick message to another agent
-- `/c3po auto` - Listen for incoming messages in a loop (low token cost)
+- `/c3po auto` - Listen for incoming messages (background watcher when available, otherwise a loop)
+- `/c3po auto stop` - Stop the background watcher
 
 ## Implementation
 
@@ -94,33 +95,71 @@ Reply from meshtastic: "Nodes online: node-1234, node-5678"
 
 ### `/c3po auto`
 
-Enter auto-listen mode: a tight loop that waits for incoming messages with minimal token usage.
+Enter auto-listen mode: handle incoming messages from other agents with minimal token usage. There are two modes:
 
-1. Pre-approve c3po MCP tools: Run the `add-permissions.py` script from the skill directory to ensure all c3po MCP tools are pre-approved in this project's `.claude/settings.local.json`. This is idempotent and avoids permission prompts.
+- **Background mode** (preferred): a background watcher process long-polls the coordinator and wakes this session only when a message is pending. Zero tokens are spent while idle, and the user can keep using the session interactively.
+- **Loop mode** (fallback): you loop on `wait_for_message` yourself. Each timeout costs a turn and the session is tied up.
 
-   Execute:
+`<plugin_root>` below is the plugin root directory (two directories up from this SKILL.md). `<agent_id>` is your agent ID from the SessionStart line `[c3po] Your agent ID: ...`.
+
+#### Start-up (both modes)
+
+1. Pre-approve permissions: run `python3 scripts/add-permissions.py` from the skill directory. It is idempotent and adds the c3po MCP tools plus the background-watcher Bash command to this project's `.claude/settings.local.json`. If it fails, log a warning and continue (the user will be prompted for permissions).
+2. Call `set_description` with a brief description of what this agent/project does (see behavioral defaults).
+3. Pick the mode. Use **background mode** only if ALL of these hold; otherwise use **loop mode**:
+   - Your Bash tool supports `run_in_background`
+   - `<plugin_root>/scripts/c3po-watch` exists
+   - You know your `<agent_id>`
+4. Print `Auto-listen mode active (background watcher)` or `Auto-listen mode active (loop mode)`.
+5. Call `get_messages` and handle anything already queued (see "Handling messages").
+
+#### Handling messages (both modes)
+
+For each message returned by `get_messages` / `wait_for_message`:
+- With a `reply_to` field: display the reply content to the user.
+- Without `reply_to`: read the message, use any tools needed to research an answer, then call `reply` with your response.
+
+Then call `ack_messages` with the IDs of **every message you looked at** (`id` for messages, `reply_id` for replies) — including ones you are deferring (note those in the conversation instead). This step is mandatory: unacked messages make the next wait return immediately.
+
+#### Background mode
+
+1. Start the watcher with the Bash tool and `run_in_background: true`:
    ```bash
-   python3 scripts/add-permissions.py
+   python3 <plugin_root>/scripts/c3po-watch --agent-id <agent_id>
    ```
+2. Print `Listening in background — you can keep using this session. (/c3po auto stop to end)` and end your turn. Do not poll or wait for the watcher.
+3. When the watcher task completes, act on its exit code:
 
-   If the script fails or is not found, log a warning and continue (user will be prompted for permissions interactively).
-2. Call `set_description` with a brief description of what this agent/project does (infer from the project context — e.g., repo name, README, or working directory)
-3. Print: `Auto-listen mode active. Waiting for messages... (Ctrl+C to exit)`
-4. Call `get_messages` to check for already-queued messages. If messages are returned, skip to step 6.
-5. Call `wait_for_message` with `timeout=3600`. If timeout (no messages): print ONLY `Still listening...` and go back to step 4.
-6. Process each message fully:
-   - For messages with `reply_to` field: display the reply content to the user
-   - For messages without `reply_to` field: read the message, use any tools needed to research an answer, then call `reply` with your response
-   - After processing all messages, go back to step 4
+   | Exit | Meaning | Action |
+   |---|---|---|
+   | 0 | Messages pending (`C3PO_MESSAGES` summary) | Call `get_messages` (source of truth — the summary is only a hint), handle and ack as above, re-arm the watcher (step 1), end the turn with a one-line summary. If `get_messages` is empty (already handled during interactive work), just re-arm silently. |
+   | 1 | `C3PO_WATCH_RUNNING`: a watcher is already running | Nothing to do; you are still listening. |
+   | 2 | `C3PO_WATCH_ERROR`: coordinator rejected the request | Tell the user the error and stop listening (do not re-arm). |
+   | 3 | `C3PO_WATCH_SETUP`: local setup problem | Print `Background watcher unavailable (<reason>); falling back to loop mode` and switch to loop mode. |
+   | other | Crash or killed | If you ran `/c3po auto stop`, ignore it. Otherwise fall back to loop mode as for exit 3. |
 
-**Critical rules for auto-listen mode:**
-- ALWAYS loop back to step 4 (get_messages check). Never exit the loop unless the user interrupts with Ctrl+C.
+4. Interactive overlap: the user may keep working in this session while the watcher runs.
+   - If the watcher completes while you are in the middle of the user's request, finish the user's request first, then handle the messages.
+   - If the c3po hooks surface pending messages during interactive work, handle and ack them the same way. The watcher will have exited for them too; the resulting wake finds an empty `get_messages` and just re-arms.
+5. `/c3po auto stop`: run `python3 <plugin_root>/scripts/c3po-watch --stop --agent-id <agent_id>` and confirm to the user that auto-listen has ended.
+
+#### Loop mode
+
+1. Call `get_messages`. If messages are returned, handle and ack them (see "Handling messages"), then repeat this step.
+2. Call `wait_for_message` with `timeout=3600`.
+   - Messages returned: handle and ack them, then go back to step 1.
+   - `status: "timeout"`: print ONLY `Still listening...` and go back to step 1.
+   - `status: "retry"` or `"error"`: wait `retry_after` seconds (Bash `sleep`), then go back to step 1.
+
+**Critical rules for loop mode:**
+- ALWAYS loop back to step 1. Never exit the loop unless the user interrupts with Ctrl+C.
 - On timeout, print ONLY "Still listening..." — no extra commentary, no suggestions, no questions.
 - Do NOT ask the user for input during the loop. Process everything autonomously.
-- When processing messages, use your full tool access to research thorough answers before responding.
 - Always use `timeout=3600` (1 hour — maximum token savings; the user will Ctrl+C if needed).
 
-**Behavioral defaults for auto-listen mode:**
+In both modes, use your full tool access to research thorough answers before responding.
+
+**Behavioral defaults for auto-listen mode (both modes):**
 - **Self-describe from context**: On startup, read AGENTS.md, CLAUDE.md, README, or inspect the repo structure to infer what this agent does. Use that to set your C3PO description via `set_description`. No need for the caller to pass a description.
 - **Git safety**: Before modifying files in the working directory, create a git commit or branch as a checkpoint so changes can be reverted. Use `git stash` or `git checkout` to undo if something goes wrong.
 - **Clarification over guessing**: If a request is ambiguous or you're unsure about the intent, reply asking for clarification rather than guessing and potentially doing the wrong thing.

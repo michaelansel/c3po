@@ -12,6 +12,7 @@ import json
 import os
 import platform
 import re
+import signal
 import ssl
 import sys
 import urllib.request
@@ -230,6 +231,56 @@ def delete_agent_id_file(session_id: str) -> None:
         os.unlink(get_agent_id_file(session_id))
     except OSError:
         pass
+
+
+def get_watcher_pid_file(agent_id: str) -> str:
+    """Get the path to the background watcher pidfile for an agent.
+
+    Used by scripts/c3po-watch (one watcher per agent) and the SessionEnd
+    hook (kill the watcher when the session ends).
+    """
+    safe_id = sanitize_name(agent_id).replace("/", "_")
+    return os.path.join(_get_runtime_dir(), f"c3po-watch-{safe_id}.pid")
+
+
+def read_watcher_pid(agent_id: str) -> int | None:
+    """Return the PID of a live watcher for agent_id, or None.
+
+    A pidfile pointing at a dead process is treated as stale and removed.
+    """
+    path = get_watcher_pid_file(agent_id)
+    try:
+        with open(path) as f:
+            pid = int(f.read().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return None
+    except PermissionError:
+        pass  # Exists but owned by someone else; still counts as live
+    return pid
+
+
+def stop_watcher(agent_id: str) -> int | None:
+    """Send SIGTERM to the agent's live watcher, if any. Returns its PID."""
+    pid = read_watcher_pid(agent_id)
+    if pid is None:
+        return None
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+    try:
+        os.unlink(get_watcher_pid_file(agent_id))
+    except OSError:
+        pass
+    return pid
 
 
 def parse_hook_input() -> dict:
