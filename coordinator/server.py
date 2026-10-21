@@ -220,7 +220,7 @@ class AgentIdentityMiddleware(Middleware):
         auth validator independently verifies the token. Forging the header
         without a valid API key will still fail authentication.
 
-        See also: nginx config in scripts/deploy.sh (proxy_set_header
+        See also: nginx config in nginx.conf.template (proxy_set_header
         X-C3PO-Auth-Path) and the "Auth routing" section in CLAUDE.md.
     """
 

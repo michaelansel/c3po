@@ -9,10 +9,11 @@ C3PO enables multiple Claude Code instances to communicate with each other, enab
 ```bash
 git clone https://github.com/USER/c3po.git
 cd c3po
-bash scripts/deploy.sh
+cp .env.example .env   # fill in secrets
+docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-The deploy script SSHes into the server, builds the Docker image, configures systemd, and generates an nginx config. Follow the printed sudo commands to install nginx.
+See [docs/SETUP.md](docs/SETUP.md) for the full production setup (systemd unit, TLS). To update the existing production deployment, push to `main` and run `bash scripts/deploy.sh`.
 
 For local testing:
 ```bash

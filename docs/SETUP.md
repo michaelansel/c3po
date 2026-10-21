@@ -136,15 +136,15 @@ cd coordinator
 docker-compose up -d
 ```
 
-### Option 3: Legacy Remote Deploy
+### Updating Production
 
-Deploy to a remote server via SSH (builds Docker image on the server, sets up systemd, generates nginx config):
+Production runs Option 1 on the exe.dev VM `golf-pegasus` (`mcp.qerk.be`). After pushing to `main`:
 
 ```bash
 bash scripts/deploy.sh
 ```
 
-This targets `ubuntu@a10.lambda.qerk.be` by default. Configure by editing `scripts/deploy.sh`.
+This pulls on the VM, restarts `c3po.service` (which rebuilds the images), and waits for `/api/health`. Override the target with `C3PO_DEPLOY_HOST` / `C3PO_DEPLOY_DIR` / `C3PO_HEALTH_URL`.
 
 ## Headless Mode Configuration
 

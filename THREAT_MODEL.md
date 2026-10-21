@@ -68,8 +68,7 @@ Admin tools ──> nginx ──────────────────
 
 **TLS termination note:** in the current production deployment (exe.dev VM, `docker-compose.prod.yml`),
 TLS is terminated at the **exe.dev edge proxy**; the in-stack nginx container listens on plain HTTP
-(port 80, published as `8000`) and coordinator/auth-proxy bind to loopback. The legacy host deployment
-(`scripts/deploy.sh`) terminates TLS at host nginx via certbot. Either way, external traffic is
+(port 80, published as `8000`) and coordinator/auth-proxy bind to loopback. External traffic is
 TLS-protected and the coordinator is not directly reachable from the internet. **The dev compose
 (`coordinator/docker-compose.yml`) sets no auth secrets and is unauthenticated by design — it is for
 local/loopback development only and must not be exposed on a network interface.**
@@ -242,7 +241,7 @@ record exists so the same items are not repeatedly re-reported; future scans sho
 ### Documentation / accepted (covered by this document)
 - Dev compose (`coordinator/docker-compose.yml`) is unauthenticated — dev/loopback only (see TLS note).
 - "Plaintext HTTP on all interfaces" for the prod stack — TLS terminates at the edge (see TLS note; T8).
-- Admin/API tokens passed via CLI argv (setup.py/deploy.sh), deploy.sh secret hygiene, predictable
+- Admin/API tokens passed via CLI argv (setup.py), predictable
   `/tmp` state files & session-id log — local-host, single-operator; low priority. (The `/tmp` items do
   not apply on macOS, where `TMPDIR` is a per-user 0700 directory.)
 

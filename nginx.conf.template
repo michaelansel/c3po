@@ -1,6 +1,6 @@
-# C3PO Nginx config — from deploy.sh, for Docker Compose.
-# Only changes vs production: upstreams use container names,
-# listen 80 (exe.dev terminates TLS), envsubst for server_secret.
+# C3PO Nginx config for the docker-compose.prod.yml stack (production).
+# Upstreams use container names, listens on 80 (exe.dev terminates TLS),
+# envsubst fills in server_secret.
 
 upstream c3po_proxy {
     server auth-proxy:8421;

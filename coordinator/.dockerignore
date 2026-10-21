@@ -7,5 +7,4 @@ __pycache__/
 .venv/
 *.md
 docker-compose.yml
-nginx-c3po.conf.example
 .dockerignore

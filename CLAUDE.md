@@ -48,14 +48,19 @@ bash tests/acceptance/run-acceptance.sh
 
 ### Deployment
 ```bash
-bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints nginx sudo commands)
+git push origin main         # The VM pulls from GitHub
+bash scripts/deploy.sh       # Pull on the VM, restart c3po.service (rebuilds), wait for health
 # Enroll via: python3 setup.py --enroll https://mcp.qerk.be '<admin_token>'
 
-# Service management on the server:
+# Service management on the server (ssh exedev@golf-pegasus.exe.xyz):
 #   sudo systemctl status c3po       # Check service status
 #   sudo journalctl -u c3po -f       # Tail logs
 #   sudo systemctl restart c3po      # Restart
 ```
+
+Production runs on the exe.dev VM `golf-pegasus` (`mcp.qerk.be` CNAMEs to `golf-pegasus.exe.xyz`): the `docker-compose.prod.yml` stack (nginx, coordinator, mcp-auth-proxy, Redis) under the system-level `c3po.service`, with TLS terminated at the exe.dev edge. Nginx config is `nginx.conf.template` (rendered by the nginx container), so nginx changes ship with a normal deploy.
+
+**Publishing the plugin**: the `michaelansel` marketplace pulls the plugin straight from this repo's `main`, so pushing a commit with a bumped `.claude-plugin/plugin.json` version publishes it. Update locally with `claude plugin marketplace update michaelansel && claude plugin update c3po@michaelansel`, then restart Claude Code.
 
 ## Architecture
 
@@ -112,7 +117,7 @@ bash scripts/deploy.sh       # Deploy to pubpop3 (builds, configures, prints ngi
 - **Admin key** (`/admin/*`): `Authorization: Bearer <server_secret>.<admin_key>`. nginx validates the server_secret prefix; coordinator validates the admin_key portion. Legacy format `Bearer <admin_key>` also accepted.
 - **Dev mode**: When no auth env vars are set (`C3PO_SERVER_SECRET`, `C3PO_ADMIN_KEY`, `C3PO_PROXY_BEARER_TOKEN`), all requests pass without auth.
 
-**Auth routing for MCP (X-C3PO-Auth-Path header)**: MCP tool calls from both Claude Code (API key) and Claude Desktop (OAuth) arrive at the coordinator's single `/mcp` endpoint. The original URL path prefix (`/agent/mcp` vs `/oauth/mcp`) is lost after nginx rewrites `/agent/mcp` → `/mcp`, so the coordinator can't determine which auth validator to use from the path alone. To solve this, nginx injects an `X-C3PO-Auth-Path: /agent` header on all `/agent/*` requests. The `AgentIdentityMiddleware` reads this header: if present and valid (`/agent` or `/admin`), it routes to that auth validator; if absent, it defaults to `/oauth` (proxy token validation). This works because mcp-auth-proxy connects directly to the coordinator inside Docker, bypassing nginx entirely, so OAuth connections never have this header. The header is a routing hint only — each auth validator independently verifies the token, so forging the header without valid credentials will still fail. Key files: `coordinator/server.py` (AgentIdentityMiddleware), `scripts/deploy.sh` (nginx `proxy_set_header X-C3PO-Auth-Path`).
+**Auth routing for MCP (X-C3PO-Auth-Path header)**: MCP tool calls from both Claude Code (API key) and Claude Desktop (OAuth) arrive at the coordinator's single `/mcp` endpoint. The original URL path prefix (`/agent/mcp` vs `/oauth/mcp`) is lost after nginx rewrites `/agent/mcp` → `/mcp`, so the coordinator can't determine which auth validator to use from the path alone. To solve this, nginx injects an `X-C3PO-Auth-Path: /agent` header on all `/agent/*` requests. The `AgentIdentityMiddleware` reads this header: if present and valid (`/agent` or `/admin`), it routes to that auth validator; if absent, it defaults to `/oauth` (proxy token validation). This works because mcp-auth-proxy connects directly to the coordinator inside Docker, bypassing nginx entirely, so OAuth connections never have this header. The header is a routing hint only — each auth validator independently verifies the token, so forging the header without valid credentials will still fail. Key files: `coordinator/server.py` (AgentIdentityMiddleware), `nginx.conf.template` (nginx `proxy_set_header X-C3PO-Auth-Path`).
 
 **Credentials**: Plugin hooks read `~/.claude/c3po-credentials.json` (0o600 perms) for auth. Contains `coordinator_url`, `api_token` (composite `server_secret.api_key`), `key_id`, `agent_pattern`. Legacy format with separate `server_secret` and `api_key` fields is also supported. Created by `setup.py --enroll`.
 
