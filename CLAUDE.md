@@ -49,7 +49,7 @@ bash tests/acceptance/run-acceptance.sh
 ### Deployment
 ```bash
 git push origin main         # The VM pulls from GitHub
-bash scripts/deploy.sh       # Pull on the VM, restart c3po.service (rebuilds), wait for health
+bash scripts/deploy.sh       # Pull on the VM, restart c3po.service (rebuilds), wait for health, probe the perimeter
 # Enroll via: python3 setup.py --enroll https://mcp.qerk.be '<admin_token>'
 
 # Service management on the server (ssh exedev@golf-pegasus.exe.xyz):
@@ -58,7 +58,7 @@ bash scripts/deploy.sh       # Pull on the VM, restart c3po.service (rebuilds), 
 #   sudo systemctl restart c3po      # Restart
 ```
 
-Production runs on the exe.dev VM `golf-pegasus` (`mcp.qerk.be` CNAMEs to `golf-pegasus.exe.xyz`): the `docker-compose.prod.yml` stack (nginx, coordinator, mcp-auth-proxy, Redis) under the system-level `c3po.service`, with TLS terminated at the exe.dev edge. Nginx config is `nginx.conf.template` (rendered by the nginx container), so nginx changes ship with a normal deploy.
+Production runs on the exe.dev VM `golf-pegasus` (`mcp.qerk.be` CNAMEs to `golf-pegasus.exe.xyz`): the `docker-compose.prod.yml` stack (nginx, coordinator, mcp-auth-proxy, Redis) under the system-level `c3po.service`, with TLS terminated at the exe.dev edge. Nginx config is `nginx.conf.template` (rendered by the nginx container), so nginx changes ship with a normal deploy. mcp-auth-proxy is exposed only on the exact routes the Claude.ai connector uses, and the server-to-server ones only to Anthropic's IP range — see `THREAT_MODEL.md` Boundary 1 for the full unauthenticated-reachability table.
 
 **Publishing the plugin**: the `michaelansel` marketplace pulls the plugin straight from this repo's `main`, so pushing a commit with a bumped `.claude-plugin/plugin.json` version publishes it. Update locally with `claude plugin marketplace update michaelansel && claude plugin update c3po@michaelansel`, then restart Claude Code.
 
@@ -189,6 +189,7 @@ Tests are organized in layers from fast/isolated to slow/integrated. Each layer 
 
 - **Before committing**: Unit tests (`coordinator/tests/` and `hooks/tests/`)
 - **Before deploying**: Acceptance tests (`tests/acceptance/run-acceptance.sh`)
+- **Before deploying an nginx change**: `bash scripts/check-nginx.sh` — runs the real `nginx.conf.template` in a container (acceptance uses its own minimal `nginx-test.conf`, so it never tests the prod config)
 - **After deploying**: Smoke-check with `scripts/test_e2e.sh` or E2E integration tests
 
 ## Container Runtime

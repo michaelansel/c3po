@@ -75,9 +75,23 @@ local/loopback development only and must not be exposed on a network interface.*
 
 ## Trust Boundaries
 
-### Boundary 1: Internet → nginx (TLS termination)
-- **What crosses**: All external traffic
-- **Protection**: TLS 1.2+, rate limiting, request size limits
+### Boundary 1: Internet → exe.dev edge → nginx
+- **What crosses**: All external traffic. exe.dev terminates TLS and appends the caller to
+  `X-Forwarded-For`; nginx (bound to loopback) resolves the real client IP from it.
+- **Protection**: Design goal: **as few codebases as possible parse bytes from an unauthenticated
+  caller.** What an unauthenticated caller can reach, by codebase:
+
+  | Reached without credentials | Codebase | Paths |
+  |---|---|---|
+  | Anyone | exe.dev edge, nginx | everything (nginx answers 401/403/404 itself) |
+  | Anyone | coordinator | `/api/health` only (headers and body stripped by nginx) |
+  | Anyone | mcp-auth-proxy | browser OAuth pages only: `/.idp/auth[/<id>]`, `/.auth/login`, `/.auth/github[/callback]` |
+  | Anthropic's range (`160.79.104.0/21`) | mcp-auth-proxy | `/oauth/mcp`, `/.well-known/oauth-*`, `/.idp/register`, `/.idp/token` |
+  | Holder of `server_secret` | coordinator | `/agent/*`, `/admin/*` (then per-key validation) |
+
+  Every other path, including mcp-auth-proxy's other routes, is a 404 from nginx. Rate limiting and
+  request size limits apply at nginx. `scripts/check-nginx.sh` verifies this matrix against the real
+  template; `scripts/deploy.sh` re-probes the live edge after every deploy.
 - **Trust level**: Untrusted
 
 ### Boundary 2: nginx → mcp-auth-proxy (OAuth MCP traffic)
@@ -215,6 +229,39 @@ from mcp-auth-proxy and turning `agent_pattern` into an enforced authorization b
 - **Mitigation**: API keys are indexed by SHA-256 hash (for fast lookup) but verified by bcrypt hash (stored in metadata). Even with full Redis access, recovering the actual API key requires brute-forcing bcrypt, which is computationally infeasible. The SHA-256 index alone is insufficient to authenticate — the coordinator performs bcrypt verification on every request.
 - **Residual risk**: Attacker could delete keys (DoS) or add new keys if they craft valid metadata with their own bcrypt hash. Redis access implies server compromise.
 
+### T13: Third-party client registration (OAuth)
+- **Attack**: mcp-auth-proxy (v2.10.2) accepts dynamic client registration with any `redirect_uri`, and
+  its consent page is a bare "Authorize" button that does not name the client. An attacker registers a
+  client with their own redirect, then gets the account owner to open a crafted `/.idp/auth` link: one
+  click (GitHub auto-approves after first use) delivers an authorization code — and so a full trust-domain
+  token — to the attacker. PKCE and exact redirect matching don't help; they bind the code to whichever
+  client registered.
+- **Mitigation**: nginx limits `/.idp/register`, `/.idp/token`, discovery and `/oauth/mcp` to Anthropic's
+  published outbound range. Only Anthropic-hosted clients (Claude.ai, Desktop, mobile) use OAuth.
+- **Residual risk**: Anyone can add a custom connector in their own Claude.ai, so a determined attacker can
+  originate requests from Anthropic's range — but only OAuth/MCP-shaped ones made by Claude's backend, and
+  completing the attack still needs the owner's click. A redirect-URI allowlist in the authorization server
+  would close it properly; mcp-auth-proxy has no such option.
+
+### T14: Client IP spoofing
+- **Attack**: Forge `X-Forwarded-For` to pick a fresh per-IP rate-limit bucket, or to appear to come
+  from Anthropic's range.
+- **Mitigation**: nginx trusts XFF only from the Docker bridge / loopback hop (`set_real_ip_from` +
+  `real_ip_recursive`), so the address used is the one exe.dev's edge appended; it then overwrites
+  `X-Forwarded-For` and `X-Real-IP` upstream. The coordinator's `_get_client_ip` prefers `X-Real-IP` and
+  never uses the client-controlled first XFF entry.
+- **Residual risk**: Depends on exe.dev's edge appending the true caller; checked by `check-nginx.sh`
+  against the template; confirm real client addresses in the production nginx log after nginx changes.
+
+### T15: GitHub allowlist by username
+- **Attack**: The allowlisted GitHub username is renamed or reclaimed by someone else, who then passes
+  the OAuth login.
+- **Mitigation**: None in mcp-auth-proxy (`--github-allowed-users` matches the login; it has no
+  numeric-ID option). Accepted: renaming the allowlisted account is under the owner's
+  control. **If it is ever renamed, update `GITHUB_ALLOWED_USER` at the same time** — the old name
+  becomes claimable by anyone.
+- **Residual risk**: Accepted; revisit if the OAuth layer is replaced.
+
 ## Finding dispositions (2026-09 security scan)
 
 A ~25-finding automated security scan was triaged against the trust model above. Most of what it flagged
@@ -277,11 +324,13 @@ record exists so the same items are not repeatedly re-reported; future scans sho
 - [ ] Set `--github-allowed-users` to restrict OAuth access
 - [ ] Set `C3PO_SERVER_SECRET`, `C3PO_ADMIN_KEY`, `C3PO_PROXY_BEARER_TOKEN` in coordinator env
 - [ ] Configure nginx path-based routing: `/oauth/` → proxy, `/agent/` + `/admin/` → coordinator
-- [ ] Enable TLS via certbot
+- [ ] TLS: terminated at the exe.dev edge (`mcp.qerk.be` CNAME → `<vm>.exe.xyz`); nginx binds `127.0.0.1:8000`
+- [ ] Before changing `nginx.conf.template`: `bash scripts/check-nginx.sh` passes
+- [ ] After deploying: the perimeter probe in `scripts/deploy.sh` passes
+- [ ] Container images are pinned (mcp-auth-proxy especially); when bumping it, re-check its route list against the nginx allowlist
 - [ ] Verify health endpoint works without auth: `curl https://mcp.qerk.be/api/health`
 - [ ] Verify agent endpoint rejects without credentials: `curl https://mcp.qerk.be/agent/api/register` (should 401)
 - [ ] Verify admin endpoint rejects without credentials: `curl https://mcp.qerk.be/admin/api/keys` (should 401)
-- [ ] Verify OAuth MCP endpoint requires OAuth: `curl https://mcp.qerk.be/oauth/mcp` (should 401/redirect)
+- [ ] Verify OAuth endpoints are closed outside Anthropic's range: `curl https://mcp.qerk.be/oauth/mcp` (should 403)
 - [ ] Verify API key MCP endpoint works with valid key: `curl -H "Authorization: Bearer <secret>.<key>" https://mcp.qerk.be/agent/mcp`
-- [ ] Verify OAuth discovery: `curl https://mcp.qerk.be/.well-known/oauth-authorization-server`
 - [ ] Enroll at least one agent via `setup.py --enroll` and verify connectivity

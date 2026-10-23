@@ -32,6 +32,17 @@ limit_req_zone $binary_remote_addr zone=c3po_api_ip:10m rate=8r/s;
 limit_req_zone $binary_remote_addr zone=c3po_mcp_ip:10m rate=45r/s;
 limit_req_zone $binary_remote_addr zone=c3po_admin_ip:1m rate=2r/m;
 
+# Anthropic's published outbound IP range, used by Claude.ai / Desktop / mobile
+# for remote MCP connectors (discovery, registration, token exchange, and tool
+# calls). https://platform.claude.com/docs/en/api/ip-addresses — confirm it is
+# still current before relying on it; Anthropic says it won't change without
+# notice, but "won't" isn't "can't". geo reads $remote_addr after the realip
+# resolution in the server block.
+geo $from_anthropic {
+    default 0;
+    160.79.104.0/21 1;
+}
+
 server {
     listen 80;
     server_name mcp.qerk.be;
@@ -130,8 +141,22 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # OAuth discovery endpoints -> mcp-auth-proxy
-    location /.well-known/ {
+    # mcp-auth-proxy (third-party) is exposed only on the routes the Claude.ai
+    # connector flow uses; any other route it has (introspect, JWKS, logout,
+    # other providers, routes added by an upgrade) falls through to the 404 at
+    # the bottom. Endpoint names are from mcp-auth-proxy v2.10.2 — re-check
+    # them when bumping the pinned image.
+    #
+    # Server-to-server steps (discovery, client registration, token exchange,
+    # and /oauth/mcp itself) only ever come from Claude's backend, so they are
+    # limited to Anthropic's published outbound range ($from_anthropic). This
+    # is what keeps a stranger from registering their own client: v2.10.2
+    # accepts any redirect_uri and its consent page doesn't name the client.
+
+    # Discovery. Prefix match also covers path-suffixed resource metadata
+    # (/.well-known/oauth-protected-resource/oauth/mcp).
+    location /.well-known/oauth-protected-resource {
+        if ($from_anthropic = 0) { return 403; }
         proxy_pass http://c3po_proxy;
         proxy_set_header X-C3PO-Auth-Path "";
         proxy_set_header Host $host;
@@ -140,8 +165,8 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # OAuth IdP endpoints -> mcp-auth-proxy
-    location /.idp/ {
+    location = /.well-known/oauth-authorization-server {
+        if ($from_anthropic = 0) { return 403; }
         proxy_pass http://c3po_proxy;
         proxy_set_header X-C3PO-Auth-Path "";
         proxy_set_header Host $host;
@@ -150,8 +175,58 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # OAuth callback endpoints -> mcp-auth-proxy
-    location /.auth/ {
+    location = /.idp/register {
+        if ($from_anthropic = 0) { return 403; }
+        proxy_pass http://c3po_proxy;
+        proxy_set_header X-C3PO-Auth-Path "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /.idp/token {
+        if ($from_anthropic = 0) { return 403; }
+        proxy_pass http://c3po_proxy;
+        proxy_set_header X-C3PO-Auth-Path "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Browser-facing steps: the user's own browser lands here (redirected by
+    # Claude, then by GitHub), so these can't be IP-restricted. This is all
+    # that is reachable from outside Anthropic's range beyond nginx itself.
+    # /.idp/auth starts the flow; /.idp/auth/<id> is the consent page.
+    location ~ ^/\.idp/auth(/[A-Za-z0-9_-]+)?$ {
+        proxy_pass http://c3po_proxy;
+        proxy_set_header X-C3PO-Auth-Path "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /.auth/login {
+        proxy_pass http://c3po_proxy;
+        proxy_set_header X-C3PO-Auth-Path "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /.auth/github {
+        proxy_pass http://c3po_proxy;
+        proxy_set_header X-C3PO-Auth-Path "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /.auth/github/callback {
         proxy_pass http://c3po_proxy;
         proxy_set_header X-C3PO-Auth-Path "";
         proxy_set_header Host $host;
@@ -164,6 +239,7 @@ server {
     # Strip /oauth prefix so auth-proxy receives /mcp (not /oauth/mcp),
     # which it then forwards to the coordinator at /mcp.
     location /oauth/ {
+        if ($from_anthropic = 0) { return 403; }
         limit_req zone=c3po_mcp_global burst=100 nodelay;
         limit_req zone=c3po_mcp_ip burst=25 nodelay;
         rewrite ^/oauth(/.*) $1 break;
