@@ -184,7 +184,7 @@ done
 # Install test dependencies and run acceptance tests in host-a
 # -------------------------------------------------------------------
 log "Installing test dependencies in host-a..."
-$DOCKER exec "$HOSTA_CTR" pip install --quiet --break-system-packages mcp httpx httpx-sse 2>&1 | tail -3
+$DOCKER exec "$HOSTA_CTR" pip install --quiet --break-system-packages "mcp<2" httpx httpx-sse 2>&1 | tail -3
 
 log "Copying acceptance test into host-a..."
 $DOCKER cp "$SCRIPT_DIR/test_acceptance.py" "$HOSTA_CTR":/tmp/test_acceptance.py

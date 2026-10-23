@@ -44,8 +44,8 @@ start() {
     "$runtime" run -d --name "$name" \
         -e C3PO_SERVER_SECRET="$2" \
         -e NGINX_ENVSUBST_FILTER=C3PO_SERVER_SECRET \
-        --add-host auth-proxy:127.0.0.1 \
-        --add-host coordinator:127.0.0.1 \
+        --add-host=auth-proxy:127.0.0.1 \
+        --add-host=coordinator:127.0.0.1 \
         -v "$PWD/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro" \
         -v "$tmp/stubs.conf:/etc/nginx/conf.d/stubs.conf:ro" \
         "$image" >/dev/null
