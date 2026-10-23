@@ -1,0 +1,15 @@
+# Installed to /etc/systemd/system/ by scripts/install-host-config.sh.
+# exe.dev supplies the kernel and swaps it in at boot; apt never sees it, so
+# unattended-upgrades' reboot-when-required never fires for it (it went 26
+# weeks without one: 6.12.67 -> 6.12.113 on 2026-10-23). The kernel's network
+# stack handles every unauthenticated packet, so reboot weekly regardless.
+# Same 08:00 UTC window as unattended-upgrades; c3po-refresh follows at 08:30.
+[Unit]
+Description=Weekly reboot (Sunday 08:00 UTC)
+
+[Timer]
+OnCalendar=Sun *-*-* 08:00:00 UTC
+Persistent=false
+
+[Install]
+WantedBy=timers.target

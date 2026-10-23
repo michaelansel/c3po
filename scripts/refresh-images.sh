@@ -31,11 +31,15 @@ echo "Pulling images..."
 echo "Building coordinator (${build_args[*]})..."
 "${COMPOSE[@]}" build --quiet "${build_args[@]}"
 
+# Compare filesystem layers, not image IDs: every coordinator build gets a new
+# ID (BuildKit stamps the creation time into the config) even when every layer
+# is cached, while any real patch changes a layer.
+layers() { docker image inspect --format '{{json .RootFS.Layers}}' "$1"; }
+
 stale=()
 for container in $("${COMPOSE[@]}" ps -q); do
     read -r name ref running < <(docker inspect --format '{{.Name}} {{.Config.Image}} {{.Image}}' "$container")
-    current=$(docker image inspect --format '{{.Id}}' "$ref")
-    if [ "$running" != "$current" ]; then
+    if [ "$(layers "$running")" != "$(layers "$ref")" ]; then
         stale+=("${name#/}(${ref})")
     fi
 done

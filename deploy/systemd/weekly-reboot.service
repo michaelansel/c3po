@@ -1,0 +1,7 @@
+# Installed to /etc/systemd/system/ by scripts/install-host-config.sh.
+[Unit]
+Description=Weekly reboot to pick up exe.dev's kernel
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl reboot
