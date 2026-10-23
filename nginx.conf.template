@@ -15,8 +15,10 @@ upstream c3po_coordinator {
 # Validate server_secret prefix in Bearer token
 # Both /agent/* and /admin/* use: Authorization: Bearer <server_secret>.<key>
 # nginx checks the prefix; coordinator checks the key portion.
+# \Q...\E makes the secret a literal: base64 secrets contain "+", which would
+# otherwise act as a regex quantifier (and "." would match any character).
 map $http_authorization $agent_auth_valid {
-    "~^Bearer ${C3PO_SERVER_SECRET}\." 1;
+    "~^Bearer \Q${C3PO_SERVER_SECRET}\E\." 1;
     default 0;
 }
 
@@ -33,6 +35,16 @@ limit_req_zone $binary_remote_addr zone=c3po_admin_ip:1m rate=2r/m;
 server {
     listen 80;
     server_name mcp.qerk.be;
+
+    # Real client IP. The exe.dev edge appends the caller to X-Forwarded-For and
+    # reaches nginx through Docker's port proxy, so $remote_addr would otherwise
+    # always be the bridge gateway (172.18.0.1) — per-IP rate limits would act
+    # as global ones. Recursive resolution skips only the trusted hops, so a
+    # client-supplied left-hand XFF entry is ignored.
+    set_real_ip_from 172.16.0.0/12;
+    set_real_ip_from 127.0.0.1;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
 
     # Return 429 (not 503) when rate limit is exceeded
     limit_req_status 429;
@@ -72,7 +84,7 @@ server {
         proxy_pass http://c3po_coordinator;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Connection "";
         proxy_http_version 1.1;
@@ -93,7 +105,7 @@ server {
         proxy_pass http://c3po_coordinator;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Connection "";
         proxy_http_version 1.1;
@@ -111,36 +123,40 @@ server {
         limit_req zone=c3po_admin_global burst=3 nodelay;
         limit_req zone=c3po_admin_ip burst=1 nodelay;
         proxy_pass http://c3po_coordinator;
+        proxy_set_header X-C3PO-Auth-Path "";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     # OAuth discovery endpoints -> mcp-auth-proxy
     location /.well-known/ {
         proxy_pass http://c3po_proxy;
+        proxy_set_header X-C3PO-Auth-Path "";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     # OAuth IdP endpoints -> mcp-auth-proxy
     location /.idp/ {
         proxy_pass http://c3po_proxy;
+        proxy_set_header X-C3PO-Auth-Path "";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     # OAuth callback endpoints -> mcp-auth-proxy
     location /.auth/ {
         proxy_pass http://c3po_proxy;
+        proxy_set_header X-C3PO-Auth-Path "";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
@@ -152,9 +168,10 @@ server {
         limit_req zone=c3po_mcp_ip burst=25 nodelay;
         rewrite ^/oauth(/.*) $1 break;
         proxy_pass http://c3po_proxy;
+        proxy_set_header X-C3PO-Auth-Path "";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Connection "";
         proxy_http_version 1.1;

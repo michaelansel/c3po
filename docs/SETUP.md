@@ -69,7 +69,8 @@ The production deployment uses Docker Compose with nginx, coordinator, mcp-auth-
 git clone <repo-url> c3po && cd c3po
 cp .env.example .env
 # Edit .env — fill in all values (see .env.example for descriptions)
-# Generate secrets: openssl rand -base64 32
+# Generate secrets: openssl rand -hex 32  (hex: the server secret is embedded in
+# bearer tokens and matched by nginx, so keep it free of +, / and =)
 
 # 2. Start the stack
 docker compose -f docker-compose.prod.yml up -d --build

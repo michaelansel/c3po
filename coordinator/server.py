@@ -373,14 +373,22 @@ SECURITY_HEADERS = {
 
 
 def _get_client_ip(request) -> str:
-    """Get client IP, respecting proxy headers when configured."""
+    """Get client IP, respecting proxy headers when configured.
+
+    Behind nginx, X-Real-IP is authoritative: nginx resolves the real client
+    from the exe.dev edge's X-Forwarded-For (set_real_ip_from + real_ip_recursive)
+    and sets X-Real-IP itself, overwriting anything the client sent. If only
+    X-Forwarded-For is present, the LAST entry is used — it was appended by the
+    nearest proxy. The first entry is whatever the client chose to send, so
+    trusting it would let any caller pick its own per-IP rate-limit bucket.
+    """
     if BEHIND_PROXY:
-        forwarded = request.headers.get("x-forwarded-for", "")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        real_ip = request.headers.get("x-real-ip", "")
+        real_ip = request.headers.get("x-real-ip", "").strip()
         if real_ip:
             return real_ip
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 

@@ -606,3 +606,37 @@ class TestResolveAgentIdValidation:
         long_id = "anonymous/chat-" + "a" * 100  # exceeds the 64-char cap by design
         with patch.object(srv, "agent_manager", AgentManager(redis_client)):
             assert srv._resolve_agent_id(self._ctx(), long_id) == long_id
+
+
+class TestGetClientIp:
+    """_get_client_ip must not let a caller choose its own rate-limit identity."""
+
+    @staticmethod
+    def _request(headers, host="172.18.0.5"):
+        request = Mock()
+        request.headers = headers
+        request.client = Mock(host=host)
+        return request
+
+    def test_ignores_proxy_headers_when_not_behind_proxy(self):
+        from coordinator.server import _get_client_ip
+        with patch("coordinator.server.BEHIND_PROXY", False):
+            request = self._request({"x-real-ip": "203.0.113.9", "x-forwarded-for": "198.51.100.1"})
+            assert _get_client_ip(request) == "172.18.0.5"
+
+    def test_prefers_x_real_ip(self):
+        from coordinator.server import _get_client_ip
+        with patch("coordinator.server.BEHIND_PROXY", True):
+            request = self._request({"x-real-ip": "203.0.113.9", "x-forwarded-for": "198.51.100.1, 203.0.113.9"})
+            assert _get_client_ip(request) == "203.0.113.9"
+
+    def test_forged_first_forwarded_entry_is_ignored(self):
+        from coordinator.server import _get_client_ip
+        with patch("coordinator.server.BEHIND_PROXY", True):
+            request = self._request({"x-forwarded-for": "6.6.6.6, 203.0.113.9"})
+            assert _get_client_ip(request) == "203.0.113.9"
+
+    def test_falls_back_to_socket_peer(self):
+        from coordinator.server import _get_client_ip
+        with patch("coordinator.server.BEHIND_PROXY", True):
+            assert _get_client_ip(self._request({})) == "172.18.0.5"

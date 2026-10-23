@@ -34,7 +34,9 @@ services:
       start_period: 10s
 
   auth-proxy:
-    image: ghcr.io/sigbit/mcp-auth-proxy:latest
+    # Pinned: this is internet-facing auth code; upgrades are deliberate (re-run
+    # scripts/check-nginx.sh and the deploy probe, and re-check its route list).
+    image: ghcr.io/sigbit/mcp-auth-proxy:2.10.2
     command: >-
       --external-url https://mcp.qerk.be
       --github-client-id ${GITHUB_CLIENT_ID}
@@ -60,9 +62,10 @@ services:
           memory: 64M
 
   nginx:
-    image: nginx:alpine
+    image: nginx:1.31-alpine
     ports:
-      - "8000:80"
+      # Loopback only: the exe.dev edge connects locally, nothing else should.
+      - "127.0.0.1:8000:80"
     volumes:
       - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
     environment:
@@ -81,7 +84,7 @@ services:
           memory: 64M
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     volumes:
       - redis_data:/data
     command: >-
