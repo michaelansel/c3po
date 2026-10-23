@@ -1,0 +1,13 @@
+# Installed to /etc/systemd/system/ by scripts/install-host-config.sh.
+# Daily image refresh; see scripts/refresh-images.sh. Failures show in
+# `systemctl status c3po-refresh` / `journalctl -u c3po-refresh`.
+[Unit]
+Description=C3PO image refresh (pull, rebuild, restart if anything changed)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/exedev/c3po
+ExecStart=/home/exedev/c3po/scripts/refresh-images.sh
+SyslogIdentifier=c3po-refresh

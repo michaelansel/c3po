@@ -34,9 +34,11 @@ services:
       start_period: 10s
 
   auth-proxy:
-    # Pinned: this is internet-facing auth code; upgrades are deliberate (re-run
-    # scripts/check-nginx.sh and the deploy probe, and re-check its route list).
-    image: ghcr.io/sigbit/mcp-auth-proxy:2.10.2
+    # Tracks the 2.x line so security fixes arrive automatically: it is reached
+    # by unauthenticated browsers. A new release cannot widen exposure, because
+    # nginx only forwards the routes it names (anything new is a 404). Refreshed
+    # on every restart and daily by c3po-refresh.timer.
+    image: ghcr.io/sigbit/mcp-auth-proxy:2
     command: >-
       --external-url https://mcp.qerk.be
       --github-client-id ${GITHUB_CLIENT_ID}
@@ -62,7 +64,9 @@ services:
           memory: 64M
 
   nginx:
-    image: nginx:1.31-alpine
+    # nginx stable branch: critical fixes only, so it is safe to track
+    # automatically. Refreshed on every restart and daily by c3po-refresh.timer.
+    image: nginx:stable-alpine
     ports:
       # Loopback only: the exe.dev edge connects locally, nothing else should.
       - "127.0.0.1:8000:80"

@@ -1,0 +1,16 @@
+// Installed to /etc/apt/apt.conf.d/ by scripts/install-host-config.sh.
+// Adds to Ubuntu's 50unattended-upgrades (which already covers the noble and
+// noble-security origins, including sshd and docker.io — the host pieces
+// unauthenticated traffic touches).
+
+// Tailscale comes from its own repo, which 50unattended-upgrades doesn't cover.
+Unattended-Upgrade::Origins-Pattern {
+    "origin=Tailscale";
+};
+
+// Apply library and service fixes that need a reboot (libc, apparmor, ...)
+// at a fixed quiet time: 08:00 UTC = 03:00/04:00 US Eastern. C3PO restarts
+// with the VM; clients' long-polls reconnect.
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+Unattended-Upgrade::Automatic-Reboot-Time "08:00";

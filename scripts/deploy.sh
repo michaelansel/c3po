@@ -45,40 +45,10 @@ if [ "$healthy" -ne 1 ]; then
     exit 1
 fi
 
-# Perimeter probe: unauthenticated requests from this machine (outside
-# Anthropic's range) must get exactly these answers. No secrets involved.
-# scripts/check-nginx.sh covers the full matrix before deploy; this confirms
-# the live edge + nginx behave the same way.
-BASE="${HEALTH_URL%/api/health}"
+# Perimeter probe: the live edge + nginx must answer unauthenticated requests
+# exactly as nginx.conf.template intends (see scripts/probe-perimeter.sh).
 probe_fail=0
-probe() {
-    local want="$1" path="$2" got
-    got=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "${BASE}${path}")
-    if [ "$got" = "$want" ]; then
-        log "probe ok    ${got} ${path}"
-    else
-        err "probe FAIL  ${got} ${path} (wanted ${want})"
-        probe_fail=1
-    fi
-}
-probe 401 /agent/mcp
-probe 401 /agent/api/pending
-probe 401 /admin/api/keys
-probe 403 /oauth/mcp
-probe 403 /.idp/register
-probe 403 /.idp/token
-probe 403 /.well-known/oauth-authorization-server
-probe 404 /.idp/introspect
-probe 404 /.well-known/jwks.json
-probe 404 /
-# Browser-facing OAuth page must stay reachable (any answer but 403/404).
-got=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "${BASE}/.idp/auth")
-if [ "$got" = "403" ] || [ "$got" = "404" ]; then
-    err "probe FAIL  ${got} /.idp/auth (browser OAuth page should be reachable)"
-    probe_fail=1
-else
-    log "probe ok    ${got} /.idp/auth"
-fi
+bash "$(dirname "$0")/probe-perimeter.sh" "${HEALTH_URL%/api/health}" || probe_fail=1
 
 if [ "$probe_fail" -ne 0 ]; then
     err "Perimeter probe failed — the live perimeter does not match nginx.conf.template."

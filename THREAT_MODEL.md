@@ -327,7 +327,8 @@ record exists so the same items are not repeatedly re-reported; future scans sho
 - [ ] TLS: terminated at the exe.dev edge (`mcp.qerk.be` CNAME → `<vm>.exe.xyz`); nginx binds `127.0.0.1:8000`
 - [ ] Before changing `nginx.conf.template`: `bash scripts/check-nginx.sh` passes
 - [ ] After deploying: the perimeter probe in `scripts/deploy.sh` passes
-- [ ] Container images are pinned (mcp-auth-proxy especially); when bumping it, re-check its route list against the nginx allowlist
+- [ ] Host config installed (`sudo bash scripts/install-host-config.sh`): unattended security upgrades with automatic reboot at 08:00 UTC, and the daily `c3po-refresh.timer`
+- [ ] Components that unauthenticated requests reach patch themselves: OS packages (sshd, docker.io) via unattended-upgrades; nginx (`stable-alpine`) and mcp-auth-proxy (`2`) via floating tags refreshed on every restart and daily. A new mcp-auth-proxy can't widen exposure, since nginx forwards only the routes it names
 - [ ] Verify health endpoint works without auth: `curl https://mcp.qerk.be/api/health`
 - [ ] Verify agent endpoint rejects without credentials: `curl https://mcp.qerk.be/agent/api/register` (should 401)
 - [ ] Verify admin endpoint rejects without credentials: `curl https://mcp.qerk.be/admin/api/keys` (should 401)
