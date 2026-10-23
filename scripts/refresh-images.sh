@@ -26,21 +26,35 @@ if [ "$(date +%u)" = 7 ]; then
     build_args+=(--no-cache)
 fi
 
+# Compare filesystem layers, not image IDs: every coordinator build gets a new
+# ID (BuildKit stamps the creation time into the config) even when every layer
+# is cached, while any real patch changes a layer. Layers are recorded BEFORE
+# pulling/building, because once a tag moves, the containerd image store can no
+# longer inspect the image a running container was started from.
+layers() { docker image inspect --format '{{json .RootFS.Layers}}' "$1" 2>/dev/null || echo missing; }
+
+containers=()
+declare -A before
+for container in $("${COMPOSE[@]}" ps -q); do
+    read -r name ref running < <(docker inspect --format '{{.Name}} {{.Config.Image}} {{.Image}}' "$container")
+    containers+=("${name#/}|${ref}")
+    if [ "$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null)" = "$running" ]; then
+        before["$ref"]=$(layers "$ref")
+    else
+        before["$ref"]="tag already moved"   # something pulled since the last start
+    fi
+done
+
 echo "Pulling images..."
 "${COMPOSE[@]}" pull --quiet --ignore-buildable
 echo "Building coordinator (${build_args[*]})..."
 "${COMPOSE[@]}" build --quiet "${build_args[@]}"
 
-# Compare filesystem layers, not image IDs: every coordinator build gets a new
-# ID (BuildKit stamps the creation time into the config) even when every layer
-# is cached, while any real patch changes a layer.
-layers() { docker image inspect --format '{{json .RootFS.Layers}}' "$1"; }
-
 stale=()
-for container in $("${COMPOSE[@]}" ps -q); do
-    read -r name ref running < <(docker inspect --format '{{.Name}} {{.Config.Image}} {{.Image}}' "$container")
-    if [ "$(layers "$running")" != "$(layers "$ref")" ]; then
-        stale+=("${name#/}(${ref})")
+for entry in "${containers[@]}"; do
+    name="${entry%%|*}" ref="${entry#*|}"
+    if [ "${before[$ref]}" != "$(layers "$ref")" ]; then
+        stale+=("${name}(${ref})")
     fi
 done
 
