@@ -18,6 +18,18 @@ class AgentManager:
 
     AGENTS_KEY = "c3po:agents"
     AGENT_TIMEOUT_SECONDS = 900  # Consider agent offline after 15 minutes
+    REGISTER_MAX_ATTEMPTS = 50
+
+    # HSET a field only if its current value equals ARGV[2] ("" = field absent).
+    # Stored values are JSON objects, so "" never matches a real entry.
+    _SET_IF_UNCHANGED = """\
+local cur = redis.call('HGET', KEYS[1], ARGV[1])
+if (cur == false and ARGV[2] == '') or cur == ARGV[2] then
+    redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
+    return 1
+end
+return 0
+"""
 
     def __init__(self, redis_client: redis.Redis):
         """Initialize with Redis client.
@@ -39,6 +51,12 @@ class AgentManager:
         online with a different session_id, a suffix is added (agent-2, agent-3, etc.)
         to create a unique ID. The same session reconnecting keeps the same ID.
 
+        Concurrency: the decision is made from a read of the registry, then
+        committed with a compare-and-set on the chosen ID (_SET_IF_UNCHANGED).
+        If another registration changed that entry in between, the decision is
+        re-made from fresh state, so two sessions registering at once can never
+        both be handed the same ID.
+
         Args:
             agent_id: Requested identifier for the agent
             session_id: Session identifier (used to detect same-session reconnects)
@@ -48,41 +66,55 @@ class AgentManager:
             Agent data dict with id, capabilities, registered_at, last_seen.
             The id field may differ from agent_id if collision was resolved.
         """
-        now = datetime.now(timezone.utc).isoformat()
+        for _ in range(self.REGISTER_MAX_ATTEMPTS):
+            now = datetime.now(timezone.utc).isoformat()
+            target_id, expected_raw, agent_data, event = self._plan_registration(
+                agent_id, session_id, capabilities, now,
+            )
+            if self._set_if_unchanged(target_id, expected_raw, agent_data):
+                if event == "heartbeat":
+                    logger.debug("agent_heartbeat agent=%s", target_id)
+                else:
+                    if target_id != agent_id:
+                        logger.warning("agent_collision requested=%s resolved=%s", agent_id, target_id)
+                    logger.info("agent_registered agent=%s session=%s", target_id, session_id)
+                return self._add_status(agent_data)
+        raise RuntimeError(
+            f"register_agent: {agent_id} kept changing; gave up after "
+            f"{self.REGISTER_MAX_ATTEMPTS} attempts"
+        )
 
-        # Check if agent already exists
-        existing = self._get_agent_raw(agent_id)
+    def _plan_registration(
+        self,
+        agent_id: str,
+        session_id: Optional[str],
+        capabilities: Optional[list[str]],
+        now: str,
+    ) -> tuple[str, Optional[bytes], dict, str]:
+        """Decide which ID to write and what to write, from current state.
+
+        Returns (target_id, expected_raw, agent_data, event): expected_raw is
+        the target entry as read (None if absent), for the compare-and-set.
+        """
+        raw = self.redis.hget(self.AGENTS_KEY, agent_id)
+        existing = self._decode(raw)
 
         if existing:
-            existing_session = existing.get("session_id")
-            last_seen = datetime.fromisoformat(existing["last_seen"])
-            seconds_since = (datetime.now(timezone.utc) - last_seen).total_seconds()
-            is_online = seconds_since < self.AGENT_TIMEOUT_SECONDS
+            is_online = self._is_online(existing)
 
             # Case 1: Same session reconnecting - update heartbeat
-            if session_id and existing_session == session_id:
-                existing["last_seen"] = now
-                if capabilities is not None:
-                    existing["capabilities"] = capabilities
-                self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(existing))
-                logger.debug("agent_heartbeat agent=%s", agent_id)
-                return self._add_status(existing)
-
             # Case 2: No session_id provided, agent is online - assume MCP call
             # from the existing session (MCP config can't include dynamic session ID)
-            if not session_id and is_online:
+            same_session = session_id and existing.get("session_id") == session_id
+            if same_session or (not session_id and is_online):
                 existing["last_seen"] = now
                 if capabilities is not None:
                     existing["capabilities"] = capabilities
-                self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(existing))
-                logger.debug("agent_heartbeat agent=%s", agent_id)
-                return self._add_status(existing)
+                return agent_id, raw, existing, "heartbeat"
 
             # Case 3: Different session_id AND agent is online - collision!
             if is_online:
-                original_id = agent_id
-                agent_id = self._resolve_collision(agent_id)
-                logger.warning("agent_collision requested=%s resolved=%s", original_id, agent_id)
+                agent_id, raw = self._resolve_collision(agent_id)
 
         # Create new or update offline agent
         agent_data = {
@@ -95,10 +127,14 @@ class AgentManager:
             "registered_at": now,
             "last_seen": now,
         }
+        return agent_id, raw, agent_data, "registered"
 
-        self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(agent_data))
-        logger.info("agent_registered agent=%s session=%s", agent_id, session_id)
-        return self._add_status(agent_data)
+    def _set_if_unchanged(self, agent_id: str, expected_raw: Optional[bytes], agent_data: dict) -> bool:
+        """Write agent_data only if the entry still equals expected_raw."""
+        return bool(self.redis.eval(
+            self._SET_IF_UNCHANGED, 1, self.AGENTS_KEY,
+            agent_id, expected_raw if expected_raw is not None else "", json.dumps(agent_data),
+        ))
 
     def touch_heartbeat(self, agent_id: str) -> bool:
         """Update last_seen for an agent without full registration logic.
@@ -128,14 +164,22 @@ class AgentManager:
         Returns:
             Agent data dict or None if not found
         """
-        data = self.redis.hget(self.AGENTS_KEY, agent_id)
+        return self._decode(self.redis.hget(self.AGENTS_KEY, agent_id))
+
+    @staticmethod
+    def _decode(data) -> Optional[dict]:
+        """Parse a raw registry entry (bytes or str) into a dict."""
         if data is None:
             return None
-
         if isinstance(data, bytes):
             data = data.decode()
-
         return json.loads(data)
+
+    def _is_online(self, agent_data: dict) -> bool:
+        """True if last_seen is within AGENT_TIMEOUT_SECONDS."""
+        last_seen = datetime.fromisoformat(agent_data["last_seen"])
+        seconds_since = (datetime.now(timezone.utc) - last_seen).total_seconds()
+        return seconds_since < self.AGENT_TIMEOUT_SECONDS
 
     def _add_status(self, agent_data: dict) -> dict:
         """Add status field to agent data based on last_seen.
@@ -159,7 +203,7 @@ class AgentManager:
 
         return agent_data
 
-    def _resolve_collision(self, base_id: str) -> str:
+    def _resolve_collision(self, base_id: str) -> tuple[str, Optional[bytes]]:
         """Find next available agent ID when collision occurs.
 
         Tries base_id-2, base_id-3, etc. until an available ID is found.
@@ -169,22 +213,18 @@ class AgentManager:
             base_id: The original agent ID that collided
 
         Returns:
-            An available agent ID with suffix
+            (candidate_id, raw entry as read or None). register_agent's
+            compare-and-set expects that raw entry to still be there.
         """
         counter = 2
         while True:
             candidate = f"{base_id}-{counter}"
-            existing = self._get_agent_raw(candidate)
+            raw = self.redis.hget(self.AGENTS_KEY, candidate)
+            existing = self._decode(raw)
 
-            if existing is None:
-                return candidate
-
-            # Check if existing agent is offline (can reuse ID)
-            last_seen = datetime.fromisoformat(existing["last_seen"])
-            seconds_since = (datetime.now(timezone.utc) - last_seen).total_seconds()
-
-            if seconds_since >= self.AGENT_TIMEOUT_SECONDS:
-                return candidate
+            # Free, or held by an offline agent (can reuse ID)
+            if existing is None or not self._is_online(existing):
+                return candidate, raw
 
             counter += 1
 
