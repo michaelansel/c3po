@@ -425,6 +425,30 @@ class TestUnregisterEndpoint:
         assert elapsed >= 1.0  # Should have waited at least 1 second
 
     @pytest.mark.asyncio
+    async def test_api_wait_clamps_timeout_under_edge_cutoff(
+        self, client, agent_manager, message_manager, monkeypatch
+    ):
+        """timeout=3600 is clamped below the exe.dev edge's 300s no-bytes cutoff."""
+        from coordinator import server
+
+        agent_manager.register_agent("machine/long-waiter")
+        seen = {}
+
+        def fake_wait(agent_id, timeout, **kwargs):
+            seen["timeout"] = timeout
+            return None
+
+        monkeypatch.setattr(message_manager, "wait_for_message", fake_wait)
+        response = await client.get(
+            "/agent/api/wait?timeout=3600",
+            headers={"X-Machine-Name": "machine/long-waiter"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "timeout"
+        assert seen["timeout"] == server.REST_WAIT_MAX_SECONDS < 300
+
+    @pytest.mark.asyncio
     async def test_api_wait_does_not_touch_heartbeat(self, client, agent_manager, redis_client):
         """GET /agent/api/wait should NOT update last_seen (watcher pattern)."""
         import json as _json

@@ -15,7 +15,7 @@ While polling, the agent shows as "watching" in list_agents (the REST wait
 registers an active waiter but does not touch the heartbeat).
 
 Usage:
-    c3po-watch --agent-id <machine/project> [--poll-timeout 600]
+    c3po-watch --agent-id <machine/project> [--poll-timeout 240]
     c3po-watch --stop --agent-id <machine/project>
 
 Exit codes:
@@ -168,8 +168,10 @@ def watch(agent_id: str, poll_timeout: int) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--agent-id", required=True, help="Full agent ID (machine/project)")
-    parser.add_argument("--poll-timeout", type=int, default=600,
-                        help="Server-side wait per request, seconds (1-3600, default 600)")
+    # Under the 300s idle cutoff of the exe.dev edge in front of prod; a longer
+    # poll gets an edge 503 instead of a timeout (coordinator caps it at 240 too).
+    parser.add_argument("--poll-timeout", type=int, default=240,
+                        help="Server-side wait per request, seconds (1-3600, default 240)")
     parser.add_argument("--stop", action="store_true", help="Stop the running watcher for this agent")
     args = parser.parse_args()
 

@@ -592,6 +592,10 @@ async def api_pending(request):
         )
 
 
+# Stay under the exe.dev edge's 300s no-bytes cutoff (see api_wait docstring).
+REST_WAIT_MAX_SECONDS = 240
+
+
 @mcp.custom_route("/agent/api/wait", methods=["GET"])
 async def api_wait(request):
     """Long-poll for pending messages. Blocks until messages arrive or timeout.
@@ -606,7 +610,14 @@ async def api_wait(request):
     Auth: Bearer token + X-Machine-Name header (same as all /agent/* endpoints).
 
     Query params:
-        timeout: seconds to wait (1-3600, default 30)
+        timeout: seconds to wait (1-REST_WAIT_MAX_SECONDS, default 30). Larger
+            values are clamped, and the caller just gets "timeout" sooner and
+            re-polls. The cap exists because the exe.dev edge in front of prod
+            answers its own HTML 503 to any request that has sent no response
+            bytes for 300s (measured 2026-10-26: 300.1s via the edge vs 200 at
+            330s straight to nginx). This endpoint sends nothing until it
+            returns, unlike MCP wait_for_message, whose SSE stream pings every
+            15s.
 
     Returns:
         {"count": N, "messages": [...], "status": "received"} when messages arrive
@@ -648,12 +659,12 @@ async def api_wait(request):
             status_code=400,
         )
 
-    # Clamp timeout: 1–3600
+    # Clamp timeout: 1–REST_WAIT_MAX_SECONDS (see docstring)
     try:
         timeout = int(request.query_params.get("timeout", "30"))
     except (ValueError, TypeError):
         timeout = 30
-    timeout = min(3600, max(1, timeout))
+    timeout = min(REST_WAIT_MAX_SECONDS, max(1, timeout))
 
     with _active_waiters_lock:
         _active_waiters.add(agent_id)

@@ -169,7 +169,9 @@ Blocks until messages arrive or timeout expires.
 the watcher runs. (Use the MCP `wait_for_message` tool if you need heartbeats.)
 
 Query parameters:
-- `timeout`: seconds to wait, 1–3600 (default: 30)
+- `timeout`: seconds to wait, 1–240 (default: 30). Larger values are clamped:
+  the exe.dev edge in front of prod returns its own 503 for a request that has
+  sent no bytes for 300s.
 
 Response when messages arrive:
 ```json
@@ -268,7 +270,7 @@ immediately.
 - **One watcher per agent**: a pidfile (`$TMPDIR/c3po-watch-<agent>.pid`)
   makes a second instance exit 1. `c3po-watch --stop --agent-id <id>` kills
   the running one, and the SessionEnd hook does the same on exit.
-- **Orphan protection**: the watcher polls with a 600s server timeout and exits
+- **Orphan protection**: the watcher polls with a 240s server timeout and exits
   if its parent process goes away.
 - **Fallback**: hosts without background tasks, or a watcher that fails locally
   (exit 3), fall back to the `wait_for_message` loop.

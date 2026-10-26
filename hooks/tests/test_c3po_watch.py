@@ -97,7 +97,7 @@ class TestWatchLoop:
         assert f"C3PO_MESSAGES 1 pending for {AGENT_ID}" in result.stdout
         assert 'id=msg-1 from=other/agent preview="Hello there"' in result.stdout
         req = MockCoordinatorHandler.received_requests[0]
-        assert req["path"] == "/agent/api/wait?timeout=600"
+        assert req["path"] == "/agent/api/wait?timeout=240"
         assert req["headers"]["X-Machine-Name"] == AGENT_ID
 
     def test_reply_shows_reply_id_and_reply_to(self, mock_coordinator, tmp_path):
