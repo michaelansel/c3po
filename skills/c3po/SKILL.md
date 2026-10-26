@@ -104,7 +104,7 @@ Enter auto-listen mode: handle incoming messages from other agents with minimal 
 
 #### Start-up (both modes)
 
-1. Pre-approve permissions: run `python3 scripts/add-permissions.py` from the skill directory. It is idempotent and adds the c3po MCP tools plus the background-watcher Bash command to this project's `.claude/settings.local.json`. If it fails, log a warning and continue (the user will be prompted for permissions).
+1. Pre-approve permissions: from the project's working directory (do **not** `cd` into the skill directory), run `python3 <plugin_root>/skills/c3po/scripts/add-permissions.py "$PWD"`. It is idempotent and adds the c3po MCP tools plus the background-watcher Bash command to this project's `.claude/settings.local.json`. If it fails, log a warning and continue (the user will be prompted for permissions).
 2. Call `set_description` with a brief description of what this agent/project does (see behavioral defaults).
 3. Pick the mode. Use **background mode** only if ALL of these hold; otherwise use **loop mode**:
    - Your Bash tool supports `run_in_background`
