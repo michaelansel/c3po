@@ -246,9 +246,9 @@ class TestWaitForMessageCancelledError:
 
 
 @pytest.fixture
-def blob_manager(redis_client):
+def blob_manager(redis_client, tmp_path):
     """Create BlobManager with fakeredis."""
-    return BlobManager(redis_client)
+    return BlobManager(redis_client, str(tmp_path / "blobs"))
 
 
 class TestUploadBlobImpl:

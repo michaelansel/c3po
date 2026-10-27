@@ -21,19 +21,20 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import Middleware, MiddlewareContext
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
 logger = logging.getLogger("c3po.server")
 
 from coordinator.agents import AgentManager
 from coordinator.audit import AuditLogger
 from coordinator.auth import AuthManager
-from coordinator.blobs import BlobManager, MAX_BLOB_SIZE
+from coordinator.blobs import BlobManager, BlobStoreFull, BlobTooLarge, MAX_BLOB_SIZE
 from coordinator.errors import (
     agent_not_found,
     anonymous_onboarding_required,
     blob_not_found,
     blob_too_large,
+    blob_store_full,
     invalid_request,
     message_not_found,
     rate_limited,
@@ -845,13 +846,16 @@ async def api_blob_upload(request):
     Accepts multipart form data (file field) or raw body.
     Returns blob metadata including blob_id.
 
-    Size limit: MAX_BLOB_SIZE (5MB) of decoded content, enforced here with a
-    JSON 413 (BLOB_TOO_LARGE, reporting the actual size). nginx allows up to
-    5MB of request body on this route only (every other route is capped at
-    64KB), so in production a raw upload just over the limit gets this JSON
-    413, while a multipart body that pushes past 5MB with form overhead, or a
-    much larger body, gets nginx's own HTML 413 instead. c3po-upload checks
-    the file size first so users normally see neither.
+    The body is streamed to a temp file in the blob directory (see
+    BlobManager.begin_upload), never held in memory whole.
+
+    Size limit: MAX_BLOB_SIZE (5MB) of file content, enforced here with a JSON
+    413 (BLOB_TOO_LARGE, reporting how many bytes had been read when reading
+    stopped, not the full body size). In production nginx caps this route's
+    body at the same 5MB (every other route is capped at 64KB) and answers an
+    oversized body with its own HTML 413 first, so the JSON 413 is seen only
+    without nginx in front (dev, tests). c3po-upload checks the file size
+    before sending, so users normally see neither.
     """
     auth_result = _authenticate_rest_request(request)
     if not auth_result.get("valid"):
@@ -867,38 +871,46 @@ async def api_blob_upload(request):
 
     content_type = request.headers.get("content-type", "")
 
+    uploader = request.headers.get("x-machine-name", "rest-upload")
+    project = request.headers.get("x-project-name")
+    if project:
+        uploader = f"{uploader}/{project}"
+
+    # The body goes straight to a temp file in the blob directory, so a 5MB
+    # upload is never held in memory. Leaving the block without commit()
+    # removes the partial file.
     try:
-        if "multipart/form-data" in content_type:
-            form = await request.form()
-            upload = form.get("file")
-            if upload is None:
-                return JSONResponse(
-                    {"error": "Missing 'file' field in multipart form"},
-                    status_code=400,
-                )
-            content = await upload.read()
-            filename = form.get("filename", upload.filename or "upload")
-            mime_type = form.get("mime_type", upload.content_type or "application/octet-stream")
-        else:
-            content = await request.body()
-            filename = request.headers.get("x-filename", "upload")
-            mime_type = request.headers.get("x-mime-type", content_type or "application/octet-stream")
+        with blob_manager.begin_upload() as blob_upload:
+            if "multipart/form-data" in content_type:
+                form = await request.form()
+                upload = form.get("file")
+                if upload is None:
+                    return JSONResponse(
+                        {"error": "Missing 'file' field in multipart form"},
+                        status_code=400,
+                    )
+                while chunk := await upload.read(64 * 1024):
+                    blob_upload.write(chunk)
+                filename = form.get("filename", upload.filename or "upload")
+                mime_type = form.get("mime_type", upload.content_type or "application/octet-stream")
+            else:
+                async for chunk in request.stream():
+                    blob_upload.write(chunk)
+                filename = request.headers.get("x-filename", "upload")
+                mime_type = request.headers.get("x-mime-type", content_type or "application/octet-stream")
 
-        if not content:
-            return JSONResponse({"error": "Empty content"}, status_code=400)
-        if len(content) > MAX_BLOB_SIZE:
-            err = blob_too_large(len(content), MAX_BLOB_SIZE)
-            return JSONResponse(err.to_dict(), status_code=413)
+            if blob_upload.size == 0:
+                return JSONResponse({"error": "Empty content"}, status_code=400)
 
-        uploader = request.headers.get("x-machine-name", "rest-upload")
-        project = request.headers.get("x-project-name")
-        if project:
-            uploader = f"{uploader}/{project}"
-
-        meta = blob_manager.store_blob(content, filename, mime_type, uploader)
-        audit_logger.blob_upload(meta["blob_id"], filename, len(content), uploader, source="rest")
+            meta = blob_upload.commit(filename, mime_type, uploader)
+        audit_logger.blob_upload(meta["blob_id"], filename, meta["size"], uploader, source="rest")
         return SecureJSONResponse(meta, status_code=201)
 
+    except BlobTooLarge as e:
+        err = blob_too_large(e.size, MAX_BLOB_SIZE)
+        return JSONResponse(err.to_dict(), status_code=413)
+    except BlobStoreFull:
+        return JSONResponse(blob_store_full().to_dict(), status_code=507)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -925,17 +937,30 @@ async def api_blob_download(request):
     if not blob_id:
         return JSONResponse({"error": "Missing blob_id"}, status_code=400)
 
-    result = blob_manager.get_blob(blob_id)
-    if result is None:
+    found = blob_manager.get_blob_path(blob_id)
+    f = None
+    if found is not None:
+        try:
+            # Opened now, so a sweep that unlinks it mid-response can't break the stream
+            f = open(found[0], "rb")
+        except FileNotFoundError:
+            pass
+    if f is None:
         err = blob_not_found(blob_id)
         return JSONResponse(err.to_dict(), status_code=404)
 
-    content, metadata = result
+    metadata = found[1]
     audit_logger.blob_download(blob_id, client_ip, source="rest")
 
-    resp = Response(
-        content=content,
+    def _read_chunks():
+        with f:
+            while chunk := f.read(64 * 1024):
+                yield chunk
+
+    resp = StreamingResponse(
+        _read_chunks(),
         media_type=metadata.get("mime_type", "application/octet-stream"),
+        headers={"Content-Length": str(metadata["size"])},
     )
     filename = _safe_download_filename(metadata.get("filename", "download"))
     resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
@@ -2152,7 +2177,8 @@ def _upload_blob_impl(
 ) -> dict:
     """Store a blob and return metadata.
 
-    Raises ToolError if `content` exceeds MAX_BLOB_SIZE (defined in blobs.py).
+    Raises ToolError if `content` exceeds MAX_BLOB_SIZE (defined in blobs.py),
+    or if blob storage is at its total limit (BlobManager.store_limit).
     The returned metadata does not include the content itself; callers retrieve
     it separately via `_fetch_blob_impl`.
 
@@ -2163,7 +2189,11 @@ def _upload_blob_impl(
         err = blob_too_large(len(content), MAX_BLOB_SIZE)
         raise ToolError(f"{err.message} {err.suggestion}")
 
-    return blob_mgr.store_blob(content, filename, mime_type, uploader)
+    try:
+        return blob_mgr.store_blob(content, filename, mime_type, uploader)
+    except BlobStoreFull:
+        err = blob_store_full()
+        raise ToolError(f"{err.message} {err.suggestion}")
 
 
 def _fetch_blob_impl(
@@ -2192,13 +2222,13 @@ def _fetch_blob_impl(
     Raises ToolError if `blob_id` is not found.
     Audit logging is the caller's responsibility (done in the MCP tool wrapper).
     """
-    result = blob_mgr.get_blob(blob_id)
-    if result is None:
+    found = blob_mgr.get_blob_path(blob_id)
+    if found is None:
         err = blob_not_found(blob_id)
         raise ToolError(f"{err.message} {err.suggestion}")
 
-    content, metadata = result
-    size = len(content)
+    path, metadata = found
+    size = metadata["size"]
 
     # Determine whether to return inline
     return_inline = (
@@ -2207,6 +2237,12 @@ def _fetch_blob_impl(
     )
 
     if return_inline:
+        try:
+            with open(path, "rb") as f:
+                content = f.read()
+        except FileNotFoundError:  # swept since get_blob_path
+            err = blob_not_found(blob_id)
+            raise ToolError(f"{err.message} {err.suggestion}")
         try:
             text = content.decode("utf-8")
             return {**metadata, "content": text, "encoding": "utf-8"}

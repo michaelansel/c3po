@@ -36,8 +36,14 @@ ENV REDIS_URL=redis://localhost:6379
 ENV C3PO_HOST=0.0.0.0
 ENV C3PO_PORT=8420
 
+# Blob bytes are stored here (metadata stays in Redis); production mounts a
+# volume over it. Created in the image so a fresh named volume inherits the
+# c3po ownership.
+ENV C3PO_BLOB_DIR=/data/blobs
+
 # Create non-root user
-RUN addgroup --system c3po && adduser --system --ingroup c3po c3po
+RUN addgroup --system c3po && adduser --system --ingroup c3po c3po && \
+    mkdir -p /data/blobs && chown c3po:c3po /data/blobs
 USER c3po
 
 EXPOSE 8420

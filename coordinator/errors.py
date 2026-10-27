@@ -34,6 +34,7 @@ class ErrorCodes:
     FORBIDDEN = "FORBIDDEN"
     BLOB_NOT_FOUND = "BLOB_NOT_FOUND"
     BLOB_TOO_LARGE = "BLOB_TOO_LARGE"
+    BLOB_STORE_FULL = "BLOB_STORE_FULL"
     ANONYMOUS_ONBOARDING_REQUIRED = "ANONYMOUS_ONBOARDING_REQUIRED"
     MESSAGE_NOT_FOUND = "MESSAGE_NOT_FOUND"
 
@@ -140,6 +141,15 @@ def blob_too_large(size: int, max_size: int) -> C3POError:
         code=ErrorCodes.BLOB_TOO_LARGE,
         message=f"Blob size ({size:,} bytes) exceeds maximum ({max_size:,} bytes, {max_mb:g}MB).",
         suggestion="Reduce the file size or split it into smaller parts.",
+    )
+
+
+def blob_store_full() -> C3POError:
+    """Create error for the coordinator's blob storage being at its total limit."""
+    return C3POError(
+        code=ErrorCodes.BLOB_STORE_FULL,
+        message="The coordinator's blob storage is full.",
+        suggestion="Blobs expire after 24 hours; try again later, or send small content inline.",
     )
 
 

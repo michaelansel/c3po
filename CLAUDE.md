@@ -151,6 +151,9 @@ Production runs on the exe.dev VM `golf-pegasus` (`mcp.qerk.be` CNAMEs to `golf-
 - `c3po:acked:{agent_id}` — SET of acked message/reply IDs (24h TTL, cleared on compaction)
 - `c3po:api_keys` — Hash: `sha256(api_key)` → JSON key metadata (includes `bcrypt_hash` for verification)
 - `c3po:key_ids` — Hash: `key_id` → `sha256(api_key)` (reverse lookup)
+- `c3po:blob:{blob_id}` — Hash with a `metadata` field only (24h TTL). The blob bytes are a file of the same name under `C3PO_BLOB_DIR`; the key's expiry is what expires the blob, and `store_blob` sweeps orphaned files at most hourly
+
+**Blobs**: up to 5MB each (`MAX_BLOB_SIZE`), bytes on disk (the `blob_data` volume in production), metadata in Redis. nginx allows a 5MB body only on `POST /agent/api/blob`; every other route keeps the 64KB cap, which limits the MCP `upload_blob` tool to ~47KB of base64. Uploads and downloads stream to and from disk. The directory's total is capped by `C3PO_BLOB_STORE_LIMIT` (507 / `BLOB_STORE_FULL` when hit).
 
 ### Environment Variables
 
@@ -162,6 +165,8 @@ Production runs on the exe.dev VM `golf-pegasus` (`mcp.qerk.be` CNAMEs to `golf-
 - `C3PO_PROXY_BEARER_TOKEN` — Shared token for OAuth proxy (`/oauth/*` paths)
 - `C3PO_BEHIND_PROXY` — Set to `true` to trust X-Forwarded-For/X-Real-IP headers
 - `C3PO_CA_CERT` — Path to custom CA certificate for HTTPS (hooks)
+- `C3PO_BLOB_DIR` — Directory for blob bytes (default: `$TMPDIR/c3po-blobs`; the image sets `/data/blobs`)
+- `C3PO_BLOB_STORE_LIMIT` — Total bytes the blob directory may hold (default: 1GiB)
 - `C3PO_MACHINE_NAME` / `C3PO_SESSION_ID` — Plugin overrides
 - `CLAUDE_PROJECT_NAME` — Project name override (useful in containers where cwd is always `/workspace`)
 

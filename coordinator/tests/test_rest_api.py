@@ -1,5 +1,7 @@
 """Tests for REST API endpoints (/api/health, /agent/api/*, /admin/api/*)."""
 
+import os
+
 import fakeredis
 import pytest
 import pytest_asyncio
@@ -32,7 +34,7 @@ def message_manager(redis_client):
 
 
 @pytest.fixture
-def mcp_app(redis_client, agent_manager, message_manager, monkeypatch):
+def mcp_app(redis_client, agent_manager, message_manager, monkeypatch, tmp_path):
     """Create the MCP app with test Redis client."""
     # Disable auth for REST API tests (tests exercise endpoint logic, not auth)
     monkeypatch.delenv("C3PO_SERVER_SECRET", raising=False)
@@ -48,7 +50,7 @@ def mcp_app(redis_client, agent_manager, message_manager, monkeypatch):
     monkeypatch.setattr(server_module, "auth_manager", AuthManager(redis_client))
     monkeypatch.setattr(server_module, "rate_limiter", RateLimiter(redis_client))
     monkeypatch.setattr(server_module, "audit_logger", AuditLogger(redis_client))
-    monkeypatch.setattr(server_module, "blob_manager", BlobManager(redis_client))
+    monkeypatch.setattr(server_module, "blob_manager", BlobManager(redis_client, str(tmp_path / "blobs")))
 
     return server_module.mcp.http_app()
 
@@ -685,8 +687,8 @@ class TestBlobUploadEndpoint:
         assert response.status_code == 400
 
     @pytest.mark.asyncio
-    async def test_upload_too_large(self, client):
-        """Should reject upload over 5MB."""
+    async def test_upload_too_large(self, client, tmp_path):
+        """Should reject upload over 5MB, leaving no partial file behind."""
         response = await client.post(
             "/agent/api/blob",
             content=b"x" * (5 * 1024 * 1024 + 1),
@@ -696,8 +698,42 @@ class TestBlobUploadEndpoint:
         assert response.status_code == 413
         data = response.json()
         assert data["code"] == "BLOB_TOO_LARGE"
-        # Reports the real size, not 0
-        assert "5,242,881 bytes" in data["error"]
+        # Reports a real size past the limit, not 0
+        assert "Blob size (0 bytes)" not in data["error"]
+        assert "exceeds maximum (5,242,880 bytes" in data["error"]
+        assert os.listdir(tmp_path / "blobs") == []
+
+    @pytest.mark.asyncio
+    async def test_upload_streamed_in_chunks(self, client):
+        """A chunked body is stored whole."""
+        async def body():
+            for _ in range(4):
+                yield b"y" * 100_000
+
+        response = await client.post("/agent/api/blob", content=body(), headers={"X-Filename": "c.bin"})
+        assert response.status_code == 201
+        blob_id = response.json()["blob_id"]
+        download = await client.get(f"/agent/api/blob/{blob_id}")
+        assert download.content == b"y" * 400_000
+        assert download.headers["content-length"] == "400000"
+
+    @pytest.mark.asyncio
+    async def test_upload_multipart(self, client):
+        response = await client.post(
+            "/agent/api/blob",
+            files={"file": ("m.txt", b"multi part", "text/plain")},
+        )
+        assert response.status_code == 201
+        meta = response.json()
+        assert meta["filename"] == "m.txt"
+        assert meta["mime_type"] == "text/plain"
+        download = await client.get(f"/agent/api/blob/{meta['blob_id']}")
+        assert download.content == b"multi part"
+
+    @pytest.mark.asyncio
+    async def test_download_malformed_id_is_404(self, client):
+        response = await client.get("/agent/api/blob/..%2F..%2Fetc%2Fpasswd")
+        assert response.status_code == 404
 
 
 class TestBlobDownloadEndpoint:

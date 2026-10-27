@@ -9,6 +9,10 @@ services:
       - C3PO_ADMIN_KEY=${C3PO_ADMIN_KEY}
       - C3PO_PROXY_BEARER_TOKEN=${C3PO_PROXY_BEARER_TOKEN}
       - C3PO_BEHIND_PROXY=true
+    volumes:
+      # Blob bytes (metadata is in Redis). Capped at C3PO_BLOB_STORE_LIMIT
+      # (default 1GiB) by the coordinator; files expire with their metadata.
+      - blob_data:/data/blobs
     depends_on:
       redis:
         condition: service_started
@@ -16,7 +20,8 @@ services:
     stop_grace_period: 15s
     read_only: true
     tmpfs:
-      - /tmp:size=10M
+      # Multipart uploads spool here (raw uploads stream straight to /data/blobs)
+      - /tmp:size=16M
     cap_drop:
       - ALL
     security_opt:
@@ -25,8 +30,7 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          # Room for a few concurrent 5MB blob uploads/downloads on top of the baseline
-          memory: 256M
+          memory: 128M
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/api/health')"]
       interval: 30s
@@ -96,7 +100,7 @@ services:
       redis-server
       --appendonly yes
       --requirepass ${REDIS_PASSWORD}
-      --maxmemory 128mb
+      --maxmemory 48mb
       --maxmemory-policy volatile-lru
     restart: unless-stopped
     read_only: true
@@ -113,12 +117,12 @@ services:
       resources:
         limits:
           cpus: "0.5"
-          # Above --maxmemory, leaving headroom for the AOF rewrite fork. With
-          # volatile-lru, Redis evicts only keys that have a TTL (blobs, inboxes,
-          # message archives, rate-limit windows) and never agents or API keys;
-          # once nothing evictable is left, writes fail with an OOM error
-          # instead of the container being killed.
-          memory: 256M
+          # --maxmemory sits below this, leaving headroom for the AOF rewrite
+          # fork, so Redis refuses writes rather than being OOM-killed (a
+          # crash-loop here has lost API keys before). With volatile-lru it
+          # evicts only keys that have a TTL (inboxes, message archives,
+          # rate-limit windows, blob metadata), never agents or API keys.
+          memory: 64M
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
@@ -128,3 +132,4 @@ services:
 volumes:
   redis_data:
   auth_proxy_data:
+  blob_data:

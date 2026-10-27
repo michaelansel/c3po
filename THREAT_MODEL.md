@@ -302,6 +302,10 @@ record exists so the same items are not repeatedly re-reported; future scans sho
   (derived from `MessageManager` prefix constants), so messages don't outlive removal.
 - **Blob `Content-Disposition` filename** — reduced to a safe basename at the sink (path-traversal on the
   download client).
+- **Blob storage on disk** — `blob_id` names a file under `C3PO_BLOB_DIR`, so it must match
+  `^blob-[0-9a-f]{16}$` before any filesystem access (`BLOB_ID_RE` in `coordinator/blobs.py`). The
+  directory's total size is capped (`C3PO_BLOB_STORE_LIMIT`, default 1GiB) so authenticated uploads
+  can't fill the host disk; nginx allows a 5MB body only on `POST /agent/api/blob` and 64KB elsewhere.
 
 ### Optional / not doing (near-zero value in a single trust domain)
 - Webhook SSRF egress filtering — a trusted agent pointing a webhook at an internal address is a trusted
