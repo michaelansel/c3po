@@ -694,6 +694,10 @@ class TestBlobUploadEndpoint:
         )
 
         assert response.status_code == 413
+        data = response.json()
+        assert data["code"] == "BLOB_TOO_LARGE"
+        # Reports the real size, not 0
+        assert "5,242,881 bytes" in data["error"]
 
 
 class TestBlobDownloadEndpoint:

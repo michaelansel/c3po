@@ -29,6 +29,7 @@ trap cleanup EXIT
 cat >"$tmp/stubs.conf" <<'EOF'
 server {
     listen 127.0.0.1:8420;
+    client_max_body_size 0;  # the stub takes any body; the template's limits are under test
     location / { return 200 "coordinator uri=$request_uri real_ip=$http_x_real_ip xff=$http_x_forwarded_for auth_path=$http_x_c3po_auth_path end\n"; }
 }
 server {
@@ -109,6 +110,20 @@ check 401 "secret without the dot"        /agent/mcp -H "Authorization: Bearer $
 body_has "auth_path=/agent"   "agent mcp gets the routing hint"   /agent/mcp -H "$AGENT"
 body_has "uri=/mcp"           "agent mcp is rewritten to /mcp"    /agent/mcp -H "$AGENT"
 body_has "auth_path= end"        "admin: client routing hint stripped" /admin/api/keys -H "$AGENT" -H "X-C3PO-Auth-Path: /agent"
+
+echo "--- request body limits: 5m on the blob upload route, 64k everywhere else"
+"$runtime" exec "$current" sh -c 'head -c 4194304 /dev/zero > /tmp/4m; head -c 5767168 /dev/zero > /tmp/5500k; head -c 102400 /dev/zero > /tmp/100k'
+check 200 "blob upload, 4MB"              /agent/api/blob -H "$AGENT" --data-binary @/tmp/4m
+check 413 "blob upload, 5.5MB"            /agent/api/blob -H "$AGENT" --data-binary @/tmp/5500k
+check 401 "blob upload, 4MB, no auth"     /agent/api/blob --data-binary @/tmp/4m
+check 413 "other agent route, 100KB"      /agent/api/register -H "$AGENT" --data-binary @/tmp/100k
+check 413 "agent mcp, 100KB"              /agent/mcp -H "$AGENT" --data-binary @/tmp/100k
+check 200 "blob download still on /agent/" /agent/api/blob/blob-0123456789abcdef -H "$AGENT"
+check 401 "blob download, no auth"        /agent/api/blob/blob-0123456789abcdef
+body_has "auth_path=/agent"   "blob upload gets the routing hint" /agent/api/blob -H "$AGENT" -d x
+"$runtime" exec "$current" sh -c '! curl -s -H "Authorization: Bearer x" --data-binary @/tmp/5500k http://127.0.0.1:80/agent/api/blob | grep -q "nginx/"' \
+    && echo "ok    413 page does not name the nginx version" \
+    || { echo "FAIL  413 page names the nginx version"; fail=1; }
 
 echo "--- client IP: real caller from the edge's XFF, forged entries ignored"
 body_has "real_ip=203.0.113.9 xff=203.0.113.9 " "edge-appended client is used" /agent/api/pending -H "$AGENT" -H "$ELSEWHERE"

@@ -20,6 +20,14 @@ if [ ! -f "$FILE_PATH" ]; then
     exit 1
 fi
 
+# Must match MAX_BLOB_SIZE in coordinator/blobs.py
+MAX_BLOB_SIZE=$((5 * 1024 * 1024))
+FILE_SIZE=$(wc -c < "$FILE_PATH" | tr -d ' ')
+if [ "$FILE_SIZE" -gt "$MAX_BLOB_SIZE" ]; then
+    echo "Error: $FILE_PATH is $FILE_SIZE bytes; the c3po blob limit is $MAX_BLOB_SIZE bytes (5MB)." >&2
+    exit 1
+fi
+
 # Read credentials
 CREDS_FILE="$HOME/.claude/c3po-credentials.json"
 if [ ! -f "$CREDS_FILE" ]; then
@@ -70,6 +78,11 @@ BODY=$(echo "$RESPONSE" | sed '$d')
 if [ "$HTTP_CODE" = "201" ]; then
     BLOB_ID=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['blob_id'])")
     echo "$BLOB_ID"
+elif [ "$HTTP_CODE" = "413" ]; then
+    # The coordinator answers with JSON; nginx (body over its limit) with HTML.
+    MSG=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['error'])" 2>/dev/null || true)
+    echo "Error: Upload rejected as too large (HTTP 413): ${MSG:-the c3po blob limit is 5MB}" >&2
+    exit 1
 else
     echo "Error: Upload failed (HTTP $HTTP_CODE)" >&2
     echo "$BODY" >&2

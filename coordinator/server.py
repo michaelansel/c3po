@@ -359,7 +359,9 @@ mcp = FastMCP(
         "- Download: c3po-download <blob_id> [output_path]\n"
         "- Find scripts: `which c3po-upload` OR ~/.claude/plugins/cache/michaelansel/c3po/*/scripts/\n\n"
         "Only use upload_blob/fetch_blob MCP tools when scripts are unavailable (set scripts_unavailable=True).\n"
-        "fetch_blob returns inline content for blobs <=10KB; set inline_large=True for up to 100KB."
+        "Size limits: c3po-upload accepts files up to 5MB. upload_blob is limited to about 47KB of "
+        "file (base64 in a 64KB request). fetch_blob returns inline content for blobs <=10KB; set "
+        "inline_large=True for up to 100KB, and use c3po-download for anything larger."
     ),
 )
 mcp.add_middleware(AgentIdentityMiddleware())
@@ -842,6 +844,14 @@ async def api_blob_upload(request):
 
     Accepts multipart form data (file field) or raw body.
     Returns blob metadata including blob_id.
+
+    Size limit: MAX_BLOB_SIZE (5MB) of decoded content, enforced here with a
+    JSON 413 (BLOB_TOO_LARGE, reporting the actual size). nginx allows up to
+    5MB of request body on this route only (every other route is capped at
+    64KB), so in production a raw upload just over the limit gets this JSON
+    413, while a multipart body that pushes past 5MB with form overhead, or a
+    much larger body, gets nginx's own HTML 413 instead. c3po-upload checks
+    the file size first so users normally see neither.
     """
     auth_result = _authenticate_rest_request(request)
     if not auth_result.get("valid"):
@@ -876,6 +886,9 @@ async def api_blob_upload(request):
 
         if not content:
             return JSONResponse({"error": "Empty content"}, status_code=400)
+        if len(content) > MAX_BLOB_SIZE:
+            err = blob_too_large(len(content), MAX_BLOB_SIZE)
+            return JSONResponse(err.to_dict(), status_code=413)
 
         uploader = request.headers.get("x-machine-name", "rest-upload")
         project = request.headers.get("x-project-name")
@@ -886,9 +899,6 @@ async def api_blob_upload(request):
         audit_logger.blob_upload(meta["blob_id"], filename, len(content), uploader, source="rest")
         return SecureJSONResponse(meta, status_code=201)
 
-    except ValueError as e:
-        err = blob_too_large(0, MAX_BLOB_SIZE)
-        return JSONResponse(err.to_dict(), status_code=413)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -2424,6 +2434,10 @@ def upload_blob(
     Set scripts_unavailable=True if you've confirmed you don't have shell access
     (e.g. Claude Desktop or claude.ai without a terminal).
 
+    Size: blobs may be up to 5MB, but this tool's request goes through the
+    64KB body limit on /agent/mcp, so in practice it carries about 47KB of
+    base64-encoded file (or ~60KB of text). Use c3po-upload for larger files.
+
     Args:
         ctx: MCP context (injected automatically)
         content: The content to store (text or base64-encoded binary)
@@ -2482,6 +2496,8 @@ def fetch_blob(
     For small blobs (<=10KB), content is returned inline.
     For larger blobs (10KB–100KB), use the download script — or set inline_large=True to read inline anyway.
     For blobs >100KB, use the download script (hard cap, inline_large is ignored).
+    These are limits on returning content into context, not on blob size:
+    blobs themselves may be up to 5MB.
 
       c3po-download <blob_id> [output_path]
       # Script location: which c3po-download OR ~/.claude/plugins/cache/michaelansel/c3po/*/scripts/c3po-download

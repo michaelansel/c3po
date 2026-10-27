@@ -25,7 +25,8 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 128M
+          # Room for a few concurrent 5MB blob uploads/downloads on top of the baseline
+          memory: 256M
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/api/health')"]
       interval: 30s
@@ -95,6 +96,8 @@ services:
       redis-server
       --appendonly yes
       --requirepass ${REDIS_PASSWORD}
+      --maxmemory 128mb
+      --maxmemory-policy volatile-lru
     restart: unless-stopped
     read_only: true
     tmpfs:
@@ -110,7 +113,12 @@ services:
       resources:
         limits:
           cpus: "0.5"
-          memory: 64M
+          # Above --maxmemory, leaving headroom for the AOF rewrite fork. With
+          # volatile-lru, Redis evicts only keys that have a TTL (blobs, inboxes,
+          # message archives, rate-limit windows) and never agents or API keys;
+          # once nothing evictable is left, writes fail with an OOM error
+          # instead of the container being killed.
+          memory: 256M
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
