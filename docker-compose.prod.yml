@@ -30,7 +30,8 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 128M
+          # Baseline is ~95MiB (2026-10-27); /tmp tmpfs (multipart spooling) counts against this too
+          memory: 192M
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/api/health')"]
       interval: 30s
