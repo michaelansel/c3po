@@ -103,11 +103,15 @@ _active_waiters: set[str] = set()
 _active_waiters_lock = threading.Lock()
 
 
+# Long enough for a cold-starting serverless receiver to finish before answering.
+WEBHOOK_TIMEOUT_SECONDS = 10.0
+
+
 def _post_webhook(agent_id: str, webhook_url: str, webhook_secret: str) -> bool:
     """POST one webhook notification; True if the receiver answered 2xx.
 
     Posts {"agent_id": "recipient-id"} with HMAC-SHA256 signature in the
-    X-C3PO-Signature header, 5s timeout. A non-2xx status counts as failed, so
+    X-C3PO-Signature header, WEBHOOK_TIMEOUT_SECONDS timeout. A non-2xx status counts as failed, so
     the message stays unacked and the redelivery sweep pushes it again.
     """
     try:
@@ -118,7 +122,7 @@ def _post_webhook(agent_id: str, webhook_url: str, webhook_secret: str) -> bool:
             hashlib.sha256
         ).hexdigest()
 
-        with httpx.Client(timeout=5.0) as client:
+        with httpx.Client(timeout=WEBHOOK_TIMEOUT_SECONDS) as client:
             response = client.post(
                 webhook_url,
                 content=body,
@@ -1562,7 +1566,7 @@ def _register_webhook_impl(
     Only unregister_webhook or removing the agent deletes it. While it exists the
     agent is "watching" when offline and its ID is never reassigned.
 
-    Delivery is at-least-once: a push (5-second timeout, 2xx = success) when a
+    Delivery is at-least-once: a push (10-second timeout, 2xx = success) when a
     message or reply arrives, then the redelivery sweep pushes again with backoff
     while any message stays unacked. Receivers must handle repeats.
 
