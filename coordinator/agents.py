@@ -116,19 +116,14 @@ return 0
             if is_online:
                 agent_id, raw = self._resolve_collision(agent_id)
 
-        # Create new or update offline agent. Taking over an offline entry
-        # keeps its description and webhook: a webhook agent is "watching"
-        # while offline, and its next MCP call must not silently disarm it.
-        # (raw is the entry being replaced, which after a collision is the
-        # suffixed ID's own entry, not the original.)
-        previous = self._decode(raw) or {}
+        # Create new or update offline agent
         agent_data = {
             "id": agent_id,
             "session_id": session_id,
             "capabilities": capabilities or [],
-            "description": previous.get("description", ""),
-            "webhook_url": previous.get("webhook_url", ""),
-            "webhook_secret": previous.get("webhook_secret", ""),
+            "description": "",
+            "webhook_url": "",
+            "webhook_secret": "",
             "registered_at": now,
             "last_seen": now,
         }

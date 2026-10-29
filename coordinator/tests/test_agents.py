@@ -528,39 +528,6 @@ class TestSetWebhook:
         assert result["webhook_url"] == ""
         assert result["webhook_secret"] == ""
 
-    @pytest.mark.parametrize("session_id", [None, "session-2"])
-    def test_reregistering_offline_agent_keeps_webhook(self, agent_manager, redis_client, session_id):
-        """An offline (watching) agent's next registration must not disarm its webhook."""
-        agent_manager.register_agent("agent-a", session_id="session-1")
-        agent_manager.set_webhook("agent-a", "https://example.com/hook", "secret123")
-        agent_manager.set_description("agent-a", "does things")
-
-        old_time = (
-            datetime.now(timezone.utc) - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + 10)
-        ).isoformat()
-        data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, "agent-a"))
-        data["last_seen"] = old_time
-        redis_client.hset(agent_manager.AGENTS_KEY, "agent-a", json.dumps(data))
-        assert agent_manager.get_agent("agent-a")["status"] == "watching"
-
-        result = agent_manager.register_agent("agent-a", session_id=session_id)
-
-        assert result["id"] == "agent-a"
-        assert result["status"] == "online"
-        assert result["webhook_url"] == "https://example.com/hook"
-        assert result["webhook_secret"] == "secret123"
-        assert result["description"] == "does things"
-
-    def test_collision_suffix_does_not_inherit_webhook(self, agent_manager):
-        """A colliding session gets a fresh -2 entry, not the original's webhook."""
-        agent_manager.register_agent("agent-a", session_id="session-1")
-        agent_manager.set_webhook("agent-a", "https://example.com/hook", "secret123")
-
-        second = agent_manager.register_agent("agent-a", session_id="session-2")
-
-        assert second["id"] == "agent-a-2"
-        assert second["webhook_url"] == ""
-
 
 class TestClearWebhook:
     """Tests for clearing webhook configuration."""
