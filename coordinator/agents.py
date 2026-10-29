@@ -17,6 +17,11 @@ class AgentManager:
     """Manages agent registration and status using Redis."""
 
     AGENTS_KEY = "c3po:agents"
+    # Webhook subscriptions, agent_id -> {"url", "secret"}. Kept out of the
+    # session-shaped AGENTS_KEY entry so registration and heartbeats can never
+    # rewrite or drop a subscription.
+    WEBHOOKS_KEY = "c3po:webhooks"
+    WEBHOOK_STATE_PREFIX = "c3po:webhook_state:"
     AGENT_TIMEOUT_SECONDS = 900  # Consider agent offline after 15 minutes
     REGISTER_MAX_ATTEMPTS = 50
 
@@ -100,20 +105,23 @@ return 0
         existing = self._decode(raw)
 
         if existing:
-            is_online = self._is_online(existing)
+            # A webhook agent is a durable mailbox (e.g. a serverless receiver
+            # that only exists while handling a call), so it is present even
+            # when last_seen is old: never replaced as a dead session.
+            is_present = self._is_present(agent_id, existing)
 
             # Case 1: Same session reconnecting - update heartbeat
-            # Case 2: No session_id provided, agent is online - assume MCP call
+            # Case 2: No session_id provided, agent is present - assume MCP call
             # from the existing session (MCP config can't include dynamic session ID)
             same_session = session_id and existing.get("session_id") == session_id
-            if same_session or (not session_id and is_online):
+            if same_session or (not session_id and is_present):
                 existing["last_seen"] = now
                 if capabilities is not None:
                     existing["capabilities"] = capabilities
                 return agent_id, raw, existing, "heartbeat"
 
-            # Case 3: Different session_id AND agent is online - collision!
-            if is_online:
+            # Case 3: Different session_id AND agent is present - collision!
+            if is_present:
                 agent_id, raw = self._resolve_collision(agent_id)
 
         # Create new or update offline agent
@@ -122,8 +130,6 @@ return 0
             "session_id": session_id,
             "capabilities": capabilities or [],
             "description": "",
-            "webhook_url": "",
-            "webhook_secret": "",
             "registered_at": now,
             "last_seen": now,
         }
@@ -181,22 +187,33 @@ return 0
         seconds_since = (datetime.now(timezone.utc) - last_seen).total_seconds()
         return seconds_since < self.AGENT_TIMEOUT_SECONDS
 
-    def _add_status(self, agent_data: dict) -> dict:
-        """Add status field to agent data based on last_seen.
+    def _is_present(self, agent_id: str, agent_data: dict) -> bool:
+        """True if the ID is in use: online, or holding a webhook subscription."""
+        return self._is_online(agent_data) or self.get_webhook(agent_id) is not None
+
+    _NO_WEBHOOK_LOOKUP = object()
+
+    def _add_status(self, agent_data: dict, webhook=_NO_WEBHOOK_LOOKUP) -> dict:
+        """Add status and webhook fields to agent data.
+
+        webhook_url/webhook_secret come from WEBHOOKS_KEY ("" when there is no
+        subscription); any copy left in the agent entry is ignored. Pass
+        `webhook` (dict or None) when the caller already fetched it.
 
         Args:
             agent_data: Agent data dict with last_seen field
 
         Returns:
-            Agent data with status field added
+            Agent data with status, webhook_url and webhook_secret
         """
-        now = datetime.now(timezone.utc)
-        last_seen = datetime.fromisoformat(agent_data["last_seen"])
-        seconds_since = (now - last_seen).total_seconds()
+        if webhook is self._NO_WEBHOOK_LOOKUP:
+            webhook = self.get_webhook(agent_data["id"])
+        agent_data["webhook_url"] = webhook["url"] if webhook else ""
+        agent_data["webhook_secret"] = webhook["secret"] if webhook else ""
 
-        if seconds_since < self.AGENT_TIMEOUT_SECONDS:
+        if self._is_online(agent_data):
             agent_data["status"] = "online"
-        elif agent_data.get("webhook_url"):
+        elif webhook:
             agent_data["status"] = "watching"
         else:
             agent_data["status"] = "offline"
@@ -207,7 +224,8 @@ return 0
         """Find next available agent ID when collision occurs.
 
         Tries base_id-2, base_id-3, etc. until an available ID is found.
-        An ID is available if it doesn't exist or the existing agent is offline.
+        An ID is available if it doesn't exist or the existing agent is neither
+        online nor holding a webhook subscription.
 
         Args:
             base_id: The original agent ID that collided
@@ -223,7 +241,7 @@ return 0
             existing = self._decode(raw)
 
             # Free, or held by an offline agent (can reuse ID)
-            if existing is None or not self._is_online(existing):
+            if existing is None or not self._is_present(candidate, existing):
                 return candidate, raw
 
             counter += 1
@@ -235,33 +253,12 @@ return 0
             List of agent dicts with status field added
         """
         agents_raw = self.redis.hgetall(self.AGENTS_KEY)
-        agents = []
+        webhooks = self.list_webhooks()
 
-        now = datetime.now(timezone.utc)
-
-        for agent_id, data in agents_raw.items():
-            # Handle bytes from Redis
-            if isinstance(agent_id, bytes):
-                agent_id = agent_id.decode()
-            if isinstance(data, bytes):
-                data = data.decode()
-
-            agent_data = json.loads(data)
-
-            # Calculate status based on last_seen
-            last_seen = datetime.fromisoformat(agent_data["last_seen"])
-            seconds_since = (now - last_seen).total_seconds()
-
-            if seconds_since < self.AGENT_TIMEOUT_SECONDS:
-                agent_data["status"] = "online"
-            elif agent_data.get("webhook_url"):
-                agent_data["status"] = "watching"
-            else:
-                agent_data["status"] = "offline"
-
-            agents.append(agent_data)
-
-        return agents
+        return [
+            self._add_status(agent_data, webhooks.get(agent_data["id"]))
+            for agent_data in map(self._decode, agents_raw.values())
+        ]
 
     def get_agent(self, agent_id: str) -> Optional[dict]:
         """Get a single agent by ID.
@@ -291,7 +288,7 @@ return 0
         old_time = (now - timedelta(seconds=self.AGENT_TIMEOUT_SECONDS + 1)).isoformat()
         agent_data = {
             "id": agent_id, "session_id": None, "capabilities": [],
-            "description": "", "webhook_url": "", "webhook_secret": "",
+            "description": "",
             "registered_at": now.isoformat(), "last_seen": old_time,
         }
         self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(agent_data))
@@ -327,6 +324,8 @@ return 0
             True if agent was removed, False if not found
         """
         result = self.redis.hdel(self.AGENTS_KEY, agent_id)
+        if result > 0:
+            self._delete_webhooks([agent_id])
         if result > 0 and cleanup_keys:
             self.redis.delete(
                 f"{MessageManager.INBOX_PREFIX}{agent_id}",
@@ -376,11 +375,10 @@ return 0
         if not agent_data:
             raise KeyError(f"Agent {agent_id} not found")
 
-        agent_data["webhook_url"] = webhook_url
-        agent_data["webhook_secret"] = webhook_secret
-        self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(agent_data))
+        webhook = {"url": webhook_url, "secret": webhook_secret}
+        self.redis.hset(self.WEBHOOKS_KEY, agent_id, json.dumps(webhook))
         logger.info("agent_webhook_set agent=%s url=%s", agent_id, webhook_url)
-        return self._add_status(agent_data)
+        return self._add_status(agent_data, webhook)
 
     def clear_webhook(self, agent_id: str) -> dict:
         """Remove webhook configuration for an agent.
@@ -398,11 +396,51 @@ return 0
         if not agent_data:
             raise KeyError(f"Agent {agent_id} not found")
 
-        agent_data["webhook_url"] = ""
-        agent_data["webhook_secret"] = ""
-        self.redis.hset(self.AGENTS_KEY, agent_id, json.dumps(agent_data))
+        self._delete_webhooks([agent_id])
         logger.info("agent_webhook_cleared agent=%s", agent_id)
-        return self._add_status(agent_data)
+        return self._add_status(agent_data, None)
+
+    def get_webhook(self, agent_id: str) -> Optional[dict]:
+        """Return the agent's subscription as {"url", "secret"}, or None."""
+        return self._decode(self.redis.hget(self.WEBHOOKS_KEY, agent_id))
+
+    def list_webhooks(self) -> dict[str, dict]:
+        """Return every subscription, keyed by agent ID."""
+        return {
+            (k.decode() if isinstance(k, bytes) else k): self._decode(v)
+            for k, v in self.redis.hgetall(self.WEBHOOKS_KEY).items()
+        }
+
+    def _delete_webhooks(self, agent_ids: list[str]) -> None:
+        """Drop subscriptions and their redelivery state."""
+        self.redis.hdel(self.WEBHOOKS_KEY, *agent_ids)
+        self.redis.delete(*(f"{self.WEBHOOK_STATE_PREFIX}{a}" for a in agent_ids))
+
+    def migrate_webhooks(self) -> int:
+        """Move webhook fields left in agent entries into WEBHOOKS_KEY.
+
+        Before subscriptions had their own hash they lived in the agent entry.
+        Run at startup; idempotent. An existing subscription wins over a stale
+        entry copy. Returns the number of agent entries rewritten.
+        """
+        moved = 0
+        for raw in self.redis.hgetall(self.AGENTS_KEY).values():
+            agent_data = self._decode(raw)
+            if "webhook_url" not in agent_data and "webhook_secret" not in agent_data:
+                continue
+            url = agent_data.pop("webhook_url", "")
+            secret = agent_data.pop("webhook_secret", "")
+            if url and secret:
+                self.redis.hsetnx(
+                    self.WEBHOOKS_KEY, agent_data["id"],
+                    json.dumps({"url": url, "secret": secret}),
+                )
+            # Compare-and-set, so a registration racing startup isn't lost.
+            if self._set_if_unchanged(agent_data["id"], raw, agent_data):
+                moved += 1
+        if moved:
+            logger.info("webhooks_migrated agents=%d", moved)
+        return moved
 
     def remove_agents_by_pattern(self, pattern: str, cleanup_keys: bool = True) -> list[str]:
         """Remove all agents matching an fnmatch glob pattern.
@@ -426,8 +464,9 @@ return 0
         if not removed:
             return []
 
-        # Remove from agents hash
+        # Remove from agents hash, with their subscriptions
         self.redis.hdel(self.AGENTS_KEY, *removed)
+        self._delete_webhooks(removed)
 
         # Clean up associated Redis keys
         if cleanup_keys:
@@ -467,8 +506,9 @@ return 0
         if not existing:
             return []
 
-        # Remove from agents hash
+        # Remove from agents hash, with their subscriptions
         self.redis.hdel(self.AGENTS_KEY, *existing)
+        self._delete_webhooks(existing)
 
         # Clean up associated Redis keys
         if cleanup_keys:

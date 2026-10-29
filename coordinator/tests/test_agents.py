@@ -510,16 +510,15 @@ class TestSetWebhook:
             agent_manager.set_webhook("nonexistent", "https://example.com", "secret")
 
     def test_webhook_persists_in_redis(self, agent_manager, redis_client):
-        """Webhook config should persist in Redis."""
+        """Webhook config should persist in its own hash, not the agent entry."""
         agent_manager.register_agent("agent-a")
         agent_manager.set_webhook("agent-a", "https://example.com/hook", "secret123")
 
         # Read directly from Redis
-        data = redis_client.hget("c3po:agents", "agent-a")
-        agent_data = json.loads(data)
-
-        assert agent_data["webhook_url"] == "https://example.com/hook"
-        assert agent_data["webhook_secret"] == "secret123"
+        webhook = json.loads(redis_client.hget("c3po:webhooks", "agent-a"))
+        assert webhook == {"url": "https://example.com/hook", "secret": "secret123"}
+        agent_data = json.loads(redis_client.hget("c3po:agents", "agent-a"))
+        assert "webhook_url" not in agent_data
 
     def test_new_agents_have_empty_webhook_fields(self, agent_manager):
         """Newly registered agents should have empty webhook fields."""
@@ -527,6 +526,154 @@ class TestSetWebhook:
 
         assert result["webhook_url"] == ""
         assert result["webhook_secret"] == ""
+
+
+def _age_agent(agent_manager, redis_client, agent_id, seconds_past_timeout=10):
+    """Push an agent's last_seen back past the online window."""
+    data = json.loads(redis_client.hget(agent_manager.AGENTS_KEY, agent_id))
+    data["last_seen"] = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=agent_manager.AGENT_TIMEOUT_SECONDS + seconds_past_timeout)
+    ).isoformat()
+    redis_client.hset(agent_manager.AGENTS_KEY, agent_id, json.dumps(data))
+
+
+class TestWebhookSubscriptionDurability:
+    """A webhook subscription is a durable mailbox: registration never drops it."""
+
+    def test_offline_webhook_agent_call_is_heartbeat_and_keeps_webhook(self, agent_manager, redis_client):
+        """Regression: the Cloud Function's first call after >15 min idle wiped its webhook."""
+        agent_manager.register_agent("app/member")
+        agent_manager.set_webhook("app/member", "https://example.com/hook", "secret-at-least-16ch")
+        first = agent_manager.get_agent("app/member")
+        _age_agent(agent_manager, redis_client, "app/member")
+        assert agent_manager.get_agent("app/member")["status"] == "watching"
+
+        # What the middleware does on the next MCP call (no X-Session-ID)
+        result = agent_manager.register_agent("app/member", None)
+
+        assert result["id"] == "app/member"
+        assert result["status"] == "online"
+        assert result["webhook_url"] == "https://example.com/hook"
+        assert result["registered_at"] == first["registered_at"]  # heartbeat, not a takeover
+
+    def test_new_session_cannot_take_over_webhook_agent(self, agent_manager, redis_client):
+        """A different session claiming an offline webhook agent's ID gets a suffix."""
+        agent_manager.register_agent("app/member", session_id="s1")
+        agent_manager.set_webhook("app/member", "https://example.com/hook", "secret-at-least-16ch")
+        _age_agent(agent_manager, redis_client, "app/member")
+
+        result = agent_manager.register_agent("app/member", session_id="s2")
+
+        assert result["id"] == "app/member-2"
+        assert result["webhook_url"] == ""
+        assert agent_manager.get_agent("app/member")["webhook_url"] == "https://example.com/hook"
+
+    def test_collision_skips_suffix_held_by_webhook_agent(self, agent_manager, redis_client):
+        """An offline -2 that holds a subscription is not reusable either."""
+        agent_manager.register_agent("app/member", session_id="s1")
+        agent_manager.register_agent("app/member", session_id="s2")  # -> app/member-2
+        agent_manager.set_webhook("app/member-2", "https://example.com/hook", "secret-at-least-16ch")
+        _age_agent(agent_manager, redis_client, "app/member-2")
+
+        result = agent_manager.register_agent("app/member", session_id="s3")
+
+        assert result["id"] == "app/member-3"
+
+    def test_offline_agent_without_webhook_is_still_taken_over(self, agent_manager, redis_client):
+        """Session-shaped agents keep the old takeover behaviour."""
+        agent_manager.register_agent("host/proj", session_id="s1")
+        _age_agent(agent_manager, redis_client, "host/proj")
+
+        result = agent_manager.register_agent("host/proj", session_id="s2")
+
+        assert result["id"] == "host/proj"
+        assert result["session_id"] == "s2"
+
+    def test_heartbeat_and_description_do_not_touch_webhook(self, agent_manager):
+        agent_manager.register_agent("app/member")
+        agent_manager.set_webhook("app/member", "https://example.com/hook", "secret-at-least-16ch")
+
+        agent_manager.touch_heartbeat("app/member")
+        agent_manager.set_description("app/member", "mailbox")
+        agent_manager.mark_offline("app/member")
+
+        assert agent_manager.get_webhook("app/member") == {
+            "url": "https://example.com/hook", "secret": "secret-at-least-16ch",
+        }
+
+    def test_list_agents_overlays_webhooks(self, agent_manager, redis_client):
+        agent_manager.register_agent("app/member")
+        agent_manager.register_agent("host/proj")
+        agent_manager.set_webhook("app/member", "https://example.com/hook", "secret-at-least-16ch")
+        _age_agent(agent_manager, redis_client, "app/member")
+
+        by_id = {a["id"]: a for a in agent_manager.list_agents()}
+
+        assert by_id["app/member"]["status"] == "watching"
+        assert by_id["app/member"]["webhook_url"] == "https://example.com/hook"
+        assert by_id["host/proj"]["webhook_url"] == ""
+
+    def test_remove_agent_deletes_subscription(self, agent_manager, redis_client):
+        agent_manager.register_agent("app/member")
+        agent_manager.set_webhook("app/member", "https://example.com/hook", "secret-at-least-16ch")
+        redis_client.set(f"{agent_manager.WEBHOOK_STATE_PREFIX}app/member", "{}")
+
+        agent_manager.remove_agent("app/member")
+        agent_manager.register_agent("app/member")
+
+        assert agent_manager.get_agent("app/member")["webhook_url"] == ""
+        assert not redis_client.exists(f"{agent_manager.WEBHOOK_STATE_PREFIX}app/member")
+
+    def test_bulk_remove_deletes_subscriptions(self, agent_manager):
+        for agent_id in ("app/a", "app/b"):
+            agent_manager.register_agent(agent_id)
+            agent_manager.set_webhook(agent_id, "https://example.com/hook", "secret-at-least-16ch")
+
+        agent_manager.remove_agents_by_pattern("app/a")
+        agent_manager.remove_agents_by_ids(["app/b"])
+
+        assert agent_manager.list_webhooks() == {}
+
+
+class TestMigrateWebhooks:
+    """Startup migration of webhook fields out of agent entries."""
+
+    def _legacy(self, redis_client, agent_id, url, secret):
+        now = datetime.now(timezone.utc).isoformat()
+        redis_client.hset("c3po:agents", agent_id, json.dumps({
+            "id": agent_id, "session_id": None, "capabilities": [], "description": "",
+            "webhook_url": url, "webhook_secret": secret,
+            "registered_at": now, "last_seen": now,
+        }))
+
+    def test_moves_legacy_webhook_and_strips_entry(self, agent_manager, redis_client):
+        self._legacy(redis_client, "app/member", "https://example.com/hook", "secret-at-least-16ch")
+        self._legacy(redis_client, "host/proj", "", "")
+
+        assert agent_manager.migrate_webhooks() == 2
+
+        assert agent_manager.list_webhooks() == {
+            "app/member": {"url": "https://example.com/hook", "secret": "secret-at-least-16ch"},
+        }
+        for agent_id in ("app/member", "host/proj"):
+            assert "webhook_url" not in json.loads(redis_client.hget("c3po:agents", agent_id))
+        assert agent_manager.migrate_webhooks() == 0  # idempotent
+
+    def test_existing_subscription_wins(self, agent_manager, redis_client):
+        self._legacy(redis_client, "app/member", "https://old.example.com", "old-secret-16chars")
+        redis_client.hset("c3po:webhooks", "app/member",
+                          json.dumps({"url": "https://new.example.com", "secret": "new-secret-16chars"}))
+
+        agent_manager.migrate_webhooks()
+
+        assert agent_manager.get_webhook("app/member")["url"] == "https://new.example.com"
+
+    def test_legacy_entry_fields_are_ignored_on_read(self, agent_manager, redis_client):
+        """Before migration runs, a stale copy in the entry is not reported."""
+        self._legacy(redis_client, "host/proj", "https://stale.example.com", "stale-secret-16chr")
+
+        assert agent_manager.get_agent("host/proj")["webhook_url"] == ""
 
 
 class TestClearWebhook:
@@ -553,10 +700,8 @@ class TestClearWebhook:
         agent_manager.set_webhook("agent-a", "https://example.com/hook", "secret123")
         agent_manager.clear_webhook("agent-a")
 
-        data = redis_client.hget("c3po:agents", "agent-a")
-        agent_data = json.loads(data)
-        assert agent_data["webhook_url"] == ""
-        assert agent_data["webhook_secret"] == ""
+        assert redis_client.hget("c3po:webhooks", "agent-a") is None
+        assert agent_manager.get_agent("agent-a")["webhook_url"] == ""
 
 
 class TestEnsurePlaceholder:

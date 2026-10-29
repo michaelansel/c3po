@@ -103,42 +103,134 @@ _active_waiters: set[str] = set()
 _active_waiters_lock = threading.Lock()
 
 
+def _post_webhook(agent_id: str, webhook_url: str, webhook_secret: str) -> bool:
+    """POST one webhook notification; True if the receiver answered 2xx.
+
+    Posts {"agent_id": "recipient-id"} with HMAC-SHA256 signature in the
+    X-C3PO-Signature header, 5s timeout. A non-2xx status counts as failed, so
+    the message stays unacked and the redelivery sweep pushes it again.
+    """
+    try:
+        body = json.dumps({"agent_id": agent_id}).encode("utf-8")
+        signature = hmac.new(
+            webhook_secret.encode("utf-8"),
+            body,
+            hashlib.sha256
+        ).hexdigest()
+
+        with httpx.Client(timeout=5.0) as client:
+            response = client.post(
+                webhook_url,
+                content=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-C3PO-Signature": signature,
+                }
+            )
+        if response.is_success:
+            logger.info("webhook_fired agent=%s url=%s status=%s", agent_id, webhook_url, response.status_code)
+            return True
+        logger.warning("webhook_failed agent=%s url=%s status=%s", agent_id, webhook_url, response.status_code)
+        return False
+    except Exception as e:
+        # Log but don't raise - webhook failure shouldn't affect message delivery
+        logger.warning("webhook_failed agent=%s url=%s error=%s", agent_id, webhook_url, str(e))
+        return False
+
+
 def _fire_webhook(agent_id: str, webhook_url: str, webhook_secret: str) -> None:
     """Fire a webhook notification to an agent (fire-and-forget, non-blocking).
 
-    Posts {"agent_id": "recipient-id"} with HMAC-SHA256 signature in X-C3PO-Signature header.
-    Runs in background thread to avoid blocking message delivery.
+    Runs _post_webhook in a background thread to avoid blocking message
+    delivery. Delivery is at-least-once: if the notification is lost or
+    refused, _redeliver_webhooks_once pushes again while messages stay unacked.
 
     Args:
         agent_id: The recipient agent ID
         webhook_url: The webhook URL to POST to
         webhook_secret: The HMAC secret for signing the payload
     """
-    def _post_webhook():
+    threading.Thread(
+        target=_post_webhook, args=(agent_id, webhook_url, webhook_secret), daemon=True,
+    ).start()
+
+
+# Redelivery: a webhook agent whose oldest unacked message is older than
+# WEBHOOK_REDELIVER_AFTER_SECONDS is pushed again, backing off from
+# WEBHOOK_BACKOFF_BASE_SECONDS, doubling up to WEBHOOK_BACKOFF_MAX_SECONDS.
+WEBHOOK_SWEEP_INTERVAL_SECONDS = 30
+WEBHOOK_REDELIVER_AFTER_SECONDS = 30
+WEBHOOK_BACKOFF_BASE_SECONDS = 60
+WEBHOOK_BACKOFF_MAX_SECONDS = 1800
+
+
+def _redeliver_webhooks_once(
+    agents: AgentManager,
+    messages: MessageManager,
+    now: Optional[float] = None,
+) -> list[str]:
+    """Re-push webhooks for agents that still have unacked messages.
+
+    The push on arrival is fire-and-forget; this sweep is what makes webhook
+    delivery at-least-once. For each subscribed agent it looks at the oldest
+    unacked, unexpired message. Once that is WEBHOOK_REDELIVER_AFTER_SECONDS
+    old, it pushes again, then backs off (60s, 120s, ... capped at 30 min).
+    Backoff is tracked per oldest message in c3po:webhook_state:{agent}: a new
+    oldest message (the old one was acked) starts again from the base delay,
+    and an empty inbox clears the state. Expired messages (24h) stop it.
+    Receivers must be idempotent: a push can repeat messages already handled.
+
+    Returns:
+        Agent IDs pushed on this sweep (the POSTs run in background threads).
+    """
+    now = time.time() if now is None else now
+    pushed = []
+    for agent_id, webhook in agents.list_webhooks().items():
+        state_key = f"{AgentManager.WEBHOOK_STATE_PREFIX}{agent_id}"
+        acked = messages._get_acked_ids(agent_id)
+        pending = [
+            m for m in messages.peek_pending_messages(agent_id)
+            if messages._get_message_id(m) not in acked
+        ]
+        if not pending:
+            messages.redis.delete(state_key)
+            continue
+
+        oldest = pending[0]
+        oldest_id = messages._get_message_id(oldest)
+        sent_at = datetime.fromisoformat(oldest["timestamp"]).timestamp()
+        if now - sent_at < WEBHOOK_REDELIVER_AFTER_SECONDS:
+            continue
+
+        raw_state = messages.redis.get(state_key)
+        state = json.loads(raw_state) if raw_state else None
+        if not state or state.get("oldest_id") != oldest_id:
+            state = {"oldest_id": oldest_id, "attempts": 0, "next_at": 0}
+        if now < state["next_at"]:
+            continue
+
+        _fire_webhook(agent_id, webhook["url"], webhook["secret"])
+        state["attempts"] += 1
+        state["next_at"] = now + min(
+            WEBHOOK_BACKOFF_BASE_SECONDS * 2 ** (state["attempts"] - 1),
+            WEBHOOK_BACKOFF_MAX_SECONDS,
+        )
+        messages.redis.set(state_key, json.dumps(state), ex=messages.MESSAGE_TTL_SECONDS)
+        logger.info(
+            "webhook_redeliver agent=%s oldest=%s pending=%d attempt=%d",
+            agent_id, oldest_id, len(pending), state["attempts"],
+        )
+        pushed.append(agent_id)
+    return pushed
+
+
+def _webhook_redelivery_loop() -> None:
+    """Run _redeliver_webhooks_once every sweep interval until shutdown."""
+    while not _shutdown_event.wait(WEBHOOK_SWEEP_INTERVAL_SECONDS):
         try:
-            body = json.dumps({"agent_id": agent_id}).encode("utf-8")
-            signature = hmac.new(
-                webhook_secret.encode("utf-8"),
-                body,
-                hashlib.sha256
-            ).hexdigest()
-
-            with httpx.Client(timeout=5.0) as client:
-                client.post(
-                    webhook_url,
-                    content=body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "X-C3PO-Signature": signature,
-                    }
-                )
-            logger.info("webhook_fired agent=%s url=%s", agent_id, webhook_url)
-        except Exception as e:
-            # Log but don't raise - webhook failure shouldn't affect message delivery
-            logger.warning("webhook_failed agent=%s url=%s error=%s", agent_id, webhook_url, str(e))
-
-    # Fire webhook in background thread (non-blocking)
-    threading.Thread(target=_post_webhook, daemon=True).start()
+            _redeliver_webhooks_once(agent_manager, message_manager)
+        except Exception:
+            logger.exception("webhook_redeliver_sweep_failed")
 
 
 def _determine_path_prefix(path: str) -> str:
@@ -1282,6 +1374,11 @@ def _register_agent_impl(
     Offline takeover: if the existing agent's `last_seen` is older than 15 minutes, the
     entry is fully overwritten (new `registered_at`, new `session_id`).
 
+    Webhook agents are never taken over: an ID with a webhook subscription counts
+    as present however old its `last_seen` is. A call without a session_id (e.g. a
+    serverless receiver) is a heartbeat, and a different session gets a suffix.
+    Registration never reads or writes the subscription itself.
+
     `webhook_secret` is stripped from the returned dict.
     """
     return _strip_secrets(manager.register_agent(agent_id, session_id, capabilities))
@@ -1458,8 +1555,16 @@ def _register_webhook_impl(
     - `secret` must be at least 16 characters
 
     Silently overwrites any previously configured webhook — no conflict check.
-    URL reachability is not verified at registration time; the webhook is
-    fire-and-forget with a 5-second HTTP timeout when messages arrive.
+    URL reachability is not verified at registration time.
+
+    The subscription is durable: stored in `c3po:webhooks`, apart from the agent
+    entry, it survives heartbeats, re-registration and the agent going offline.
+    Only unregister_webhook or removing the agent deletes it. While it exists the
+    agent is "watching" when offline and its ID is never reassigned.
+
+    Delivery is at-least-once: a push (5-second timeout, 2xx = success) when a
+    message or reply arrives, then the redelivery sweep pushes again with backoff
+    while any message stays unacked. Receivers must handle repeats.
 
     Raises ToolError (with list of known agents) if `agent_id` is not found.
     `webhook_secret` is stripped from the returned dict.
@@ -1522,7 +1627,8 @@ def _send_message_impl(
     dict includes `offline_delivery=True` and a `note` string.
 
     Webhook: if the target agent has a webhook URL registered, a fire-and-forget
-    HTTP POST is dispatched. Webhook failure never raises an exception to the caller.
+    HTTP POST is dispatched. Webhook failure never raises an exception to the caller;
+    the redelivery sweep re-pushes while the message stays unacked.
 
     Size limits: `message` and `context` each capped at MAX_MESSAGE_LENGTH (50KB).
     Messages expire from Redis after 24 hours.
@@ -2616,6 +2722,9 @@ def main():
         raise RedisConnectionError(REDIS_URL, e) from e
     except redis.RedisError as e:
         raise RedisConnectionError(REDIS_URL, e) from e
+
+    agent_manager.migrate_webhooks()
+    threading.Thread(target=_webhook_redelivery_loop, name="webhook-redelivery", daemon=True).start()
 
     # Intercept signal.signal so that when uvicorn installs its SIGTERM handler
     # (overriding ours), we wrap it to also set _shutdown_event.  This lets

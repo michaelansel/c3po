@@ -10,7 +10,7 @@ import pytest
 
 import fakeredis
 
-from coordinator.server import _ping_impl, _list_agents_impl, _register_agent_impl, _set_description_impl, _get_messages_impl, _wait_for_message_impl, _upload_blob_impl, _fetch_blob_impl, _register_webhook_impl, _unregister_webhook_impl, _fire_webhook, INLINE_BLOB_THRESHOLD, HARD_BLOB_THRESHOLD
+from coordinator.server import _ping_impl, _list_agents_impl, _register_agent_impl, _set_description_impl, _get_messages_impl, _wait_for_message_impl, _upload_blob_impl, _fetch_blob_impl, _register_webhook_impl, _unregister_webhook_impl, _fire_webhook, _post_webhook, _redeliver_webhooks_once, INLINE_BLOB_THRESHOLD, HARD_BLOB_THRESHOLD
 from coordinator.agents import AgentManager
 from coordinator.blobs import BlobManager
 from coordinator.messaging import MessageManager
@@ -495,6 +495,95 @@ class TestWebhookFiring:
 
         import time
         time.sleep(0.1)  # Let background thread complete
+
+
+class TestWebhookStatusCheck:
+    """Only a 2xx response counts as a delivered webhook."""
+
+    @pytest.mark.parametrize("status,expected", [(200, True), (204, True), (404, False), (500, False)])
+    @patch('coordinator.server.httpx.Client')
+    def test_post_webhook_reports_status(self, mock_client, status, expected):
+        response = Mock(status_code=status, is_success=200 <= status < 300)
+        mock_client.return_value.__enter__.return_value.post.return_value = response
+
+        assert _post_webhook("agent-a", "https://example.com/hook", "secret-at-least-16ch") is expected
+
+    @patch('coordinator.server.httpx.Client')
+    def test_post_webhook_transport_error_is_failure(self, mock_client):
+        mock_client.return_value.__enter__.return_value.post.side_effect = Exception("timeout")
+
+        assert _post_webhook("agent-a", "https://example.com/hook", "secret-at-least-16ch") is False
+
+
+class TestWebhookRedelivery:
+    """The sweep re-pushes webhooks while messages stay unacked."""
+
+    HOOK = ("https://example.com/hook", "secret-at-least-16ch")
+
+    @pytest.fixture
+    def subscribed(self, agent_manager):
+        agent_manager.register_agent("app/member")
+        agent_manager.set_webhook("app/member", *self.HOOK)
+        return "app/member"
+
+    @staticmethod
+    def _sent_at(message):
+        from datetime import datetime
+        return datetime.fromisoformat(message["timestamp"]).timestamp()
+
+    def test_fresh_message_is_not_redelivered(self, agent_manager, message_manager, subscribed):
+        msg = message_manager.send_message("host/proj", subscribed, "hi")
+        with patch("coordinator.server._fire_webhook") as fire:
+            assert _redeliver_webhooks_once(agent_manager, message_manager, now=self._sent_at(msg) + 5) == []
+        fire.assert_not_called()
+
+    def test_unacked_message_is_redelivered_with_backoff(self, agent_manager, message_manager, subscribed):
+        msg = message_manager.send_message("host/proj", subscribed, "hi")
+        t0 = self._sent_at(msg)
+        with patch("coordinator.server._fire_webhook") as fire:
+            pushed = [
+                bool(_redeliver_webhooks_once(agent_manager, message_manager, now=t0 + offset))
+                for offset in (31, 61, 92, 151, 152, 272)
+            ]
+        # 31s: first re-push; then 60s backoff (91s), 120s backoff (211s)...
+        assert pushed == [True, False, True, False, False, True]
+        fire.assert_called_with(subscribed, *self.HOOK)
+
+    def test_backoff_resets_for_new_oldest_message(self, agent_manager, message_manager, subscribed):
+        first = message_manager.send_message("host/proj", subscribed, "one")
+        message_manager.send_message("host/proj", subscribed, "two")
+        t0 = self._sent_at(first)
+        with patch("coordinator.server._fire_webhook"):
+            _redeliver_webhooks_once(agent_manager, message_manager, now=t0 + 31)
+            _redeliver_webhooks_once(agent_manager, message_manager, now=t0 + 91)  # backoff now 120s
+            message_manager.ack_messages(subscribed, [first["id"]])
+            assert _redeliver_webhooks_once(agent_manager, message_manager, now=t0 + 100) == [subscribed]
+
+    def test_acked_inbox_stops_redelivery_and_clears_state(
+        self, agent_manager, message_manager, redis_client, subscribed,
+    ):
+        msg = message_manager.send_message("host/proj", subscribed, "hi")
+        t0 = self._sent_at(msg)
+        with patch("coordinator.server._fire_webhook") as fire:
+            _redeliver_webhooks_once(agent_manager, message_manager, now=t0 + 31)
+            message_manager.ack_messages(subscribed, [msg["id"]])
+            assert _redeliver_webhooks_once(agent_manager, message_manager, now=t0 + 600) == []
+        assert fire.call_count == 1
+        assert not redis_client.exists(f"{AgentManager.WEBHOOK_STATE_PREFIX}{subscribed}")
+
+    def test_unacked_reply_is_redelivered(self, agent_manager, message_manager, subscribed):
+        request = message_manager.send_message(subscribed, "host/proj", "question")
+        reply = message_manager.reply(request["id"], "host/proj", "answer")
+        with patch("coordinator.server._fire_webhook") as fire:
+            _redeliver_webhooks_once(agent_manager, message_manager, now=self._sent_at(reply) + 31)
+        fire.assert_called_once_with(subscribed, *self.HOOK)
+
+    def test_agents_without_webhook_are_ignored(self, agent_manager, message_manager):
+        agent_manager.register_agent("host/proj")
+        msg = message_manager.send_message("host/other", "host/proj", "hi")
+        with patch("coordinator.server._fire_webhook") as fire:
+            _redeliver_webhooks_once(agent_manager, message_manager, now=self._sent_at(msg) + 3600)
+        fire.assert_not_called()
 
 
 class TestUnregisterWebhook:
