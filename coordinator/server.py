@@ -1280,7 +1280,10 @@ def _register_agent_impl(
     (and optionally `capabilities`) is updated; `registered_at` is not changed.
 
     Offline takeover: if the existing agent's `last_seen` is older than 15 minutes, the
-    entry is fully overwritten (new `registered_at`, new `session_id`).
+    entry is overwritten (new `registered_at`, new `session_id`) but keeps its
+    `description`, `webhook_url` and `webhook_secret`. The middleware re-registers on
+    every MCP request with a project header, so dropping the webhook here would
+    silently disarm a "watching" agent the first time it called back in.
 
     `webhook_secret` is stripped from the returned dict.
     """
