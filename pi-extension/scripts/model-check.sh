@@ -58,7 +58,8 @@ PROMPT="node --test fails in this repo. Run it, find the bug in sum.js, fix it, 
 echo "sandbox: $SANDBOX"
 if [ "$SANDBOX" = docker ]; then
   # Only the scratch dir is mounted; the container sees the network (needed for the model endpoint) and nothing else of the host.
-  timeout 300 docker run --rm --user "$(id -u):$(id -g)" -e HOME="$ROOT/home" -e PI_CODING_AGENT_DIR \
+  CNAME="pi-check-$$"
+  timeout 300 docker run --rm --name "$CNAME" --user "$(id -u):$(id -g)" -e HOME="$ROOT/home" -e PI_CODING_AGENT_DIR \
     -v "$ROOT:$ROOT" -w "$ROOT/work" "$IMAGE" \
     node "$CLI" -p --provider check --model "$MODEL" --approve --no-session "$PROMPT" \
     < /dev/null > "$ROOT/pi.out" 2> "$ROOT/pi.err"
@@ -67,6 +68,7 @@ else
     < /dev/null > "$ROOT/pi.out" 2> "$ROOT/pi.err"
 fi
 RC=$?
+[ "$RC" -ne 124 ] || { [ "$SANDBOX" != docker ] || docker kill "$CNAME" >/dev/null 2>&1 || true; }
 set -e
 END=$(date +%s)
 
