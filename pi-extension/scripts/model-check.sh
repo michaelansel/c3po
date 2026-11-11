@@ -61,10 +61,10 @@ if [ "$SANDBOX" = docker ]; then
   timeout 300 docker run --rm --user "$(id -u):$(id -g)" -e HOME="$ROOT/home" -e PI_CODING_AGENT_DIR \
     -v "$ROOT:$ROOT" -w "$ROOT/work" "$IMAGE" \
     node "$CLI" -p --provider check --model "$MODEL" --approve --no-session "$PROMPT" \
-    > "$ROOT/pi.out" 2> "$ROOT/pi.err"
+    < /dev/null > "$ROOT/pi.out" 2> "$ROOT/pi.err"
 else
   timeout 300 node "$CLI" -p --provider check --model "$MODEL" --approve --no-session "$PROMPT" \
-    > "$ROOT/pi.out" 2> "$ROOT/pi.err"
+    < /dev/null > "$ROOT/pi.out" 2> "$ROOT/pi.err"
 fi
 RC=$?
 set -e
