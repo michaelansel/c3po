@@ -8,49 +8,17 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { C3poClient, sleep } from "../src/client.ts";
+import { startMock } from "./mock-model.ts";
 
 const live = process.env.C3PO_TEST_LIVE === "1" && !!process.env.PI_CLI;
 const URL_ = process.env.C3PO_TEST_URL || "http://127.0.0.1:8420";
 const MCP_PATH = process.env.C3PO_TEST_MCP_PATH || "/mcp";
 const EXT = path.resolve(import.meta.dirname, "../extensions/c3po.ts");
-
-function startMock() {
-  const seen: any[] = [];
-  const server = http.createServer((req, res) => {
-    let body = "";
-    req.on("data", (d) => (body += d));
-    req.on("end", () => {
-      if (req.url!.endsWith("/models")) return res.writeHead(200).end(JSON.stringify({ data: [{ id: "mock" }] }));
-      const j = JSON.parse(body || "{}");
-      seen.push(j);
-      const last = (j.messages || []).at(-1) || {};
-      const lastText = typeof last.content === "string" ? last.content : JSON.stringify(last.content);
-      const chunk = (delta: any, fin?: string) =>
-        `data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", model: "mock", choices: [{ index: 0, delta, finish_reason: fin ?? null }] })}\n\n`;
-      res.writeHead(200, { "content-type": "text/event-stream" });
-      const m = last.role === "user" && /\[C-3PO message from [^\]]*\(id: ([^)]+)\)/.exec(lastText);
-      if (m) {
-        const args = JSON.stringify({ message_id: m[1], response: "pong from pi" });
-        res.write(chunk({ role: "assistant", content: "" }));
-        res.write(chunk({ tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "c3po_reply", arguments: args } }] }));
-        res.write(chunk({}, "tool_calls"));
-      } else {
-        res.write(chunk({ role: "assistant", content: "done" }));
-        res.write(chunk({}, "stop"));
-      }
-      res.end("data: [DONE]\n\n");
-    });
-  });
-  return new Promise<{ server: http.Server; port: number; seen: any[] }>((resolve) =>
-    server.listen(0, "127.0.0.1", () => resolve({ server, port: (server.address() as any).port, seen })),
-  );
-}
 
 async function until(cond: () => boolean | Promise<boolean>, ms = 20000) {
   const t0 = Date.now();
