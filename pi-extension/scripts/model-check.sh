@@ -12,6 +12,10 @@ WANT="${1:-glm-5p3-flash}"
 BASE_URL="${BASE_URL:-https://llm.int.exe.xyz/v1}"
 API_KEY="${API_KEY:-none}"
 PI_VERSION="${PI_VERSION:-1.5.2}"
+# pi runs with --approve (no permission prompts), so the model gets a shell. Run that step in a container:
+#   SANDBOX=docker (default when docker exists) | none (explicit opt-out)
+SANDBOX="${SANDBOX:-$(command -v docker >/dev/null 2>&1 && echo docker || echo none)}"
+IMAGE="${IMAGE:-node:22-slim}"
 
 ROOT="$(mktemp -d /tmp/pi-model-check.XXXXXX)"
 echo "scratch: $ROOT"
@@ -25,9 +29,9 @@ echo "model: $MODEL"
 
 # 2. Own pi install and config, pinned.
 mkdir pi && (cd pi && npm init -y >/dev/null && npm i --silent "@earendil-works/pi-coding-agent@$PI_VERSION")
-PI="node $ROOT/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+CLI="$ROOT/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 export PI_CODING_AGENT_DIR="$ROOT/agent"
-mkdir -p "$PI_CODING_AGENT_DIR"
+mkdir -p "$PI_CODING_AGENT_DIR" "$ROOT/home"
 cat > "$PI_CODING_AGENT_DIR/models.json" <<JSON
 { "providers": { "check": { "baseUrl": "$BASE_URL", "api": "openai-completions", "apiKey": "$API_KEY",
   "models": [ { "id": "$MODEL" } ] } } }
@@ -50,9 +54,18 @@ git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm ini
 # 4. Ask for a multi-step job: run tests, read code, fix, rerun, then add a regression test.
 START=$(date +%s)
 set +e
-timeout 300 $PI -p --provider check --model "$MODEL" --approve --no-session \
-  "node --test fails in this repo. Run it, find the bug in sum.js, fix it, rerun the tests until they pass, then add a test for sumTo(1) === 1 to sum.test.js and run them once more. Reply with one sentence." \
-  > "$ROOT/pi.out" 2> "$ROOT/pi.err"
+PROMPT="node --test fails in this repo. Run it, find the bug in sum.js, fix it, rerun the tests until they pass, then add a test for sumTo(1) === 1 to sum.test.js and run them once more. Reply with one sentence."
+echo "sandbox: $SANDBOX"
+if [ "$SANDBOX" = docker ]; then
+  # Only the scratch dir is mounted; the container sees the network (needed for the model endpoint) and nothing else of the host.
+  timeout 300 docker run --rm --user "$(id -u):$(id -g)" -e HOME="$ROOT/home" -e PI_CODING_AGENT_DIR \
+    -v "$ROOT:$ROOT" -w "$ROOT/work" "$IMAGE" \
+    node "$CLI" -p --provider check --model "$MODEL" --approve --no-session "$PROMPT" \
+    > "$ROOT/pi.out" 2> "$ROOT/pi.err"
+else
+  timeout 300 node "$CLI" -p --provider check --model "$MODEL" --approve --no-session "$PROMPT" \
+    > "$ROOT/pi.out" 2> "$ROOT/pi.err"
+fi
 RC=$?
 set -e
 END=$(date +%s)
