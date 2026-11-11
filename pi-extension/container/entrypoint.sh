@@ -23,7 +23,10 @@ if [ "${C3PO_DISABLE:-}" != 1 ]; then
   EXT=(-e /opt/c3po-pi/extensions/c3po.ts)
 fi
 
-mkdir -p "$PI_CODING_AGENT_DIR"
+# Running with --user <other uid> leaves the image's home unwritable: fall back to a temp dir.
+if ! mkdir -p "$PI_CODING_AGENT_DIR" 2>/dev/null || [ ! -w "$PI_CODING_AGENT_DIR" ]; then
+  export PI_CODING_AGENT_DIR="$(mktemp -d /tmp/pi-agent.XXXXXX)"; export HOME="$PI_CODING_AGENT_DIR"
+fi
 BASE_URL="$BASE_URL" KEY="$KEY" MODEL="$PI_MODEL" ONLY="${PI_OPENROUTER_ONLY:-}" node -e '
 const e = process.env;
 const p = { baseUrl: e.BASE_URL, api: "openai-completions", apiKey: e.KEY, models: [{ id: e.MODEL }] };

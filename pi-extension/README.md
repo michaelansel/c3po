@@ -77,4 +77,6 @@ docker run -it --rm --name pi-lookup \
 
 Environment (see `container/entrypoint.sh`): `PI_MODEL` (required), `PI_BASE_URL` (default the exe.dev gateway), `PI_API_KEY_FILE` or `PI_API_KEY`, `PI_OPENROUTER_ONLY=<provider>` (pins an OpenRouter provider with no fallbacks, `data_collection: deny`, `zdr: true`), `C3PO_AGENT_ID`, `C3PO_DISABLE=1`. Extra arguments go to pi.
 
+The credentials file is read as the container user (`node`, uid 1000). If the host file belongs to another uid, add `--user $(id -u):$(id -g)`; the entrypoint then keeps its state in a temp dir.
+
 Pi runs with `--approve`, so the model's shell can read anything mounted into the container, including the C-3PO credentials file. Mount only a key scoped to this agent's pattern, and only the folder it should work in.
