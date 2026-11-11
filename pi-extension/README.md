@@ -59,3 +59,22 @@ C3PO_TEST_LIVE=1 C3PO_TEST_URL=http://127.0.0.1:8420 PI_CLI=<path>/dist/cli.js n
 ```
 
 Not covered yet: real-model tool calling (GLM via OpenRouter), the TUI under tmux, pi 1.x upgrades.
+
+## Container image
+
+`container/Dockerfile` builds pi (pinned, `PI_VERSION`) plus this extension. Nothing secret or project-specific is baked in.
+
+```bash
+docker build -f pi-extension/container/Dockerfile -t c3po-pi pi-extension
+
+docker run -it --rm --name pi-lookup \
+  -e PI_MODEL=fireworks/glm-5p3-flash \
+  -e C3PO_AGENT_ID=$(hostname -s)/pi-lookup \
+  -v ~/.config/c3po/credentials.json:/run/c3po/credentials.json:ro \
+  -v "$PWD":/work \
+  c3po-pi
+```
+
+Environment (see `container/entrypoint.sh`): `PI_MODEL` (required), `PI_BASE_URL` (default the exe.dev gateway), `PI_API_KEY_FILE` or `PI_API_KEY`, `PI_OPENROUTER_ONLY=<provider>` (pins an OpenRouter provider with no fallbacks, `data_collection: deny`, `zdr: true`), `C3PO_AGENT_ID`, `C3PO_DISABLE=1`. Extra arguments go to pi.
+
+Pi runs with `--approve`, so the model's shell can read anything mounted into the container, including the C-3PO credentials file. Mount only a key scoped to this agent's pattern, and only the folder it should work in.
