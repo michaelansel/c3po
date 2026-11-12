@@ -6,8 +6,8 @@
 #   bash scripts/enroll-host.sh <machine> [ssh-target...]
 #
 #   machine     the key's agent pattern becomes "<machine>/*"
-#   ssh-target  how to reach the host (default: the exe.dev relay,
-#               "exe.dev ssh <machine>"; pass e.g. "user@host" otherwise)
+#   ssh-target  command that reaches the host (default: the exe.dev relay,
+#               "ssh exe.dev ssh <machine>"; e.g. "ssh user@host" otherwise)
 #
 # The admin token is read on the prod VM from ~/c3po/.env (the c3po.service
 # EnvironmentFile). Only the key_id, pattern and a validate status are printed.
@@ -16,7 +16,7 @@ set -euo pipefail
 
 machine=${1:?usage: enroll-host.sh <machine> [ssh-target...]}
 shift
-if [ $# -eq 0 ]; then set -- exe.dev ssh "$machine"; fi
+if [ $# -eq 0 ]; then set -- ssh exe.dev ssh "$machine"; fi
 prod=${C3PO_PROD_SSH:-exedev@golf-pegasus.exe.xyz}
 url=https://mcp.qerk.be
 
