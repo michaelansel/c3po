@@ -23,6 +23,7 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
     register_response = {"id": "test-agent", "status": "online", "capabilities": []}
     response_code = 200
     response_delay = 0
+    health_delay = 0  # extra delay on /api/health only
     # Sequence of response codes for /agent/api/register (consumed in order, falls back to response_code)
     register_response_sequence: list = []
 
@@ -38,6 +39,8 @@ class MockCoordinatorHandler(BaseHTTPRequestHandler):
             time.sleep(self.response_delay)
 
         if self.path == "/api/health":
+            if self.health_delay:
+                time.sleep(self.health_delay)
             self.send_response(self.response_code)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -82,6 +85,7 @@ def mock_coordinator():
     MockCoordinatorHandler.register_response = {"id": "test-agent", "status": "online", "capabilities": []}
     MockCoordinatorHandler.response_code = 200
     MockCoordinatorHandler.response_delay = 0
+    MockCoordinatorHandler.health_delay = 0
     MockCoordinatorHandler.register_response_sequence = []
 
     server = HTTPServer(("127.0.0.1", 0), MockCoordinatorHandler)
@@ -373,3 +377,51 @@ class TestRegisterAgentHook:
         assert exit_code == 0
         assert agent_id_file.exists()
         assert agent_id_file.read_text() == "machine/project-assigned"
+
+
+class TestRegisterDeadline:
+    """The hook must finish inside its hooks.json timeout, always printing a status line."""
+
+    def test_hung_coordinator_gives_up_within_deadline(self, mock_coordinator):
+        import time
+        MockCoordinatorHandler.response_delay = 5
+
+        start = time.monotonic()
+        exit_code, stdout, stderr = run_hook(
+            env={"C3PO_COORDINATOR_URL": mock_coordinator, "C3PO_REGISTER_DEADLINE": "1"},
+        )
+        elapsed = time.monotonic() - start
+
+        assert exit_code == 0
+        assert elapsed < 4
+        assert "[c3po] Could not register" in stdout
+
+    def test_slow_health_check_still_prints_agent_id(self, mock_coordinator):
+        MockCoordinatorHandler.health_delay = 5
+        MockCoordinatorHandler.register_response = {"id": "test-machine/proj", "status": "online"}
+
+        exit_code, stdout, stderr = run_hook(
+            env={"C3PO_COORDINATOR_URL": mock_coordinator, "C3PO_REGISTER_DEADLINE": "1.5"},
+        )
+
+        assert exit_code == 0
+        assert "[c3po] Your agent ID: test-machine/proj" in stdout
+        assert "agent(s) currently online" not in stdout
+        assert "local mode" not in stdout
+
+    def test_no_429_retry_when_budget_cannot_cover_delay(self, mock_coordinator):
+        import time
+        MockCoordinatorHandler.register_response_sequence = [429, 200]
+
+        start = time.monotonic()
+        exit_code, stdout, stderr = run_hook(
+            env={
+                "C3PO_COORDINATOR_URL": mock_coordinator,
+                "C3PO_REGISTER_DEADLINE": "2",
+                "C3PO_RETRY_DELAY": "5",
+            },
+        )
+
+        assert exit_code == 0
+        assert time.monotonic() - start < 4
+        assert "[c3po] Could not register" in stdout

@@ -15,8 +15,14 @@ While polling, the agent shows as "watching" in list_agents (the REST wait
 registers an active waiter but does not touch the heartbeat).
 
 Usage:
-    c3po-watch --agent-id <machine/project> [--poll-timeout 240]
-    c3po-watch --stop --agent-id <machine/project>
+    c3po-watch [--agent-id <machine/project>] [--poll-timeout 240]
+    c3po-watch --stop [--agent-id <machine/project>]
+    c3po-watch --print-id
+
+Agent ID: --agent-id if given, sanitized the way the hooks sanitize names
+("Ansel Family" -> "Ansel-Family"). Otherwise the ID the SessionStart hook saved
+for $CLAUDE_CODE_SESSION_ID, else the name that hook would have registered.
+--print-id prints the resolved ID and exits 0.
 
 Exit codes:
     0  Messages pending; a short summary is printed to stdout
@@ -53,6 +59,8 @@ from c3po_common import (  # noqa: E402
     get_coordinator_url,
     get_watcher_pid_file,
     read_watcher_pid,
+    resolve_own_agent_id,
+    sanitize_agent_id,
     stop_watcher,
     urlopen_with_ssl,
 )
@@ -167,13 +175,24 @@ def watch(agent_id: str, poll_timeout: int) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--agent-id", required=True, help="Full agent ID (machine/project)")
+    parser.add_argument("--agent-id", help="Full agent ID (machine/project); default: this session's")
     # Under the 300s idle cutoff of the exe.dev edge in front of prod; a longer
     # poll gets an edge 503 instead of a timeout (coordinator caps it at 240 too).
     parser.add_argument("--poll-timeout", type=int, default=240,
                         help="Server-side wait per request, seconds (1-3600, default 240)")
     parser.add_argument("--stop", action="store_true", help="Stop the running watcher for this agent")
+    parser.add_argument("--print-id", action="store_true", help="Print the resolved agent ID and exit")
     args = parser.parse_args()
+
+    if args.agent_id:
+        args.agent_id = sanitize_agent_id(args.agent_id)
+    else:
+        args.agent_id, source = resolve_own_agent_id()
+        log(f"agent ID {args.agent_id} ({source})")
+
+    if args.print_id:
+        print(args.agent_id)
+        return 0
 
     if "/" not in args.agent_id:
         print(f"C3PO_WATCH_SETUP agent ID must be machine/project, got {args.agent_id!r}")

@@ -100,7 +100,7 @@ Enter auto-listen mode: handle incoming messages from other agents with minimal 
 - **Background mode** (preferred): a background watcher process long-polls the coordinator and wakes this session only when a message is pending. Zero tokens are spent while idle, and the user can keep using the session interactively.
 - **Loop mode** (fallback): you loop on `wait_for_message` yourself. Each timeout costs a turn and the session is tied up.
 
-`<plugin_root>` below is the plugin root directory (two directories up from this SKILL.md). `<agent_id>` is your agent ID from the SessionStart line `[c3po] Your agent ID: ...`.
+`<plugin_root>` below is the plugin root directory (two directories up from this SKILL.md). `<agent_id>` is your agent ID from the SessionStart line `[c3po] Your agent ID: ...`. If that line is missing (the hook failed or timed out), run `python3 <plugin_root>/scripts/c3po-watch --print-id` and use what it prints; don't build the ID yourself from the folder name.
 
 #### Start-up (both modes)
 

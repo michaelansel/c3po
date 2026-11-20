@@ -37,6 +37,60 @@ def sanitize_name(name: str) -> str:
     return result.strip("-")
 
 
+def sanitize_agent_id(agent_id: str) -> str:
+    """Sanitize each machine/project component of a full agent ID.
+
+    Turns e.g. "Michaels-Mac-mini/Ansel Family" into the ID the hooks register
+    ("Michaels-Mac-mini/Ansel-Family"), so a hand-typed or folder-derived ID
+    matches the coordinator's AGENT_ID_PATTERN.
+    """
+    return "/".join(sanitize_name(part) for part in agent_id.split("/"))
+
+
+def derive_project_name() -> str:
+    """Derive the project half of this session's agent ID.
+
+    Gas Town sessions (GT_ROLE set) use gt-{rig}-{role}-{crew}, or
+    gt-{rig}-{role} for mayor/deacon. Everything else uses CLAUDE_PROJECT_NAME
+    or the basename of the working directory. The SessionStart hook registers
+    with this name; the coordinator may still add a collision suffix (-2), so
+    prefer the saved agent-id file when one exists.
+    """
+    gt_rig = os.environ.get("GT_RIG", "")
+    gt_role = os.environ.get("GT_ROLE", "")
+    gt_crew = os.environ.get("GT_CREW", "")
+    debug = bool(os.environ.get("C3PO_DEBUG"))
+
+    if not gt_role:
+        return sanitize_name(os.environ.get("CLAUDE_PROJECT_NAME") or os.path.basename(os.getcwd()))
+
+    if debug:
+        gt_env_vars = {k: v for k, v in os.environ.items() if k.startswith("GT_")}
+        print(f"[c3po:debug] GT environment variables: {gt_env_vars}", file=sys.stderr)
+
+    if gt_role in ["mayor", "deacon"]:
+        # mayor/deacon: gt-{rig}-{role}, without the crew; drop a "gt-" prefix
+        # on the rig to avoid doubling it, and leave the rig out if unset.
+        clean_rig = gt_rig.replace("gt-", "", 1) if gt_rig.startswith("gt-") else gt_rig
+        components = [clean_rig, gt_role] if clean_rig else [gt_role]
+        name = sanitize_name("gt-" + "-".join(components))
+        if debug:
+            print(f"[c3po:debug] Special role handling: {gt_role} -> {name}", file=sys.stderr)
+        return name
+
+    # Standard crew pattern: gt-{rig}-{role}-{crew}, skipping empty values
+    components = []
+    if gt_rig:
+        components.append(gt_rig)
+    components.append(gt_role)
+    if gt_crew:
+        components.append(gt_crew)
+    name = sanitize_name("gt-" + "-".join(components))
+    if debug:
+        print(f"[c3po:debug] Standard role handling: {gt_role} -> {name}", file=sys.stderr)
+    return name
+
+
 def get_credentials() -> dict:
     """Load credentials from ~/.claude/c3po-credentials.json.
 
@@ -206,6 +260,20 @@ def read_agent_id(session_id: str) -> str | None:
             return f.read().strip() or None
     except FileNotFoundError:
         return None
+
+
+def resolve_own_agent_id() -> tuple[str, str]:
+    """Best guess at this session's agent ID, for scripts run from its Bash tool.
+
+    Returns (agent_id, source). Prefers the ID the SessionStart hook saved for
+    CLAUDE_CODE_SESSION_ID (Claude Code sets it in the Bash environment), which
+    carries any collision suffix the coordinator assigned. Falls back to the
+    name the hook would have registered, if the hook never saved one.
+    """
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if session_id and (agent_id := read_agent_id(session_id)):
+        return agent_id, "session"
+    return f"{get_machine_name()}/{derive_project_name()}", "derived"
 
 
 def save_agent_id(session_id: str, agent_id: str) -> None:

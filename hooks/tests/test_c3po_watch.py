@@ -65,6 +65,10 @@ def watcher_env(tmp_path, coordinator_url=None) -> dict:
     })
     env.pop("XDG_RUNTIME_DIR", None)
     env.pop("C3PO_COORDINATOR_URL", None)
+    # Keep agent-ID resolution independent of the session running the tests
+    for name in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_NAME", "GT_RIG", "GT_ROLE", "GT_CREW"):
+        env.pop(name, None)
+    env["C3PO_MACHINE_NAME"] = "test-machine"
     if coordinator_url:
         env["C3PO_COORDINATOR_URL"] = coordinator_url
     return env
@@ -190,3 +194,74 @@ class TestSingleInstance:
         finally:
             if watcher.poll() is None:
                 watcher.kill()
+
+
+class TestAgentIdResolution:
+    def test_explicit_id_is_sanitized(self, mock_coordinator, tmp_path):
+        result = run_watch(watcher_env(tmp_path), "--print-id", "--agent-id", "Mac mini/Ansel Family")
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "Mac-mini/Ansel-Family"
+
+    def test_sanitized_id_is_sent_to_coordinator(self, mock_coordinator, tmp_path):
+        MockCoordinatorHandler.responses = [
+            (200, {"count": 1, "status": "received", "messages": [
+                {"id": "msg-1", "from_agent": "other/agent", "message": "hi"},
+            ]}, {}),
+        ]
+        result = run_watch(watcher_env(tmp_path, mock_coordinator), "--agent-id", "test-machine/Ansel Family")
+
+        assert result.returncode == 0
+        assert MockCoordinatorHandler.received_requests[0]["headers"]["X-Machine-Name"] == "test-machine/Ansel-Family"
+
+    def test_default_reads_session_agent_id_file(self, tmp_path):
+        env = watcher_env(tmp_path)
+        env["CLAUDE_CODE_SESSION_ID"] = "sess-123"
+        with open(os.path.join(str(tmp_path), "c3po-agent-id-sess-123"), "w") as f:
+            f.write("test-machine/proj-2")  # coordinator-assigned collision suffix
+
+        result = run_watch(env, "--print-id")
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "test-machine/proj-2"
+
+    def test_default_derives_from_cwd_without_session_file(self, tmp_path):
+        env = watcher_env(tmp_path)
+        env["CLAUDE_CODE_SESSION_ID"] = "sess-missing"
+        project_dir = tmp_path / "Ansel Family"
+        project_dir.mkdir()
+
+        result = subprocess.run(
+            [sys.executable, os.path.abspath(WATCH_SCRIPT), "--print-id"],
+            capture_output=True, text=True, env=env, timeout=15, cwd=str(project_dir),
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "test-machine/Ansel-Family"
+
+    def test_default_honours_project_name_override(self, tmp_path):
+        env = watcher_env(tmp_path)
+        env["CLAUDE_PROJECT_NAME"] = "my project"
+
+        result = run_watch(env, "--print-id")
+
+        assert result.stdout.strip() == "test-machine/my-project"
+
+    def test_stop_without_agent_id_uses_resolved_id(self, tmp_path):
+        env = watcher_env(tmp_path)
+        env["CLAUDE_CODE_SESSION_ID"] = "sess-123"
+        with open(os.path.join(str(tmp_path), "c3po-agent-id-sess-123"), "w") as f:
+            f.write(AGENT_ID)
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            with open(pid_file(tmp_path), "w") as f:
+                f.write(str(sleeper.pid))
+
+            result = run_watch(env, "--stop")
+
+            assert result.returncode == 0
+            assert f"Stopped watcher pid {sleeper.pid}" in result.stdout
+            assert sleeper.wait(timeout=5) != 0
+        finally:
+            if sleeper.poll() is None:
+                sleeper.kill()

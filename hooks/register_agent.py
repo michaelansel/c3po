@@ -13,6 +13,8 @@ Environment variables:
 - C3PO_COORDINATOR_URL: Coordinator URL (default: http://localhost:8420)
 - C3PO_MACHINE_NAME: Machine name identifier (default: from MCP config or hostname)
 - C3PO_AGENT_ID_FILE: If set, write the assigned agent ID to this path after successful registration
+- C3PO_REGISTER_DEADLINE: Seconds the whole hook may spend on network calls (default: 7,
+  under the 10s hooks.json timeout so the hook always prints a status line)
 """
 
 from __future__ import annotations
@@ -24,65 +26,28 @@ import time
 import urllib.request
 import urllib.error
 
-from c3po_common import auth_headers, get_coordinator_url, get_machine_name, get_session_id, parse_hook_input, sanitize_name, save_agent_id, urlopen_with_ssl
+from c3po_common import auth_headers, derive_project_name, get_coordinator_url, get_machine_name, get_session_id, parse_hook_input, save_agent_id, urlopen_with_ssl
+
+
+# The whole hook must finish inside its hooks.json timeout (10s). Claude Code
+# kills a hook that overruns, and a killed hook prints nothing, so the session
+# gets no agent ID line and no hint why. Every request gets only the time left
+# in this budget (measured from process start), leaving a margin for output.
+REGISTER_DEADLINE_S = float(os.environ.get("C3PO_REGISTER_DEADLINE", "7"))
+_START = time.monotonic()
+
+
+def _remaining() -> float:
+    """Seconds left in the hook's time budget (may be <= 0)."""
+    return REGISTER_DEADLINE_S - (time.monotonic() - _START)
 
 
 # Configuration
 COORDINATOR_URL = get_coordinator_url()
 MACHINE_NAME = get_machine_name()
 
-# Project context from Gas Town environment variables
-# Format: gt-{rig}-{role}-{crew} (e.g., gt-c3po-crew-michaelansel)
-# Fallback to CLAUDE_PROJECT_NAME or basename(cwd) if GT_RIG not set
-gt_rig = os.environ.get("GT_RIG", "")
-gt_role = os.environ.get("GT_ROLE", "")
-gt_crew = os.environ.get("GT_CREW", "")
-
-if gt_role:
-    # Log all GT_* environment variables for future analysis
-    if os.environ.get("C3PO_DEBUG"):
-        gt_env_vars = {k: v for k, v in os.environ.items() if k.startswith("GT_")}
-        print(f"[c3po:debug] GT environment variables: {gt_env_vars}", file=sys.stderr)
-
-    # Build project name from Gas Town env vars
-    # Handle special cases for roles like mayor/deacon
-    if gt_role in ["mayor", "deacon"]:
-        # For mayor/deacon, we use a different pattern: gt-{rig}-{role}
-        # This prevents the crew from being appended inappropriately
-        # Remove "gt-" prefix from rig if present to avoid double prefix
-        clean_rig = gt_rig.replace("gt-", "", 1) if gt_rig.startswith("gt-") else gt_rig
-        # If clean_rig is empty (GT_RIG was not set), we don't want to include it
-        if clean_rig:
-            components = [clean_rig, gt_role]
-        else:
-            components = [gt_role]
-        PROJECT_NAME = sanitize_name("gt-" + "-".join(components))
-        # Log for future enhancement analysis
-        if os.environ.get("C3PO_DEBUG"):
-            if clean_rig:
-                print(f"[c3po:debug] Special role handling: {gt_role} -> gt-{clean_rig}-{gt_role}", file=sys.stderr)
-            else:
-                print(f"[c3po:debug] Special role handling: {gt_role} -> gt-{gt_role}", file=sys.stderr)
-    else:
-        # Standard crew pattern: gt-{rig}-{role}-{crew}
-        # Build components properly, filtering out empty values
-        components = []
-        if gt_rig:
-            components.append(gt_rig)
-        components.append(gt_role)
-        if gt_crew:  # Only add crew if it's not empty
-            components.append(gt_crew)
-        PROJECT_NAME = sanitize_name("gt-" + "-".join(components))
-        if os.environ.get("C3PO_DEBUG"):
-            if gt_rig:
-                print(f"[c3po:debug] Standard role handling: {gt_role} -> gt-{gt_rig}-{gt_role}{('-' + gt_crew) if gt_crew else ''}", file=sys.stderr)
-            else:
-                print(f"[c3po:debug] Standard role handling: {gt_role} -> gt-{gt_role}{('-' + gt_crew) if gt_crew else ''}", file=sys.stderr)
-else:
-    # Fallback: use legacy behavior
-    PROJECT_NAME = sanitize_name(
-        os.environ.get("CLAUDE_PROJECT_NAME") or os.path.basename(os.getcwd())
-    )
+# Project name: Gas Town naming (GT_* env vars), CLAUDE_PROJECT_NAME, or basename(cwd)
+PROJECT_NAME = derive_project_name()
 
 
 def register_with_coordinator(session_id: str) -> dict | None:
@@ -117,15 +82,19 @@ def register_with_coordinator(session_id: str) -> dict | None:
     retry_delay = int(os.environ.get("C3PO_RETRY_DELAY", "2"))
 
     for attempt in range(max_retries + 1):
+        remaining = _remaining()
+        if remaining < 0.5:
+            print(f"[c3po:debug] Out of time registering {attempted_agent_id}", file=sys.stderr)
+            break
         try:
-            with urlopen_with_ssl(req, timeout=15) as resp:
+            with urlopen_with_ssl(req, timeout=remaining) as resp:
                 result = json.loads(resp.read())
                 if os.environ.get("C3PO_DEBUG"):
                     print(f"[c3po:debug] Registration successful: {result}", file=sys.stderr)
                 return result
         except urllib.error.HTTPError as e:
             print(f"[c3po:debug] HTTPError registering {attempted_agent_id}: {e.code}", file=sys.stderr)
-            if e.code == 429 and attempt < max_retries:
+            if e.code == 429 and attempt < max_retries and _remaining() > retry_delay + 1:
                 if os.environ.get("C3PO_DEBUG"):
                     print(f"[c3po:debug] Rate limited (attempt {attempt + 1}), retrying in {retry_delay}s...", file=sys.stderr)
                 time.sleep(retry_delay)
@@ -180,19 +149,25 @@ def main() -> None:
                 except OSError:
                     pass  # Best effort
 
-            # Get agent count from health endpoint (no auth required for health)
-            req = urllib.request.Request(
-                f"{COORDINATOR_URL}/api/health",
-            )
-            with urlopen_with_ssl(req, timeout=5) as resp:
-                health = json.loads(resp.read())
-
-            agents_online = health.get("agents_online", 0)
+            # Agent count from the health endpoint (no auth). Best effort: the
+            # agent is registered by now, so a slow or failed health check must
+            # not hide the agent ID line.
+            agents_online = None
+            remaining = _remaining()
+            if remaining >= 0.5:
+                try:
+                    req = urllib.request.Request(f"{COORDINATOR_URL}/api/health")
+                    with urlopen_with_ssl(req, timeout=min(5, remaining)) as resp:
+                        agents_online = json.loads(resp.read()).get("agents_online", 0)
+                except Exception as e:
+                    if os.environ.get("C3PO_DEBUG"):
+                        print(f"[c3po:debug] Health check failed: {type(e).__name__}: {e}", file=sys.stderr)
 
             # Output context for Claude
             print(f"[c3po] Connected to coordinator at {COORDINATOR_URL}")
             print(f"[c3po] Your agent ID: {assigned_id}")
-            print(f"[c3po] {agents_online} agent(s) currently online")
+            if agents_online is not None:
+                print(f"[c3po] {agents_online} agent(s) currently online")
             print(f"[c3po] Tip: call set_description to tell other agents what you can help with")
         else:
             print(f"[c3po] Could not register with coordinator at {COORDINATOR_URL}")

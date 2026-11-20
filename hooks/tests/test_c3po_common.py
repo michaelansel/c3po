@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from c3po_common import (
     auth_headers,
+    derive_project_name,
     get_agent_id_file,
     get_credentials,
     get_machine_name,
@@ -22,6 +23,8 @@ from c3po_common import (
     get_watcher_pid_file,
     read_agent_id,
     read_watcher_pid,
+    resolve_own_agent_id,
+    sanitize_agent_id,
     sanitize_name,
     save_agent_id,
     save_credentials,
@@ -472,3 +475,74 @@ class TestHooksJsonValidation:
                             assert os.path.exists(full_path), (
                                 f"{event_name} references non-existent file: {relative_path}"
                             )
+
+
+class TestSanitizeAgentId:
+    def test_sanitizes_each_component(self):
+        assert sanitize_agent_id("Michaels-Mac-mini/Ansel Family") == "Michaels-Mac-mini/Ansel-Family"
+
+    def test_does_not_leave_hyphen_next_to_slash(self):
+        assert sanitize_agent_id("host/ my project ") == "host/my-project"
+
+    def test_valid_id_unchanged(self):
+        assert sanitize_agent_id("host/proj-2") == "host/proj-2"
+
+
+class TestDeriveProjectName:
+    @pytest.fixture(autouse=True)
+    def clean_env(self, monkeypatch):
+        for name in ("GT_RIG", "GT_ROLE", "GT_CREW", "CLAUDE_PROJECT_NAME", "C3PO_DEBUG"):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_cwd_basename(self, monkeypatch, tmp_path):
+        d = tmp_path / "Ansel Family"
+        d.mkdir()
+        monkeypatch.chdir(d)
+        assert derive_project_name() == "Ansel-Family"
+
+    def test_project_name_override(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_PROJECT_NAME", "my project")
+        assert derive_project_name() == "my-project"
+
+    def test_gt_crew(self, monkeypatch):
+        monkeypatch.setenv("GT_RIG", "c3po")
+        monkeypatch.setenv("GT_ROLE", "crew")
+        monkeypatch.setenv("GT_CREW", "michaelansel")
+        assert derive_project_name() == "gt-c3po-crew-michaelansel"
+
+    def test_gt_role_without_rig_or_crew(self, monkeypatch):
+        monkeypatch.setenv("GT_ROLE", "polecat")
+        assert derive_project_name() == "gt-polecat"
+
+    def test_gt_mayor_drops_crew_and_rig_prefix(self, monkeypatch):
+        monkeypatch.setenv("GT_RIG", "gt-c3po")
+        monkeypatch.setenv("GT_ROLE", "mayor")
+        monkeypatch.setenv("GT_CREW", "ignored")
+        assert derive_project_name() == "gt-c3po-mayor"
+
+    def test_gt_deacon_without_rig(self, monkeypatch):
+        monkeypatch.setenv("GT_ROLE", "deacon")
+        assert derive_project_name() == "gt-deacon"
+
+
+class TestResolveOwnAgentId:
+    @pytest.fixture(autouse=True)
+    def clean_env(self, monkeypatch, tmp_path):
+        for name in ("GT_RIG", "GT_ROLE", "GT_CREW", "XDG_RUNTIME_DIR"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        monkeypatch.setenv("C3PO_MACHINE_NAME", "host")
+        monkeypatch.setenv("CLAUDE_PROJECT_NAME", "proj")
+
+    def test_prefers_saved_session_id(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s1")
+        save_agent_id("s1", "host/proj-2")
+        assert resolve_own_agent_id() == ("host/proj-2", "session")
+
+    def test_derives_without_saved_file(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s-none")
+        assert resolve_own_agent_id() == ("host/proj", "derived")
+
+    def test_derives_without_session_env(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        assert resolve_own_agent_id() == ("host/proj", "derived")
