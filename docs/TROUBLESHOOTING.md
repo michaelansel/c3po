@@ -168,7 +168,7 @@ Try again later.
 
 **Causes:**
 1. Target agent not checking inbox
-2. Messages expired (after 24h)
+2. Messages expired (after 7 days)
 3. Redis data lost
 
 **Solutions:**
@@ -322,7 +322,7 @@ Messages accumulating (not being consumed)
 **Solution:**
 
 Messages and agent registrations have automatic TTLs:
-- **Messages**: Expire after 24 hours if not consumed
+- **Messages**: Expire after 7 days if not acknowledged
 - **Agent registrations**: Automatically cleaned up when agents go offline
 
 In normal operation, Redis memory should stabilize. If you need to force-clear everything (e.g., during development):

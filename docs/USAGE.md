@@ -286,4 +286,4 @@ The hook runs silently and fails gracefully - it won't block session exit if the
 
 ## Message Expiration
 
-Messages expire after **24 hours** if not consumed. This prevents stale requests from accumulating.
+Messages expire after **7 days** if not acknowledged. This prevents stale requests from accumulating.

@@ -181,7 +181,7 @@ def _redeliver_webhooks_once(
     old, it pushes again, then backs off (60s, 120s, ... capped at 30 min).
     Backoff is tracked per oldest message in c3po:webhook_state:{agent}: a new
     oldest message (the old one was acked) starts again from the base delay,
-    and an empty inbox clears the state. Expired messages (24h) stop it.
+    and an empty inbox clears the state. Expired messages (7 days) stop it.
     Receivers must be idempotent: a push can repeat messages already handled.
 
     Returns:
@@ -1635,7 +1635,7 @@ def _send_message_impl(
     the redelivery sweep re-pushes while the message stays unacked.
 
     Size limits: `message` and `context` each capped at MAX_MESSAGE_LENGTH (50KB).
-    Messages expire from Redis after 24 hours.
+    Messages expire from Redis after 7 days.
     """
     # Validate inputs
     _validate_agent_id(to, "to")
@@ -1711,7 +1711,7 @@ def _get_messages_impl(
 
     Already-acked message IDs (from `c3po:acked:{agent_id}`) are filtered
     out before returning, so messages acked in a previous call won't reappear
-    even before the next compaction. Expired messages (older than 24 hours)
+    even before the next compaction. Expired messages (older than 7 days)
     are also filtered at the peek layer.
     """
     logger.info("get_messages agent=%s", agent_id)

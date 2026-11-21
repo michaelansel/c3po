@@ -383,7 +383,7 @@ Rate limit errors include the current count and limit in the error message.
 
 - **Maximum message size**: 50KB (50,000 characters)
 - **Maximum context size**: 50KB (50,000 characters)
-- **Message expiration**: 24 hours
+- **Message expiration**: 7 days
 
 ---
 

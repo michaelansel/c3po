@@ -133,13 +133,13 @@ Production runs on the exe.dev VM `golf-pegasus` (`mcp.qerk.be` CNAMEs to `golf-
 
 **Message flow**: Messages go to single queue `c3po:inbox:{agent}`. Notifications (separate from messages) go to `c3po:notify:{agent}` to wake blocked `wait_for_message` calls without consuming messages. This separation prevents message loss. Messages have optional `reply_to` field for replies, no `type` field. Each message gets a `message_id` used for replies. Replies also get a unique `reply_id` for individual acknowledgment.
 
-**Peek+Ack semantics**: `get_messages` and `wait_for_message` are non-destructive (peek). Messages stay in Redis lists until explicitly acknowledged via `ack_messages`. Acked IDs are stored in `c3po:acked:{agent}` (Redis SET, 24h TTL). When the acked set exceeds 20 entries, compaction removes acked entries from the underlying lists and clears the set. This prevents message loss when MCP tool calls are interrupted client-side.
+**Peek+Ack semantics**: `get_messages` and `wait_for_message` are non-destructive (peek). Messages stay in Redis lists until explicitly acknowledged via `ack_messages`. Acked IDs are stored in `c3po:acked:{agent}` (Redis SET, 7-day TTL). When the acked set exceeds 20 entries, compaction removes acked entries from the underlying lists and clears the set. This prevents message loss when MCP tool calls are interrupted client-side.
 
 **Webhooks**: Agents can register a webhook URL via `register_webhook(url, secret)`. Webhooks exist for receivers that can't hold a session or a poll (today the Ansel Family app's Cloud Functions, one agent per household member): the agent ID is a durable mailbox, not a process. When a message or reply arrives, the coordinator fires an async HTTP POST to the webhook with body `{"agent_id": "recipient-id"}` and `X-C3PO-Signature` header containing HMAC-SHA256(secret, body_bytes) in hex (10s timeout; only a 2xx counts as delivered). Delivery is at-least-once: a background sweep (`_redeliver_webhooks_once`, every 30s) re-pushes while the oldest unacked message is over 30s old, backing off 1m, 2m, 4m… to 30m, so receivers must be idempotent. The agent still retrieves actual messages via `get_messages` + `ack_messages`. Subscriptions live in their own hash, `c3po:webhooks`, not in the agent entry, so registration and heartbeats never touch them; only `unregister_webhook` or removing the agent deletes one. An agent with a subscription is always present for registration: a call with no session_id is a heartbeat, and a different session gets a `-2` suffix instead of taking over the mailbox.
 
 **Rate limiting**: Per-operation sliding window rate limits using Redis sorted sets. Different limits for different operations (e.g., `send_message`: 10/60s, `list_agents`: 30/60s, `rest_register`: 5/60s). Per-agent for MCP tools, per-IP for REST endpoints.
 
-**Agent liveness**: Heartbeat updated on every MCP tool call. Agents go offline after 15 minutes of inactivity. Messages expire after 24 hours. Three status values: `"online"` (active session, last_seen within 15 min), `"watching"` (offline but being monitored — either the agent has a webhook subscription, or an active REST `/agent/api/wait` poller exists), `"offline"` (unreachable). Watching agents do not get `offline_delivery: true` on send — they receive a `note` instead. Collision detection treats an agent as present if it is online or holds a webhook subscription; agents "watching" only through a REST poller count as offline for re-registration.
+**Agent liveness**: Heartbeat updated on every MCP tool call. Agents go offline after 15 minutes of inactivity. Unacked messages expire after 7 days. Three status values: `"online"` (active session, last_seen within 15 min), `"watching"` (offline but being monitored — either the agent has a webhook subscription, or an active REST `/agent/api/wait` poller exists), `"offline"` (unreachable). Watching agents do not get `offline_delivery: true` on send — they receive a `note` instead. Collision detection treats an agent as present if it is online or holds a webhook subscription; agents "watching" only through a REST poller count as offline for re-registration.
 
 ### Redis Key Structure
 
@@ -148,9 +148,9 @@ Production runs on the exe.dev VM `golf-pegasus` (`mcp.qerk.be` CNAMEs to `golf-
 - `c3po:notify:{agent_id}` — Notification signals for wait_for_message
 - `c3po:rate:{operation}:{identity}` — Rate limit tracking (sorted set)
 - `c3po:audit` — List of recent audit entries (JSON, newest first)
-- `c3po:acked:{agent_id}` — SET of acked message/reply IDs (24h TTL, cleared on compaction)
+- `c3po:acked:{agent_id}` — SET of acked message/reply IDs (7-day TTL, cleared on compaction)
 - `c3po:webhooks` — Hash: `agent_id` → JSON `{"url", "secret"}` webhook subscription (no TTL)
-- `c3po:webhook_state:{agent_id}` — JSON redelivery backoff for the oldest unacked message (24h TTL, cleared when the inbox drains)
+- `c3po:webhook_state:{agent_id}` — JSON redelivery backoff for the oldest unacked message (7-day TTL, cleared when the inbox drains)
 - `c3po:api_keys` — Hash: `sha256(api_key)` → JSON key metadata (includes `bcrypt_hash` for verification)
 - `c3po:key_ids` — Hash: `key_id` → `sha256(api_key)` (reverse lookup)
 - `c3po:blob:{blob_id}` — Hash with a `metadata` field only (24h TTL). The blob bytes are a file of the same name under `C3PO_BLOB_DIR`; the key's expiry is what expires the blob, and `store_blob` sweeps orphaned files at most hourly
