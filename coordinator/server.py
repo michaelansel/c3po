@@ -695,6 +695,23 @@ async def api_pending(request):
 REST_WAIT_MAX_SECONDS = 240
 
 
+REST_WAIT_DISCONNECT_POLL_SECONDS = 2
+
+
+async def _watch_disconnect(request, cancel_event: threading.Event) -> None:
+    """Set cancel_event once the client of a long-poll request disconnects."""
+    try:
+        while not cancel_event.is_set():
+            if await request.is_disconnected():
+                cancel_event.set()
+                return
+            await asyncio.sleep(REST_WAIT_DISCONNECT_POLL_SECONDS)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:  # never let the watchdog break the request
+        logger.debug("api_wait disconnect watch failed: %s", e)
+
+
 @mcp.custom_route("/agent/api/wait", methods=["GET"])
 async def api_wait(request):
     """Long-poll for pending messages. Blocks until messages arrive or timeout.
@@ -722,6 +739,11 @@ async def api_wait(request):
         {"count": N, "messages": [...], "status": "received"} when messages arrive
         {"count": 0, "status": "timeout"} on timeout
         {"count": 0, "status": "retry"} with Retry-After: 15 header on server shutdown
+
+    Client disconnect: if the caller hangs up mid-wait (a watcher that exited
+    because its Claude session is gone, or was killed), the wait ends within one
+    BLPOP cycle (<=10s) and the agent drops out of `_active_waiters`, so it stops
+    showing as "watching" instead of lingering for the rest of the timeout.
     """
     auth_result = _authenticate_rest_request(request)
     if not auth_result.get("valid"):
@@ -765,6 +787,8 @@ async def api_wait(request):
         timeout = 30
     timeout = min(REST_WAIT_MAX_SECONDS, max(1, timeout))
 
+    cancel_event = threading.Event()
+    disconnect_task = asyncio.create_task(_watch_disconnect(request, cancel_event))
     with _active_waiters_lock:
         _active_waiters.add(agent_id)
     try:
@@ -776,13 +800,18 @@ async def api_wait(request):
                 agent_id, timeout,
                 heartbeat_fn=None,       # explicitly no heartbeat
                 shutdown_event=_shutdown_event,
+                cancel_event=cancel_event,
             ),
         )
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
     finally:
+        disconnect_task.cancel()
         with _active_waiters_lock:
             _active_waiters.discard(agent_id)
+
+    if cancel_event.is_set():
+        logger.info("api_wait_client_gone agent=%s", agent_id)
 
     if result == "shutdown":
         return JSONResponse(

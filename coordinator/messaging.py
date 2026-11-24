@@ -580,6 +580,7 @@ return kept
         timeout: int = 60,
         heartbeat_fn: Optional[callable] = None,
         shutdown_event=None,
+        cancel_event=None,
     ):
         """Wait for any message (incoming or reply) to arrive, then return all pending.
 
@@ -595,9 +596,13 @@ return kept
             timeout: Timeout in seconds (default 60)
             heartbeat_fn: Optional callable to refresh heartbeat
             shutdown_event: Optional threading.Event; if set, return "shutdown" sentinel.
+            cancel_event: Optional threading.Event; if set, return None as soon as
+                the current BLPOP cycle (<=10s) ends. The REST wait endpoint sets it
+                when its client disconnects, so a dead watcher stops counting as an
+                active waiter.
 
         Returns:
-            List of message dicts if any arrived, None if timeout,
+            List of message dicts if any arrived, None if timeout or cancelled,
             or the string "shutdown" if shutdown_event is set.
         """
         # First check for existing messages without blocking
@@ -629,6 +634,10 @@ return kept
             if shutdown_event and shutdown_event.is_set():
                 logger.info("wait_for_message_shutdown agent=%s cycles=%d", agent_id, cycle)
                 return "shutdown"
+
+            if cancel_event and cancel_event.is_set():
+                logger.info("wait_for_message_cancelled agent=%s cycles=%d", agent_id, cycle)
+                return None
 
             # Refresh heartbeat so long-polling agents stay "online"
             if heartbeat_fn:

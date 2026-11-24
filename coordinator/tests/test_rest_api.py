@@ -451,6 +451,51 @@ class TestUnregisterEndpoint:
         assert seen["timeout"] == server.REST_WAIT_MAX_SECONDS < 300
 
     @pytest.mark.asyncio
+    async def test_api_wait_ends_when_client_disconnects(
+        self, mcp_app, agent_manager, message_manager, monkeypatch
+    ):
+        """A watcher that hangs up mid-wait stops counting as an active waiter."""
+        import asyncio
+        import threading
+        from coordinator import server
+
+        agent_manager.register_agent("machine/gone-waiter")
+        seen = {}
+
+        def fake_wait(agent_id, timeout, cancel_event=None, **kwargs):
+            seen["waiting"] = agent_id in server._active_waiters
+            seen["cancelled"] = cancel_event.wait(5)
+            return None
+
+        monkeypatch.setattr(message_manager, "wait_for_message", fake_wait)
+        monkeypatch.setattr(server, "REST_WAIT_DISCONNECT_POLL_SECONDS", 0.05)
+
+        hung_up = asyncio.Event()
+
+        async def receive():
+            if not hung_up.is_set():
+                hung_up.set()
+                return {"type": "http.request", "body": b"", "more_body": False}
+            return {"type": "http.disconnect"}
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "GET", "scheme": "http", "path": "/agent/api/wait",
+            "raw_path": b"/agent/api/wait", "query_string": b"timeout=200",
+            "headers": [(b"host", b"test"), (b"x-machine-name", b"machine/gone-waiter")],
+            "client": ("127.0.0.1", 1234), "server": ("test", 80), "root_path": "",
+        }
+        await asyncio.wait_for(mcp_app(scope, receive, send), timeout=10)
+
+        assert seen == {"waiting": True, "cancelled": True}
+        assert "machine/gone-waiter" not in server._active_waiters
+
+    @pytest.mark.asyncio
     async def test_api_wait_does_not_touch_heartbeat(self, client, agent_manager, redis_client):
         """GET /agent/api/wait should NOT update last_seen (watcher pattern)."""
         import json as _json

@@ -943,3 +943,19 @@ class TestNotifyTTL:
         expected_7d = 7 * 24 * 60 * 60
         assert ttl > expected_24h - 10
         assert ttl <= expected_7d
+
+
+class TestWaitCancel:
+    def test_cancel_event_ends_wait_after_one_cycle(self, monkeypatch):
+        import threading
+        import fakeredis
+        from coordinator.messaging import MessageManager
+
+        manager = MessageManager(fakeredis.FakeRedis())
+        calls = []
+        monkeypatch.setattr(manager.redis, "blpop", lambda key, timeout: calls.append(timeout))
+        cancel = threading.Event()
+        cancel.set()
+
+        assert manager.wait_for_message("machine/agent", timeout=200, cancel_event=cancel) is None
+        assert len(calls) == 1
