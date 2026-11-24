@@ -495,6 +495,58 @@ class TestUnregisterEndpoint:
         assert seen == {"waiting": True, "cancelled": True}
         assert "machine/gone-waiter" not in server._active_waiters
 
+    def test_active_waiters_refcount_keeps_newer_waiter(self):
+        """An older wait ending must not clear a newer live wait for the same agent."""
+        from coordinator import server
+
+        agent = "machine/rearmed"
+        server._add_waiter(agent)   # old request, still finishing server-side
+        server._add_waiter(agent)   # re-armed watcher's request
+        server._remove_waiter(agent)  # old one ends
+        assert agent in server._active_waiters
+        server._remove_waiter(agent)
+        assert agent not in server._active_waiters
+        server._remove_waiter(agent)  # extra remove is harmless
+        assert agent not in server._active_waiters
+
+    @pytest.mark.asyncio
+    async def test_overlapping_rest_waits_keep_agent_watching(
+        self, client, agent_manager, message_manager, monkeypatch
+    ):
+        """While a second wait is in flight, the first one ending leaves the agent watching."""
+        import asyncio
+        import threading
+        from coordinator import server
+
+        agent_manager.register_agent("machine/overlap")
+        release = {1: threading.Event(), 2: threading.Event()}
+        started = []
+
+        def fake_wait(agent_id, timeout, **kwargs):
+            n = len(started) + 1
+            started.append(n)
+            release[n].wait(5)
+            return None
+
+        monkeypatch.setattr(message_manager, "wait_for_message", fake_wait)
+        headers = {"X-Machine-Name": "machine/overlap"}
+        first = asyncio.create_task(client.get("/agent/api/wait?timeout=5", headers=headers))
+        while len(started) < 1:
+            await asyncio.sleep(0.01)
+        second = asyncio.create_task(client.get("/agent/api/wait?timeout=5", headers=headers))
+        while len(started) < 2:
+            await asyncio.sleep(0.01)
+
+        release[1].set()
+        await first
+        assert "machine/overlap" in server._active_waiters
+        statuses = {a["id"]: a["status"] for a in server._list_agents_impl(agent_manager)}
+        assert statuses["machine/overlap"] in ("online", "watching")
+
+        release[2].set()
+        await second
+        assert "machine/overlap" not in server._active_waiters
+
     @pytest.mark.asyncio
     async def test_api_wait_does_not_touch_heartbeat(self, client, agent_manager, redis_client):
         """GET /agent/api/wait should NOT update last_seen (watcher pattern)."""

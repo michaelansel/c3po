@@ -1,6 +1,7 @@
 """C3PO Coordinator - FastMCP server for multi-agent coordination."""
 
 import asyncio
+import collections
 import concurrent.futures
 import functools
 import hmac
@@ -99,8 +100,26 @@ _wait_pool = concurrent.futures.ThreadPoolExecutor(max_workers=50)
 _shutdown_event = threading.Event()
 
 # Track active wait_for_message callers so the SIGTERM handler can wake them.
-_active_waiters: set[str] = set()
+# agent_id -> number of in-flight waits (REST /agent/api/wait and MCP
+# wait_for_message). A refcount, not a set: a watcher can re-arm while its
+# previous request is still finishing server-side, and the old request ending
+# must not clear the new one. Keys are removed when their count reaches 0, so
+# `in`, set(), list() and len() see only agents with a live wait.
+_active_waiters: collections.Counter[str] = collections.Counter()
 _active_waiters_lock = threading.Lock()
+
+
+def _add_waiter(agent_id: str) -> None:
+    with _active_waiters_lock:
+        _active_waiters[agent_id] += 1
+
+
+def _remove_waiter(agent_id: str) -> None:
+    with _active_waiters_lock:
+        if _active_waiters[agent_id] <= 1:
+            _active_waiters.pop(agent_id, None)
+        else:
+            _active_waiters[agent_id] -= 1
 
 
 # Long enough for a cold-starting serverless receiver to finish before answering.
@@ -789,8 +808,7 @@ async def api_wait(request):
 
     cancel_event = threading.Event()
     disconnect_task = asyncio.create_task(_watch_disconnect(request, cancel_event))
-    with _active_waiters_lock:
-        _active_waiters.add(agent_id)
+    _add_waiter(agent_id)
     try:
         # Run blocking wait in thread pool — no heartbeat_fn passed (intentional)
         result = await asyncio.get_running_loop().run_in_executor(
@@ -807,8 +825,7 @@ async def api_wait(request):
         return JSONResponse({"error": str(e)}, status_code=500)
     finally:
         disconnect_task.cancel()
-        with _active_waiters_lock:
-            _active_waiters.discard(agent_id)
+        _remove_waiter(agent_id)
 
     if cancel_event.is_set():
         logger.info("api_wait_client_gone agent=%s", agent_id)
@@ -1841,8 +1858,7 @@ def _wait_for_message_impl(
     logger.info("wait_for_message_impl started agent=%s timeout=%d", agent_id, timeout)
 
     start_time = time.monotonic()
-    with _active_waiters_lock:
-        _active_waiters.add(agent_id)
+    _add_waiter(agent_id)
     try:
         result = msg_manager.wait_for_message(
             agent_id, timeout,
@@ -1857,8 +1873,7 @@ def _wait_for_message_impl(
         raise  # Re-raise so the async wrapper catches it
     finally:
         elapsed = time.monotonic() - start_time
-        with _active_waiters_lock:
-            _active_waiters.discard(agent_id)
+        _remove_waiter(agent_id)
     if result == "shutdown":
         logger.info("wait_for_message_done agent=%s result=shutdown elapsed=%.1fs", agent_id, elapsed)
         return {
