@@ -34,8 +34,17 @@ Exit codes:
 Retried internally (never exits): poll timeout, "retry" status (honours
 Retry-After), network errors and 5xx (exponential backoff, max 60s), 429.
 
-The watcher also exits quietly (code 0, no messages) if its parent process
-goes away, so an orphaned watcher can't keep the agent "watching" forever.
+Orphan detection: the watcher exits (code 0, C3PO_WATCH_ORPHANED on stdout,
+no messages) within OWNER_CHECK_SECONDS once the Claude session that started
+it is gone, even mid-poll. Claude Code can kill a session (e.g. the daemon's
+idle reaper) and leave the run_in_background shell running, reparented to
+pid 1; without this the watcher would keep the agent "watching" with nothing
+left to wake. At start it records the process chain from its parent up to the
+owning session: $CLAUDE_PID if that is an ancestor, else the nearest ancestor
+that looks like Claude Code, else its grandparent. It is orphaned once any link
+of that chain breaks (a process in it died, so its child was reparented).
+Parent PIDs come from /proc (Linux, BusyBox) or ps (macOS). Exit 0 keeps a
+false positive harmless: the session finds no messages and re-arms.
 
 Environment:
     C3PO_WATCH_SLEEP_SCALE  Multiply all sleeps by this factor (tests use 0.01)
@@ -46,7 +55,9 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -71,6 +82,8 @@ EXIT_REJECTED = 2
 EXIT_SETUP = 3
 
 MAX_BACKOFF = 60
+OWNER_CHECK_SECONDS = 10
+MAX_ANCESTORS = 64
 PREVIEW_CHARS = 200
 SLEEP_SCALE = float(os.environ.get("C3PO_WATCH_SLEEP_SCALE", "1"))
 
@@ -81,6 +94,137 @@ def log(msg: str) -> None:
 
 def sleep(seconds: float) -> None:
     time.sleep(seconds * SLEEP_SCALE)
+
+
+class ProcessInfoUnavailable(Exception):
+    """Neither /proc nor ps can tell us about other processes."""
+
+
+def _has_proc() -> bool:
+    return os.path.exists("/proc/self/stat")
+
+
+def parent_pid_of(pid: int) -> int | None:
+    """Parent PID of pid, or None if pid no longer exists."""
+    if _has_proc():
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                stat = f.read()
+        except OSError:
+            return None
+        try:
+            # "pid (comm) state ppid ..."; comm may contain spaces or parens
+            return int(stat.rsplit(")", 1)[1].split()[1])
+        except (IndexError, ValueError):
+            return None
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ProcessInfoUnavailable(str(e)) from e
+    try:
+        return int(out.stdout.strip()) if out.returncode == 0 else None
+    except ValueError:
+        return None
+
+
+def command_of(pid: int) -> list[str]:
+    """argv of pid (best effort; [] if unknown)."""
+    if _has_proc():
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                return [a.decode(errors="replace") for a in f.read().split(b"\0") if a]
+        except OSError:
+            return []
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "args=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return out.stdout.split()
+
+
+def looks_like_claude(argv: list[str]) -> bool:
+    """Native binary (argv0 "claude") or node running the npm package."""
+    for arg in argv[:2]:
+        if os.path.basename(arg) in ("claude", "claude.exe"):
+            return True
+        if "@anthropic-ai/claude-code" in arg:
+            return True
+    return False
+
+
+def ancestors() -> list[int]:
+    """PIDs from our parent upward, stopping before pid 1."""
+    chain = []
+    pid = os.getppid()
+    while pid > 1 and len(chain) < MAX_ANCESTORS:
+        chain.append(pid)
+        pid = parent_pid_of(pid)
+        if pid is None:
+            break
+    return chain
+
+
+def owner_chain() -> list[int]:
+    """Process chain [parent, ..., owning session] to monitor; [] to disable."""
+    try:
+        chain = ancestors()
+    except ProcessInfoUnavailable as e:
+        log(f"cannot inspect processes ({e}); watching only the parent")
+        return [os.getppid()] if os.getppid() > 1 else []
+    if not chain:
+        log("parent is already pid 1; orphan detection disabled")
+        return []
+    try:
+        env_pid = int(os.environ.get("CLAUDE_PID", ""))
+    except ValueError:
+        env_pid = None
+    if env_pid in chain:
+        return chain[: chain.index(env_pid) + 1]
+    for i, pid in enumerate(chain):
+        if looks_like_claude(command_of(pid)):
+            return chain[: i + 1]
+    return chain[:2]
+
+
+def owner_gone(chain: list[int]) -> bool:
+    """True once any parent link recorded in chain no longer holds."""
+    if not chain:
+        return False
+    if os.getppid() != chain[0]:
+        return True
+    try:
+        for child, parent in zip(chain, chain[1:]):
+            if parent_pid_of(child) != parent:
+                return True
+    except ProcessInfoUnavailable:
+        return False
+    return False
+
+
+def start_owner_monitor(agent_id: str, chain: list[int]) -> None:
+    """Exit the whole process once the owning session is gone, even mid-poll."""
+    if not chain:
+        return
+    log(f"watching session pid {chain[-1]} (chain {chain})")
+
+    def run() -> None:
+        while True:
+            sleep(OWNER_CHECK_SECONDS)
+            if owner_gone(chain):
+                log(f"session pid {chain[-1]} is gone; exiting")
+                release_pid_file(agent_id)
+                print(f"C3PO_WATCH_ORPHANED session pid {chain[-1]} is gone; no messages", flush=True)
+                # os._exit: the main thread may be blocked in a long poll.
+                # Closing the socket ends the server-side wait too.
+                os._exit(EXIT_MESSAGES)
+
+    threading.Thread(target=run, name="owner-monitor", daemon=True).start()
 
 
 def claim_pid_file(agent_id: str) -> bool:
@@ -132,14 +276,10 @@ def watch(agent_id: str, poll_timeout: int) -> int:
 
     url = f"{get_coordinator_url()}/agent/api/wait?timeout={poll_timeout}"
     headers["X-Machine-Name"] = agent_id
-    parent_pid = os.getppid()
+    start_owner_monitor(agent_id, owner_chain())
     backoff = 1
 
     while True:
-        if os.getppid() != parent_pid:
-            log("parent process exited; stopping")
-            return EXIT_MESSAGES
-
         try:
             req = urllib.request.Request(url, headers=headers)
             with urlopen_with_ssl(req, timeout=poll_timeout + 30) as resp:
